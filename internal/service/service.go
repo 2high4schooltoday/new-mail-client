@@ -433,12 +433,16 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 		return "", models.User{}, fmt.Errorf("admin email must use @%s", baseDomain)
 	}
 
-	if err := s.ValidatePassword(req.AdminPassword); err != nil {
-		return "", models.User{}, err
-	}
 	if s.usesPAMAuth() {
+		if strings.TrimSpace(req.AdminPassword) == "" {
+			return "", models.User{}, errors.New("admin password is required")
+		}
 		if err := s.verifyMailCredentials(ctx, adminEmail, req.AdminPassword); err != nil {
 			return "", models.User{}, errors.New("admin credentials are not valid for Dovecot/PAM")
+		}
+	} else {
+		if err := s.ValidatePassword(req.AdminPassword); err != nil {
+			return "", models.User{}, err
 		}
 	}
 

@@ -425,12 +425,12 @@ class MailclientTUI:
 
         if self.run_proc is not None and self.run_proc.poll() is not None and self.run_exit_code is None:
             self.run_exit_code = int(self.run_proc.returncode)
-            self._append_log(f"\n[exit] command finished with code {self.run_exit_code}")
+            self._append_log(f"\n[exit] command finished with code {self.run_exit_code}\n")
             if self.run_exit_code != 0:
                 self._append_log(
-                    "Troubleshooting: check earlier error lines, then run the same command manually in shell."
+                    "Troubleshooting: check earlier error lines, then run the same command manually in shell.\n"
                 )
-            self._append_log("Press Enter, Esc, or q to return to the dashboard.")
+            self._append_log("Press Enter, Esc, or q to return to the dashboard.\n")
 
     def _append_log(self, text: str) -> None:
         for ch in text:

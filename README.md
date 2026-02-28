@@ -89,6 +89,11 @@ PAM mode notes:
 - Set `DOVECOT_AUTH_MODE=pam` (installer now prompts and writes this automatically).
 - In PAM mode, web login is validated against IMAP credentials (Dovecot/PAM), not local hash only.
 - Password reset endpoints for users/admin are disabled in PAM mode. Change passwords via system/PAM tooling.
+- In PAM mode, mailbox account creation/provisioning remains external to this app (system/PAM side).
+
+Installer troubleshooting:
+- Installer now prints exact failing line/command on errors.
+- For full trace, run: `bash -x ./scripts/auto_install.sh`
 
 ## Uninstall (safe, interactive)
 Removes only Despatch-managed artifacts and leaves Postfix/Dovecot/other services untouched.

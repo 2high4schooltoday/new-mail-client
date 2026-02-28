@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,6 +12,14 @@ APT_UPDATED=0
 log() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 err() { printf '[ERR ] %s\n' "$*" >&2; }
+
+on_install_error() {
+  local code="$1" line="$2" cmd="$3"
+  err "Installer failed at line ${line}: ${cmd}"
+  err "Run manually for diagnostics: bash -x \"$0\""
+  exit "$code"
+}
+trap 'on_install_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 if [[ $# -ne 0 ]]; then
   err "This installer is interactive and does not accept arguments. Run: ./scripts/auto_install.sh"
