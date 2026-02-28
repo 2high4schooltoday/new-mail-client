@@ -22,6 +22,27 @@ on_install_error() {
 }
 trap 'on_install_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
+run_nonfatal_step() {
+  local label="$1"
+  shift
+  local err_trap rc
+  err_trap="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  if [[ -n "$err_trap" ]]; then
+    eval "$err_trap"
+  else
+    trap - ERR
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    warn "${label} returned non-fatal code ${rc}. Continuing."
+  fi
+  return 0
+}
+
 if [[ $# -ne 0 ]]; then
   err "This installer is interactive and does not accept arguments. Run: ./scripts/auto_install.sh"
   exit 1
@@ -541,11 +562,24 @@ apply_ufw_rules() {
   local mode="$1"
   local rc=0
   if ! have_cmd ufw; then
+    warn "ufw is not installed. Skipping local firewall automation."
     return
   fi
   if ! run_as_root ufw status >/dev/null 2>&1; then
     warn "ufw exists but could not be queried; skipping firewall automation."
     return
+  fi
+  local ufw_state
+  ufw_state="$(run_as_root ufw status 2>/dev/null | head -n1 || true)"
+  if echo "$ufw_state" | grep -qi "inactive"; then
+    warn "ufw is currently inactive. Rules can still be staged, but firewall is not enforcing until enabled."
+    if prompt_yes_no "Enable ufw now? (be careful on remote SSH hosts)" 0; then
+      if ! run_as_root ufw --force enable >/dev/null 2>&1; then
+        warn "Failed to enable ufw. Continuing without enabling."
+      else
+        log "ufw enabled."
+      fi
+    fi
   fi
   if [[ "$mode" == "proxy" ]]; then
     if prompt_yes_no "Open firewall ports 80/tcp and 443/tcp via ufw?" 1; then
@@ -1157,7 +1191,7 @@ fi
 log "Service installed and started: mailclient"
 
 step "Firewall configuration"
-apply_ufw_rules "$DEPLOY_MODE"
+run_nonfatal_step "firewall configuration" apply_ufw_rules "$DEPLOY_MODE"
 print_cloud_firewall_checklist "$DEPLOY_MODE"
 
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
