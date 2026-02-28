@@ -28,6 +28,9 @@ type SQLProvisioner struct {
 }
 
 func NewProvisioner(cfg config.Config) (AuthProvisioner, error) {
+	if strings.EqualFold(strings.TrimSpace(cfg.DovecotAuthMode), "pam") {
+		return NoopProvisioner{}, nil
+	}
 	if strings.TrimSpace(cfg.DovecotAuthDBDriver) == "" || strings.TrimSpace(cfg.DovecotAuthDBDSN) == "" {
 		return NoopProvisioner{}, nil
 	}

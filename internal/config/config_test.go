@@ -19,3 +19,12 @@ func TestLoadPasswordBounds(t *testing.T) {
 		t.Fatalf("expected Load to fail for invalid password bounds")
 	}
 }
+
+func TestLoadRejectsInvalidDovecotAuthMode(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("DOVECOT_AUTH_MODE", "ldap")
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("expected Load to fail for invalid DOVECOT_AUTH_MODE")
+	}
+}

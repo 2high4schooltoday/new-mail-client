@@ -365,6 +365,28 @@ detect_sql_conf_file() {
   printf ''
 }
 
+detect_dovecot_auth_mode() {
+  local out=""
+  if have_cmd doveconf; then
+    out="$(doveconf -n 2>/dev/null || true)"
+    if [[ -z "$out" && ${EUID:-1} -ne 0 ]] && have_cmd sudo; then
+      out="$(sudo -n doveconf -n 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -n "$out" ]] && echo "$out" | grep -Eiq 'driver[[:space:]]*=[[:space:]]*pam'; then
+    printf 'pam'
+    return
+  fi
+
+  if grep -RqsE 'auth-system\.conf\.ext|driver[[:space:]]*=[[:space:]]*pam' /etc/dovecot /usr/local/etc/dovecot 2>/dev/null; then
+    printf 'pam'
+    return
+  fi
+
+  printf 'sql'
+}
+
 detect_imap_port() {
   if port_open 127.0.0.1 993; then
     echo 993
@@ -451,6 +473,7 @@ verify_proxy_access() {
 
 apply_ufw_rules() {
   local mode="$1"
+  local rc=0
   if ! have_cmd ufw; then
     return
   fi
@@ -460,15 +483,29 @@ apply_ufw_rules() {
   fi
   if [[ "$mode" == "proxy" ]]; then
     if prompt_yes_no "Open firewall ports 80/tcp and 443/tcp via ufw?" 1; then
-      run_as_root ufw allow 80/tcp >/dev/null
-      run_as_root ufw allow 443/tcp >/dev/null
-      log "Applied ufw rules: 80/tcp, 443/tcp"
+      if ! run_as_root ufw allow 80/tcp >/dev/null 2>&1; then
+        warn "Failed to apply ufw rule 80/tcp. Continue manually: sudo ufw allow 80/tcp"
+        rc=1
+      fi
+      if ! run_as_root ufw allow 443/tcp >/dev/null 2>&1; then
+        warn "Failed to apply ufw rule 443/tcp. Continue manually: sudo ufw allow 443/tcp"
+        rc=1
+      fi
+      if [[ "$rc" -eq 0 ]]; then
+        log "Applied ufw rules: 80/tcp, 443/tcp"
+      else
+        warn "ufw automation incomplete; installer will continue."
+      fi
     fi
     return
   fi
   if prompt_yes_no "Open firewall port 8080/tcp via ufw for direct access?" 1; then
-    run_as_root ufw allow 8080/tcp >/dev/null
-    log "Applied ufw rule: 8080/tcp"
+    if run_as_root ufw allow 8080/tcp >/dev/null 2>&1; then
+      log "Applied ufw rule: 8080/tcp"
+    else
+      warn "Failed to apply ufw rule 8080/tcp. Continue manually: sudo ufw allow 8080/tcp"
+      warn "ufw automation incomplete; installer will continue."
+    fi
   fi
 }
 
@@ -819,6 +856,12 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
 fi
 
 SQL_CONF="$(detect_sql_conf_file)"
+DOVECOT_AUTH_MODE_DETECTED="$(detect_dovecot_auth_mode)"
+DOVECOT_AUTH_MODE="$(lower "$(prompt_input "Dovecot auth backend mode (pam or sql)" "$DOVECOT_AUTH_MODE_DETECTED")")"
+if [[ "$DOVECOT_AUTH_MODE" != "pam" && "$DOVECOT_AUTH_MODE" != "sql" ]]; then
+  warn "Invalid auth backend mode: $DOVECOT_AUTH_MODE. Falling back to detected mode: $DOVECOT_AUTH_MODE_DETECTED"
+  DOVECOT_AUTH_MODE="$DOVECOT_AUTH_MODE_DETECTED"
+fi
 DOVECOT_DRIVER_RAW=""
 DOVECOT_DRIVER=""
 DOVECOT_CONNECT=""
@@ -831,7 +874,7 @@ DOVECOT_ACTIVE_COL=""
 DOVECOT_MAILDIR_COL=""
 DOVECOT_DSN=""
 
-if [[ -n "$SQL_CONF" ]]; then
+if [[ "$DOVECOT_AUTH_MODE" == "sql" && -n "$SQL_CONF" ]]; then
   DOVECOT_DRIVER_RAW="$(extract_kv_line "$SQL_CONF" driver)"
   DOVECOT_CONNECT="$(extract_kv_line "$SQL_CONF" connect)"
   DOVECOT_PASSWORD_QUERY="$(extract_kv_line "$SQL_CONF" password_query)"
@@ -868,20 +911,28 @@ if [[ -n "$SQL_CONF" ]]; then
   fi
 fi
 
-if [[ -z "$DOVECOT_DRIVER" || -z "$DOVECOT_DSN" ]]; then
-  warn "Could not fully auto-detect Dovecot SQL writable credentials."
-  if prompt_yes_no "Enter Dovecot SQL settings manually now?" 0; then
-    DOVECOT_DRIVER="$(prompt_input "Dovecot auth DB driver (mysql or pgx)" "mysql")"
-    DOVECOT_DRIVER="$(lower "$DOVECOT_DRIVER")"
-    DOVECOT_DSN="$(prompt_input "Dovecot auth DB DSN")"
-    DOVECOT_TABLE="$(prompt_input "Dovecot auth table" "$DOVECOT_TABLE")"
-    DOVECOT_EMAIL_COL="$(prompt_input "Email/login column" "$DOVECOT_EMAIL_COL")"
-    DOVECOT_PASS_COL="$(prompt_input "Password hash column" "$DOVECOT_PASS_COL")"
-    DOVECOT_ACTIVE_COL="$(prompt_input "Active/enabled column (blank if none)" "$DOVECOT_ACTIVE_COL")"
-    DOVECOT_MAILDIR_COL="$(prompt_input "Maildir column (blank if none)" "$DOVECOT_MAILDIR_COL")"
-  else
-    warn "Dovecot SQL provisioning will remain disabled until configured in .env"
+if [[ "$DOVECOT_AUTH_MODE" == "sql" ]]; then
+  if [[ -z "$DOVECOT_DRIVER" || -z "$DOVECOT_DSN" ]]; then
+    warn "Could not fully auto-detect Dovecot SQL writable credentials."
+    if prompt_yes_no "Enter Dovecot SQL settings manually now?" 0; then
+      DOVECOT_DRIVER="$(prompt_input "Dovecot auth DB driver (mysql or pgx)" "mysql")"
+      DOVECOT_DRIVER="$(lower "$DOVECOT_DRIVER")"
+      DOVECOT_DSN="$(prompt_input "Dovecot auth DB DSN")"
+      DOVECOT_TABLE="$(prompt_input "Dovecot auth table" "$DOVECOT_TABLE")"
+      DOVECOT_EMAIL_COL="$(prompt_input "Email/login column" "$DOVECOT_EMAIL_COL")"
+      DOVECOT_PASS_COL="$(prompt_input "Password hash column" "$DOVECOT_PASS_COL")"
+      DOVECOT_ACTIVE_COL="$(prompt_input "Active/enabled column (blank if none)" "$DOVECOT_ACTIVE_COL")"
+      DOVECOT_MAILDIR_COL="$(prompt_input "Maildir column (blank if none)" "$DOVECOT_MAILDIR_COL")"
+    else
+      warn "Dovecot SQL provisioning will remain disabled until configured in .env"
+    fi
   fi
+else
+  DOVECOT_DRIVER=""
+  DOVECOT_DSN=""
+  DOVECOT_ACTIVE_COL=""
+  DOVECOT_MAILDIR_COL=""
+  log "PAM auth mode selected. Dovecot SQL provisioning is disabled."
 fi
 
 IMAP_PORT="$(detect_imap_port)"
@@ -915,6 +966,7 @@ set_env_var "$OUT_ENV" "APP_DB_PATH" "$APP_DB_PATH"
 set_env_var "$OUT_ENV" "SESSION_ENCRYPT_KEY" "$SESSION_KEY"
 set_env_var "$OUT_ENV" "COOKIE_SECURE" "true"
 set_env_var "$OUT_ENV" "DEPLOY_MODE" "$DEPLOY_MODE"
+set_env_var "$OUT_ENV" "DOVECOT_AUTH_MODE" "$DOVECOT_AUTH_MODE"
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
   set_env_var "$OUT_ENV" "TRUST_PROXY" "true"
 fi
@@ -946,6 +998,7 @@ set_env_var "$OUT_ENV" "DOVECOT_AUTH_MAILDIR_COL" "$DOVECOT_MAILDIR_COL"
 log "Generated $OUT_ENV"
 log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
 log "Deployment mode: $DEPLOY_MODE"
+log "Dovecot auth mode: $DOVECOT_AUTH_MODE"
 if [[ -n "$SQL_CONF" ]]; then
   log "Detected Dovecot SQL file: $SQL_CONF"
 fi

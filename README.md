@@ -14,6 +14,9 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 - Real IMAP integration (list/search/read/flags/move).
 - Real SMTP submission with optional STARTTLS/TLS and attachment send.
 - Dovecot auth SQL provisioning adapter (MySQL/Postgres via `database/sql`).
+- Dovecot auth backend modes:
+  - `sql` mode (provisioning via Dovecot SQL table)
+  - `pam` mode (no SQL provisioning; login validated through IMAP/PAM credentials)
 - SQLite app DB with WAL mode and conservative pool sizing for low-resource ARM hosts.
 - Nginx/Apache2 and systemd deployment templates.
 
@@ -65,6 +68,7 @@ Standalone mode (run from any Linux server path):
 
 What it auto-detects:
 - Dovecot SQL config (`dovecot-sql.conf.ext`)
+- Dovecot auth mode hints (`pam` vs `sql`)
 - SQL driver / connect hints / auth table + columns
 - localhost IMAP/SMTP ports and TLS mode hints
 - sensible default domain from host (`/etc/mailname` or FQDN)
@@ -80,6 +84,11 @@ What is intentionally deferred to web UI OOBE:
 - Final first-run setup confirmation
 
 Note: fully custom SQL/auth setups may still need manual `.env` tweaks.
+
+PAM mode notes:
+- Set `DOVECOT_AUTH_MODE=pam` (installer now prompts and writes this automatically).
+- In PAM mode, web login is validated against IMAP credentials (Dovecot/PAM), not local hash only.
+- Password reset endpoints for users/admin are disabled in PAM mode. Change passwords via system/PAM tooling.
 
 ## Uninstall (safe, interactive)
 Removes only Despatch-managed artifacts and leaves Postfix/Dovecot/other services untouched.
@@ -103,6 +112,10 @@ It checks:
 
 ## Dovecot provisioning notes
 Set `DOVECOT_AUTH_DB_DRIVER` and `DOVECOT_AUTH_DB_DSN` to enable automatic writes to your Dovecot auth DB.
+
+Set `DOVECOT_AUTH_MODE`:
+- `sql` (default): app provisions Dovecot auth rows when SQL DSN is configured.
+- `pam`: app skips provisioning and uses IMAP/PAM credentials for login.
 
 Supported drivers:
 - `mysql`

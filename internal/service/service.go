@@ -28,6 +28,7 @@ var (
 	ErrPendingApproval    = errors.New("pending approval")
 	ErrSuspended          = errors.New("account suspended")
 	ErrForbidden          = errors.New("forbidden")
+	ErrPAMPasswordManaged = errors.New("password is managed by PAM; change it in the system account")
 )
 
 var domainRx = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -102,8 +103,14 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 	if err != nil {
 		return "", models.User{}, ErrInvalidCredentials
 	}
-	if !auth.VerifyPassword(u.PasswordHash, password) {
-		return "", models.User{}, ErrInvalidCredentials
+	if s.usesPAMAuth() {
+		if err := s.verifyMailCredentials(ctx, u.Email, password); err != nil {
+			return "", models.User{}, ErrInvalidCredentials
+		}
+	} else {
+		if !auth.VerifyPassword(u.PasswordHash, password) {
+			return "", models.User{}, ErrInvalidCredentials
+		}
 	}
 	switch u.Status {
 	case models.UserPending:
@@ -298,6 +305,9 @@ func (s *Service) RetryProvisionUser(ctx context.Context, adminID, userID string
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
+	if s.usesPAMAuth() {
+		return ErrPAMPasswordManaged
+	}
 	u, err := s.st.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
 	if err != nil {
 		// don't leak existence
@@ -314,6 +324,9 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 }
 
 func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPassword string) error {
+	if s.usesPAMAuth() {
+		return ErrPAMPasswordManaged
+	}
 	if err := s.ValidatePassword(newPassword); err != nil {
 		return err
 	}
@@ -344,6 +357,9 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 }
 
 func (s *Service) AdminResetPassword(ctx context.Context, adminID, userID, newPassword string) error {
+	if s.usesPAMAuth() {
+		return ErrPAMPasswordManaged
+	}
 	if err := s.ValidatePassword(newPassword); err != nil {
 		return err
 	}
@@ -419,6 +435,11 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 
 	if err := s.ValidatePassword(req.AdminPassword); err != nil {
 		return "", models.User{}, err
+	}
+	if s.usesPAMAuth() {
+		if err := s.verifyMailCredentials(ctx, adminEmail, req.AdminPassword); err != nil {
+			return "", models.User{}, errors.New("admin credentials are not valid for Dovecot/PAM")
+		}
 	}
 
 	passwordHash, err := auth.HashPassword(req.AdminPassword)
@@ -520,4 +541,16 @@ func (s *Service) ValidatePassword(pw string) error {
 		return errors.New("password must include at least 3 character classes (lower/upper/number/symbol)")
 	}
 	return nil
+}
+
+func (s *Service) usesPAMAuth() bool {
+	return strings.EqualFold(strings.TrimSpace(s.cfg.DovecotAuthMode), "pam")
+}
+
+func (s *Service) verifyMailCredentials(ctx context.Context, email, password string) error {
+	if strings.TrimSpace(email) == "" || strings.TrimSpace(password) == "" {
+		return ErrInvalidCredentials
+	}
+	_, err := s.mail.ListMailboxes(ctx, email, password)
+	return err
 }

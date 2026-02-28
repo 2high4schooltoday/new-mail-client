@@ -305,7 +305,14 @@ func (h *Handlers) PasswordResetRequest(w http.ResponseWriter, r *http.Request) 
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
-	_ = h.svc.RequestPasswordReset(r.Context(), req.Email)
+	if err := h.svc.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		if errors.Is(err, service.ErrPAMPasswordManaged) {
+			util.WriteError(w, 400, "unsupported_auth_backend", err.Error(), middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
 	util.WriteJSON(w, 200, map[string]string{"status": "accepted"})
 }
 
@@ -322,6 +329,10 @@ func (h *Handlers) PasswordResetConfirm(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := h.svc.ConfirmPasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
+		if errors.Is(err, service.ErrPAMPasswordManaged) {
+			util.WriteError(w, 400, "unsupported_auth_backend", err.Error(), middleware.RequestID(r.Context()))
+			return
+		}
 		util.WriteError(w, 400, "reset_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
@@ -618,6 +629,10 @@ func (h *Handlers) AdminResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.AdminResetPassword(r.Context(), admin.ID, id, req.NewPassword); err != nil {
+		if errors.Is(err, service.ErrPAMPasswordManaged) {
+			util.WriteError(w, 400, "unsupported_auth_backend", err.Error(), middleware.RequestID(r.Context()))
+			return
+		}
 		util.WriteError(w, 400, "reset_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}

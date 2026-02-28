@@ -48,6 +48,7 @@ type Config struct {
 
 	DovecotAuthDBDriver  string
 	DovecotAuthDBDSN     string
+	DovecotAuthMode      string
 	DovecotAuthTable     string
 	DovecotEmailColumn   string
 	DovecotPassColumn    string
@@ -100,6 +101,7 @@ func Load() (Config, error) {
 		SMTPTLS:                  envBool("SMTP_TLS", false),
 		SMTPStartTLS:             envBool("SMTP_STARTTLS", true),
 		SMTPInsecureSkipVerify:   envBool("SMTP_INSECURE_SKIP_VERIFY", false),
+		DovecotAuthMode:          strings.ToLower(env("DOVECOT_AUTH_MODE", "sql")),
 		DovecotAuthDBDriver:      env("DOVECOT_AUTH_DB_DRIVER", ""),
 		DovecotAuthDBDSN:         env("DOVECOT_AUTH_DB_DSN", ""),
 		DovecotAuthTable:         env("DOVECOT_AUTH_TABLE", "users"),
@@ -133,6 +135,14 @@ func Load() (Config, error) {
 	}
 	if cfg.PasswordMaxLength < cfg.PasswordMinLength {
 		return Config{}, fmt.Errorf("password max length must be >= min length")
+	}
+	switch cfg.DovecotAuthMode {
+	case "", "sql", "pam":
+		if cfg.DovecotAuthMode == "" {
+			cfg.DovecotAuthMode = "sql"
+		}
+	default:
+		return Config{}, fmt.Errorf("DOVECOT_AUTH_MODE must be one of: sql, pam")
 	}
 	if strings.TrimSpace(cfg.SessionEncryptKey) == "" ||
 		cfg.SessionEncryptKey == "CHANGE_ME_PRODUCTION_SESSION_KEY" ||
