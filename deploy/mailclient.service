@@ -1,0 +1,23 @@
+[Unit]
+Description=Lightweight Mail Client
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mailclient
+ExecStart=/opt/mailclient/mailclient
+Restart=always
+RestartSec=2
+EnvironmentFile=/opt/mailclient/.env
+User=mailclient
+Group=mailclient
+LimitNOFILE=32768
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+MemoryMax=1200M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

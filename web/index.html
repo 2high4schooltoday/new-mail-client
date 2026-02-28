@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en" data-theme="paper-light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>U.S. Mail Office</title>
+  <meta name="description" content="Lightweight self-hosted web mail client">
+  <link rel="icon" href="data:,">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell page-office" id="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1>U.S. Mail Office</h1>
+        <div class="pal-and-theme">
+          <div class="palette" aria-hidden="true">
+            <span class="c-red"></span><span class="c-green"></span><span class="c-navy"></span><span class="c-cyan"></span>
+            <span class="c-yellow"></span><span class="c-magenta"></span><span class="c-black"></span>
+            <span class="c-g1"></span><span class="c-g2"></span><span class="c-g3"></span><span class="c-g4"></span>
+            <span class="c-g5"></span><span class="c-g6"></span><span class="c-g7"></span><span class="c-olive"></span>
+            <span class="c-teal"></span><span class="c-blue"></span><span class="c-purple"></span><span class="c-violet"></span>
+            <span class="c-crimson"></span><span class="c-rust"></span><span class="c-gold"></span>
+          </div>
+          <button id="btn-theme" class="cmd-btn theme-toggle" type="button" aria-label="Toggle theme">Theme: Paper</button>
+        </div>
+      </div>
+      <nav class="tabs">
+        <button id="tab-setup" class="tab" type="button">Setup</button>
+        <button id="tab-auth" class="tab active" type="button">Login</button>
+        <button id="tab-mail" class="tab" type="button">Mail</button>
+        <button id="tab-compose" class="tab" type="button">Compose</button>
+        <button id="tab-admin" class="tab" type="button">Admin</button>
+        <button id="btn-logout" class="tab" type="button">Logout</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="status-line" class="status-line" aria-live="polite">READY</section>
+      <div class="rule-dot" aria-hidden="true"></div>
+
+      <section id="view-auth" class="card-grid">
+        <article class="panel">
+          <h2>Login</h2>
+          <form id="form-login" class="stack">
+            <label>Email <input name="email" type="email" required autocomplete="username"></label>
+            <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+            <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <h2>Registration</h2>
+          <form id="form-register" class="stack">
+            <label>Email <input name="email" type="email" required></label>
+            <label>Password <input name="password" type="password" required></label>
+            <label>Captcha Token (if enabled)<input name="captcha_token" type="text"></label>
+            <button class="cmd-btn" type="submit">Submit For Approval</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <h2>Password Reset</h2>
+          <form id="form-reset-request" class="stack boxed">
+            <label>Email <input name="email" type="email" required></label>
+            <button class="cmd-btn" type="submit">Request Token</button>
+          </form>
+          <form id="form-reset-confirm" class="stack">
+            <label>Reset Token <input name="token" type="text" required></label>
+            <label>New Password <input name="new_password" type="password" required></label>
+            <button class="cmd-btn" type="submit">Apply New Password</button>
+          </form>
+        </article>
+      </section>
+
+      <section id="view-setup" class="setup-shell hidden page-oobe-assistant">
+        <article class="oobe-window" role="region" aria-label="Setup Assistant">
+          <header class="oobe-chrome">
+            <button id="setup-back-icon" class="oobe-icon-btn" type="button" aria-label="Go to previous step">←</button>
+            <p class="oobe-chrome-title">Mail Office Setup Assistant</p>
+            <button id="setup-close" class="oobe-icon-btn" type="button" aria-label="Cancel setup">×</button>
+          </header>
+
+          <div class="oobe-content">
+            <div class="oobe-step-indicator" aria-label="Setup progress">
+              <span class="oobe-dot active" data-dot="0"></span>
+              <span class="oobe-dot" data-dot="1"></span>
+              <span class="oobe-dot" data-dot="2"></span>
+              <span class="oobe-dot" data-dot="3"></span>
+              <span class="oobe-dot" data-dot="4"></span>
+              <span class="oobe-dot" data-dot="5"></span>
+            </div>
+
+            <div id="setup-step-0" class="oobe-step">
+              <div class="oobe-hero-icon" aria-hidden="true">ENTRY</div>
+              <h2>Welcome</h2>
+              <p>This assistant configures your mail domain, webmaster identity, and first admin credentials. You can complete setup in a few minutes.</p>
+              <p class="hint">All settings remain editable from Admin after initialization.</p>
+            </div>
+
+            <div id="setup-step-1" class="oobe-step hidden">
+              <div class="oobe-hero-icon" aria-hidden="true">REGION</div>
+              <h2>Region And Time Profile</h2>
+              <p>Set your default region for timestamps and policy localization.</p>
+              <label>Region
+                <select id="setup-region">
+                  <option value="us-east">United States - East</option>
+                  <option value="us-central">United States - Central</option>
+                  <option value="us-west">United States - West</option>
+                  <option value="eu-west">Europe - West</option>
+                  <option value="apac">Asia Pacific</option>
+                </select>
+              </label>
+              <p class="hint">Timezone mapping follows the selected region profile.</p>
+            </div>
+
+            <div id="setup-step-2" class="oobe-step hidden">
+              <div class="oobe-hero-icon" aria-hidden="true">DOMAIN</div>
+              <h2>Domain And Admin Identity</h2>
+              <p>This controls registration domain policy and default webmaster address.</p>
+              <label>Mail Domain
+                <input id="setup-domain" type="text" placeholder="example.com" autocomplete="off">
+              </label>
+              <label>Admin Email
+                <input id="setup-admin-email" type="email" autocomplete="email">
+              </label>
+              <p class="hint">Default is <code>webmaster@{domain}</code>; you can override it.</p>
+            </div>
+
+            <div id="setup-step-3" class="oobe-step hidden">
+              <div class="oobe-hero-icon" aria-hidden="true">ADMIN</div>
+              <h2>Create Webmaster Credentials</h2>
+              <p>Choose a strong password for the first administrator account.</p>
+              <label>Password
+                <input id="setup-password" type="password" autocomplete="new-password">
+              </label>
+              <label>Verify Password
+                <input id="setup-password-confirm" type="password" autocomplete="new-password">
+              </label>
+              <p class="hint">Use at least 10 characters. Longer is better.</p>
+            </div>
+
+            <div id="setup-step-4" class="oobe-step hidden">
+              <div class="oobe-hero-icon" aria-hidden="true">REVIEW</div>
+              <h2>Review And Initialize</h2>
+              <div class="oobe-summary-card setup-summary">
+                <div><b>Region:</b> <span id="setup-summary-region">-</span></div>
+                <div><b>Domain:</b> <span id="setup-summary-domain">-</span></div>
+                <div><b>Admin:</b> <span id="setup-summary-email">-</span></div>
+              </div>
+              <p>Initialize writes your baseline settings and signs in as webmaster.</p>
+            </div>
+
+            <div id="setup-step-5" class="oobe-step hidden">
+              <div class="oobe-hero-icon" aria-hidden="true">READY</div>
+              <h2>Setup Complete</h2>
+              <p>Mail Office is ready. You can open mailbox view now, or go straight to admin controls.</p>
+              <div class="actions">
+                <button id="setup-open-mail" class="cmd-btn cmd-btn--primary" type="button">Open Mail</button>
+                <button id="setup-open-admin" class="cmd-btn" type="button">Open Admin</button>
+              </div>
+              <p id="setup-complete-note" class="hint">Auto opening mail in 3 seconds.</p>
+            </div>
+          </div>
+
+          <footer class="oobe-footer">
+            <button id="setup-back" class="cmd-btn" type="button">Back</button>
+            <button id="setup-next" class="cmd-btn cmd-btn--primary" type="button">Continue</button>
+          </footer>
+        </article>
+
+        <div id="setup-modal-overlay" class="oobe-modal hidden" aria-hidden="true">
+          <div class="oobe-modal-card" role="dialog" aria-modal="true" aria-labelledby="setup-modal-title" aria-describedby="setup-modal-body">
+            <h3 id="setup-modal-title">Discard Setup Progress?</h3>
+            <p id="setup-modal-body">If you close setup now, initialization stays incomplete and login remains blocked.</p>
+            <div class="oobe-modal-actions">
+              <button id="setup-modal-cancel" class="cmd-btn" type="button">Keep Editing</button>
+              <button id="setup-modal-confirm" class="cmd-btn cmd-btn--primary" type="button">Discard</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-mail" class="mail-layout hidden">
+        <aside class="panel rail">
+          <h2>Mailboxes</h2>
+          <ul id="mailboxes" class="list"></ul>
+        </aside>
+
+        <section class="panel rail-wide">
+          <h2>Messages</h2>
+          <div class="searchbar">
+            <input id="search-input" type="text" placeholder="Search subject, body, sender">
+            <button id="btn-search" class="cmd-btn" type="button">Search</button>
+          </div>
+          <table class="table data-table">
+            <thead>
+              <tr><th class="kcol">From</th><th class="vcol">Subject</th><th class="num">Date</th></tr>
+            </thead>
+            <tbody id="messages"></tbody>
+          </table>
+        </section>
+
+        <article class="panel rail-wide">
+          <h2>Viewer</h2>
+          <div id="message-meta" class="meta"></div>
+          <pre id="message-body" class="message-body">Select a message.</pre>
+          <div id="attachment-list" class="attachments"></div>
+          <div class="actions">
+            <button id="btn-flag" class="cmd-btn" type="button">Flag</button>
+            <button id="btn-mark-seen" class="cmd-btn" type="button">Mark Seen</button>
+            <button id="btn-trash" class="cmd-btn" type="button">Move To Trash</button>
+          </div>
+        </article>
+      </section>
+
+      <section id="view-compose" class="panel hidden">
+        <h2>Compose</h2>
+        <form id="form-compose" class="stack">
+          <label>To (comma separated)<input name="to" type="text" required></label>
+          <label>Subject<input name="subject" type="text" required></label>
+          <label>Body<textarea name="body" rows="10" required></textarea></label>
+          <label>Attachments<input name="attachments" type="file" multiple></label>
+          <button class="cmd-btn cmd-btn--primary" type="submit">Send</button>
+        </form>
+      </section>
+
+      <section id="view-admin" class="panel hidden">
+        <h2>Admin Console</h2>
+        <div class="admin-grid">
+          <section>
+            <h3>Pending Registrations</h3>
+            <table class="table data-table">
+              <thead><tr><th>Email</th><th class="num">Created</th><th>Status</th><th>Action</th></tr></thead>
+              <tbody id="admin-registrations"></tbody>
+            </table>
+          </section>
+          <section>
+            <h3>Users</h3>
+            <table class="table data-table">
+              <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Action</th></tr></thead>
+              <tbody id="admin-users"></tbody>
+            </table>
+          </section>
+          <section>
+            <h3>Audit Log</h3>
+            <table class="table data-table">
+              <thead><tr><th class="num">When</th><th>Action</th><th>Target</th></tr></thead>
+              <tbody id="admin-audit"></tbody>
+            </table>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
