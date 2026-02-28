@@ -623,7 +623,8 @@ class DespatchTUI:
         if key == curses.KEY_MOUSE:
             self._handle_mouse()
             return
-        if key in ("\t",):
+        key_tab = getattr(curses, "KEY_TAB", None)
+        if key in ("\t", 9) or (isinstance(key_tab, int) and key == key_tab):
             self.focus.next()
             return
         if key == curses.KEY_BTAB:
