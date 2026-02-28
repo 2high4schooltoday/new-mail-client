@@ -76,7 +76,11 @@ lower() {
 prompt_input() {
   local prompt="$1" default="${2:-}" val
   if [[ -n "$default" ]]; then
-    read -r -p "$prompt [$default]: " val
+    if ! read -r -p "$prompt [$default]: " val; then
+      warn "Input stream closed. Using default: $default"
+      printf '%s' "$default"
+      return
+    fi
     if [[ -z "$(trim "$val")" ]]; then
       printf '%s' "$default"
       return
@@ -85,7 +89,10 @@ prompt_input() {
     return
   fi
   while true; do
-    read -r -p "$prompt: " val
+    if ! read -r -p "$prompt: " val; then
+      err "Input stream closed while waiting for: $prompt"
+      exit 1
+    fi
     val="$(trim "$val")"
     if [[ -n "$val" ]]; then
       printf '%s' "$val"
@@ -101,7 +108,11 @@ prompt_yes_no() {
     hint="[Y/n]"
   fi
   while true; do
-    read -r -p "$prompt $hint " ans
+    if ! read -r -p "$prompt $hint " ans; then
+      warn "Input stream closed for prompt '$prompt'."
+      [[ "$default_yes" == "1" ]] && return 0
+      return 1
+    fi
     ans="$(lower "$(trim "$ans")")"
     if [[ -z "$ans" ]]; then
       [[ "$default_yes" == "1" ]] && return 0
@@ -492,6 +503,21 @@ ensure_proxy_tooling() {
       return 1
       ;;
   esac
+}
+
+wait_for_condition() {
+  local label="$1" tries="$2" sleep_sec="$3"
+  shift 3
+  local i
+  for ((i = 1; i <= tries; i++)); do
+    if "$@"; then
+      log "${label}: ok"
+      return 0
+    fi
+    sleep "$sleep_sec"
+  done
+  warn "${label}: still failing after $((tries * sleep_sec))s"
+  return 1
 }
 
 detect_primary_ip() {
@@ -951,28 +977,45 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
           warn "Choose either nginx or apache2."
         done
       fi
-      PROXY_SERVER_NAME="$(prompt_input "Public server name for reverse proxy" "$BASE_DOMAIN")"
-      if prompt_yes_no "Enable TLS in reverse proxy config now (requires existing cert files)?" 0; then
-        PROXY_TLS=1
-        while true; do
-          PROXY_CERT="$(prompt_input "TLS certificate file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/fullchain.pem")"
-          PROXY_KEY="$(prompt_input "TLS private key file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/privkey.pem")"
-          if [[ -f "$PROXY_CERT" && -f "$PROXY_KEY" ]]; then
-            break
-          fi
-          warn "TLS files missing. cert_exists=$( [[ -f "$PROXY_CERT" ]] && echo yes || echo no ), key_exists=$( [[ -f "$PROXY_KEY" ]] && echo yes || echo no )"
-          if ! prompt_yes_no "Re-enter TLS paths?" 1; then
-            warn "Disabling TLS proxy setup for now. You can add TLS later."
-            PROXY_TLS=0
-            PROXY_CERT=""
-            PROXY_KEY=""
-            break
-          fi
-        done
+      if ! ensure_proxy_tooling "$PROXY_SERVER" "$OS_ID"; then
+        warn "Selected reverse proxy prerequisites are not available."
+        if prompt_yes_no "Continue without reverse proxy (direct mode on :8080)?" 1; then
+          PROXY_SETUP=0
+          DEPLOY_MODE="direct"
+          PROXY_SERVER=""
+          PROXY_SERVER_NAME=""
+          PROXY_TLS=0
+          PROXY_CERT=""
+          PROXY_KEY=""
+        else
+          err "Cannot continue with proxy mode without required tooling."
+          exit 1
+        fi
       fi
-      if [[ "$LISTEN_ADDR" == ":8080" ]]; then
-        LISTEN_ADDR="127.0.0.1:8080"
-        log "Adjusted app listen address to ${LISTEN_ADDR} because reverse proxy is enabled."
+      if [[ "$PROXY_SETUP" -eq 1 ]]; then
+        PROXY_SERVER_NAME="$(prompt_input "Public server name for reverse proxy" "$BASE_DOMAIN")"
+        if prompt_yes_no "Enable TLS in reverse proxy config now (requires existing cert files)?" 0; then
+          PROXY_TLS=1
+          while true; do
+            PROXY_CERT="$(prompt_input "TLS certificate file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/fullchain.pem")"
+            PROXY_KEY="$(prompt_input "TLS private key file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/privkey.pem")"
+            if [[ -f "$PROXY_CERT" && -f "$PROXY_KEY" ]]; then
+              break
+            fi
+            warn "TLS files missing. cert_exists=$( [[ -f "$PROXY_CERT" ]] && echo yes || echo no ), key_exists=$( [[ -f "$PROXY_KEY" ]] && echo yes || echo no )"
+            if ! prompt_yes_no "Re-enter TLS paths?" 1; then
+              warn "Disabling TLS proxy setup for now. You can add TLS later."
+              PROXY_TLS=0
+              PROXY_CERT=""
+              PROXY_KEY=""
+              break
+            fi
+          done
+        fi
+        if [[ "$LISTEN_ADDR" == ":8080" ]]; then
+          LISTEN_ADDR="127.0.0.1:8080"
+          log "Adjusted app listen address to ${LISTEN_ADDR} because reverse proxy is enabled."
+        fi
       fi
     fi
   fi
@@ -1211,14 +1254,14 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
   fi
 fi
 
-if ! "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
+if ! wait_for_condition "mailclient service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
   err "mailclient service is not active after install."
   err "Run: systemctl status mailclient --no-pager"
   exit 1
 fi
 
 step "Local service health verification"
-if ! verify_direct_access "$LISTEN_ADDR"; then
+if ! wait_for_condition "local app health endpoint" 20 1 verify_direct_access "$LISTEN_ADDR"; then
   err "Local app health check failed on ${LISTEN_ADDR}."
   err "Run: /opt/mailclient/mailclient (or check /opt/mailclient/.env and service logs)"
   err "Run: journalctl -u mailclient -n 100 --no-pager"
@@ -1227,7 +1270,7 @@ fi
 
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   step "Reverse proxy health verification"
-  if ! verify_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS"; then
+  if ! wait_for_condition "reverse proxy route health" 25 1 verify_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS"; then
     err "Reverse proxy health check failed for ${PROXY_SERVER_NAME}."
     err "Component likely failing: proxy routing or vhost mismatch."
     if [[ "$PROXY_SERVER" == "nginx" ]]; then
