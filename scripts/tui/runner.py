@@ -140,6 +140,8 @@ class OperationRunner:
                     "current": "0",
                     "total": "1",
                     "message": "pending",
+                    "rate_hint": "",
+                    "eta_hint": "",
                 }
             )
 
@@ -191,12 +193,14 @@ class OperationRunner:
                     level = "info"
             if "[non-interactive]" in message:
                 level = "debug"
-            entry = logstore.append(level, active_stage, message)
+            category = self._log_category(active_stage, message)
+            entry = logstore.append(level, active_stage, message, category=category)
             on_event(
                 {
                     "type": "log",
                     "level": entry.level,
                     "stage_id": active_stage,
+                    "category": category,
                     "message": entry.message,
                     "ts": str(entry.ts),
                 }
@@ -232,6 +236,8 @@ class OperationRunner:
                     "current": "1",
                     "total": "1",
                     "message": "done" if exit_code == 0 else "failed",
+                    "rate_hint": "",
+                    "eta_hint": "",
                 }
             )
             on_event(
@@ -388,6 +394,22 @@ class OperationRunner:
             return "run_result=ok received without any stage_result events."
 
         return ""
+
+    @staticmethod
+    def _log_category(stage_id: str, message: str) -> str:
+        stage = (stage_id or "").lower()
+        msg = (message or "").lower()
+        if "proxy" in stage or "nginx" in msg or "apache" in msg:
+            return "proxy"
+        if "firewall" in stage or "ufw" in msg:
+            return "network"
+        if "service" in stage or "systemctl" in msg:
+            return "service"
+        if "auth" in stage or "dovecot" in msg or "pam" in msg or "sql" in msg:
+            return "auth"
+        if "dns" in msg or "port" in msg or "health" in msg:
+            return "network"
+        return "system"
 
     def _verify_install_postchecks(
         self,

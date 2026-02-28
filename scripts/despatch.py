@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Despatch TUI: state-driven installer/uninstaller dashboard (stdlib only)."""
+"""Despatch TUI: widget-driven installer/uninstaller dashboard (stdlib only)."""
 
 from __future__ import annotations
 
 import curses
+import curses.ascii
 import os
 import queue
 import socket
@@ -39,6 +40,11 @@ def _bootstrap_tui_modules() -> None:
         "views.py",
         "keys.py",
         "logstore.py",
+        "theme.py",
+        "focus.py",
+        "widgets.py",
+        "screens.py",
+        "modals.py",
     ]
     for filename in files:
         url = f"{REMOTE_BASE}/{filename}"
@@ -54,8 +60,10 @@ def _bootstrap_tui_modules() -> None:
 
 _bootstrap_tui_modules()
 
+from tui.focus import FocusState
 from tui.keys import is_backspace, is_enter
 from tui.logstore import LogStore
+from tui.modals import ConfirmModal
 from tui.models import (
     DIAG_STAGE_DEFS,
     INSTALL_STAGE_DEFS,
@@ -68,24 +76,65 @@ from tui.models import (
     UninstallSpec,
 )
 from tui.runner import OperationRunner
+from tui.screens import (
+    FIELD_INDEX_INSTALL,
+    FIELD_INDEX_UNINSTALL,
+    INSTALL_FIELDS,
+    INSTALL_STEPS,
+    UNINSTALL_FIELDS,
+    UNINSTALL_STEPS,
+    FieldDef,
+    OperationCard,
+    WizardStep,
+    build_review_lines,
+)
 from tui.state import UIState, apply_runner_event, new_run_state
-from tui.system_ops import CancelToken, detect_arch, detect_host, detect_paths, detect_proxy_candidates, detect_service_state
-from tui.views import clamp, draw_box, progress_bar, safe_addstr, spinner
+from tui.system_ops import (
+    AppPaths,
+    CancelToken,
+    detect_arch,
+    detect_host,
+    detect_paths,
+    detect_proxy_candidates,
+    detect_service_state,
+)
+from tui.theme import Theme
+from tui.views import clamp, draw_box, safe_addstr, spinner
+from tui.widgets import Rect, draw_badge, draw_button, draw_meter, draw_segmented, draw_toggle
+
+
+STAGE_META: dict[str, tuple[str, str]] = {
+    "preflight": ("[P]", "info"),
+    "fetch_source": ("[F]", "info"),
+    "deps": ("[D]", "warning"),
+    "build": ("[B]", "info"),
+    "filesystem_and_user": ("[FS]", "info"),
+    "env_generation": ("[ENV]", "info"),
+    "service_install_start": ("[SVC]", "primary"),
+    "firewall": ("[FW]", "warning"),
+    "proxy": ("[PX]", "warning"),
+    "post_checks": ("[CHK]", "primary"),
+    "final_summary": ("[SUM]", "info"),
+    "backups": ("[BAK]", "info"),
+    "service": ("[SVC]", "warning"),
+    "cleanup": ("[CLN]", "warning"),
+    "summary": ("[SUM]", "info"),
+    "diagnostics": ("[DOC]", "primary"),
+}
 
 
 @dataclass
-class OperationItem:
-    key: str
-    title: str
-    summary: str
-    danger: bool = False
+class EditorState:
+    operation: str
+    step_idx: int = 0
+    row_idx: int = 0
 
 
 class DespatchTUI:
     def __init__(self, stdscr: curses.window) -> None:
         self.stdscr = stdscr
         self.ui = UIState()
-        self.paths = detect_paths()
+        self.paths: AppPaths = detect_paths()
         self.runner = OperationRunner(self.paths)
         self.logstore = LogStore(max_entries=8000)
         self.events: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -95,7 +144,6 @@ class DespatchTUI:
         self.last_result: OperationResult | None = None
         self.last_summary_payload: dict[str, Any] = {}
         self.active_operation: str = ""
-        self.search_query = ""
 
         hostname = detect_host()
         default_domain = hostname if "." in hostname else "example.com"
@@ -107,51 +155,59 @@ class DespatchTUI:
         )
         self.uninstall_spec = UninstallSpec()
 
-        self.operations = [
-            OperationItem("install", "Install / Upgrade Despatch", "Full install with non-interactive staged execution."),
-            OperationItem("uninstall", "Uninstall Despatch", "Safe removal with optional backups.", danger=True),
-            OperationItem("diagnose", "Diagnose Internet Access", "Run connectivity doctor and deployment checks."),
-        ]
-
-        self.install_fields = [
-            ("base_domain", "Base Domain", "text"),
-            ("listen_addr", "Listen Address", "text"),
-            ("install_service", "Install systemd service", "bool"),
-            ("proxy_setup", "Configure reverse proxy", "bool"),
-            ("proxy_server", "Proxy server", "choice", ["nginx", "apache2"]),
-            ("proxy_server_name", "Proxy server name", "text"),
-            ("proxy_tls", "Proxy TLS", "bool"),
-            ("proxy_cert", "TLS cert path", "text"),
-            ("proxy_key", "TLS key path", "text"),
-            ("dovecot_auth_mode", "Dovecot auth mode", "choice", ["pam", "sql"]),
-            ("dovecot_auth_db_driver", "SQL auth driver", "choice", ["", "mysql", "pgx"]),
-            ("dovecot_auth_db_dsn", "SQL auth DSN", "text"),
-            ("ufw_enable", "Enable ufw when inactive", "bool"),
-            ("ufw_open_proxy_ports", "Open 80/443 in ufw", "bool"),
-            ("ufw_open_direct_port", "Open 8080 in ufw", "bool"),
-            ("run_diagnose", "Run diagnose at end", "bool"),
-            ("auto_install_deps", "Auto-install missing deps", "bool"),
-        ]
-        self.uninstall_fields = [
-            ("backup_env", "Backup /opt/mailclient/.env", "bool"),
-            ("backup_data", "Backup /var/lib/mailclient", "bool"),
-            ("remove_app_files", "Remove /opt/mailclient", "bool"),
-            ("remove_app_data", "Remove /var/lib/mailclient", "bool"),
-            ("remove_system_user", "Remove system user", "bool"),
-            ("remove_nginx_site", "Remove Nginx site", "bool"),
-            ("remove_apache_site", "Remove Apache2 site", "bool"),
-            ("remove_checkout", "Remove /opt/mailclient-installer", "bool"),
-        ]
+        self.mode = "home"
+        self.selected_operation = 0
+        self.editor: EditorState | None = None
+        self.focus = FocusState()
+        self.theme = Theme(has_color=False)
+        self.mouse_targets: list[Rect] = []
+        self.log_category_mask: set[str] = {"system", "network", "proxy", "service", "auth"}
+        self.log_level_order = ["debug", "info", "warn", "error"]
         self.ui.status_line = f"Ready. Log file: {self.logstore.log_path}"
+        self.running = True
+
+        self.cards = [
+            OperationCard(
+                "install",
+                "Install / Upgrade",
+                "Install Despatch with staged verification and post-checks.",
+                "LOW",
+                "Requires root or sudo credentials.",
+            ),
+            OperationCard(
+                "uninstall",
+                "Uninstall",
+                "Safe removal with controlled backup and cleanup toggles.",
+                "HIGH",
+                "Review destructive cleanup toggles before run.",
+                danger=True,
+            ),
+            OperationCard(
+                "diagnose",
+                "Diagnose",
+                "Run deployment/access diagnostics and collect findings.",
+                "LOW",
+                "No destructive system changes.",
+            ),
+            OperationCard(
+                "status",
+                "Status",
+                "Inspect service state and environment quickly.",
+                "LOW",
+                "Read-only status dashboard.",
+            ),
+        ]
 
     def run(self) -> None:
         curses.curs_set(0)
         self.stdscr.nodelay(False)
         self.stdscr.timeout(120)
         self.stdscr.keypad(True)
-        self._init_colors()
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        os.environ.setdefault("ESCDELAY", "25")
+        self.theme = Theme.init()
 
-        while True:
+        while self.running:
             self._drain_events()
             self._draw()
             self.ui.spinner_tick += 1
@@ -159,104 +215,240 @@ class DespatchTUI:
                 key = self.stdscr.get_wch()
             except curses.error:
                 key = None
-
             if key is None:
                 continue
-            if self._handle_key(key):
-                break
-
-    def _init_colors(self) -> None:
-        self.has_color = curses.has_colors()
-        if not self.has_color:
-            return
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)
-        curses.init_pair(3, curses.COLOR_RED, -1)
-        curses.init_pair(4, curses.COLOR_GREEN, -1)
-        curses.init_pair(5, curses.COLOR_CYAN, -1)
-        curses.init_pair(6, curses.COLOR_MAGENTA, -1)
-
-    def _status_badge(self) -> str:
-        service = detect_service_state()
-        return f"service:{service} host:{detect_host()} arch:{detect_arch()}"
+            self._handle_key(key)
 
     def _draw(self) -> None:
         self.stdscr.erase()
+        self.mouse_targets = []
         h, w = self.stdscr.getmaxyx()
-
-        if h < 20 or w < 90:
-            safe_addstr(self.stdscr, 0, 0, "Terminal too small. Resize to at least 90x20.")
+        if h < 24 or w < 96:
+            safe_addstr(self.stdscr, 0, 0, "Terminal too small. Resize to at least 96x24.", self.theme.attrs.error)
             self.stdscr.refresh()
             return
-
-        safe_addstr(self.stdscr, 0, 2, "DESPATCH TUI :: INSTALL / UNINSTALL / DIAGNOSE", curses.A_BOLD)
-        safe_addstr(self.stdscr, 1, 2, self._status_badge())
-        safe_addstr(self.stdscr, 2, 2, f"Mode: {self.ui.mode}")
-
+        self._draw_header(w)
         body_y = 3
         body_h = h - 7
-        body_w = w
 
-        if self.ui.mode == "catalog":
-            self._draw_catalog(body_y, body_h, body_w)
-        elif self.ui.mode == "install_form":
-            self._draw_form(body_y, body_h, body_w, "Install Spec", self.install_fields, self.install_spec)
-        elif self.ui.mode == "uninstall_form":
-            self._draw_form(body_y, body_h, body_w, "Uninstall Spec", self.uninstall_fields, self.uninstall_spec)
-        elif self.ui.mode == "run":
-            self._draw_run_dashboard(body_y, body_h, body_w)
+        if self.mode == "home":
+            self._draw_home(body_y, body_h, w)
+        elif self.mode in {"install_editor", "uninstall_editor"}:
+            self._draw_editor(body_y, body_h, w)
+        elif self.mode == "run":
+            self._draw_run_dashboard(body_y, body_h, w)
+        elif self.mode == "status":
+            self._draw_status(body_y, body_h, w)
 
         self._draw_footer(h - 3, w)
         self.stdscr.refresh()
 
-    def _draw_catalog(self, y: int, h: int, w: int) -> None:
-        left_w = max(30, int(w * 0.38))
+    def _draw_header(self, w: int) -> None:
+        safe_addstr(self.stdscr, 0, 2, "DESPATCH :: CONTROL PANEL", self.theme.attrs.heading)
+        badge = f"service:{detect_service_state()} host:{detect_host()} arch:{detect_arch()}"
+        safe_addstr(self.stdscr, 1, 2, badge, self.theme.attrs.info)
+        draw_badge(self.stdscr, self.theme, 1, max(2, w - 24), self.mode.replace("_", " ").upper(), "primary")
+
+    def _draw_footer(self, y: int, w: int) -> None:
+        draw_box(self.stdscr, y, 0, 3, w, " ACTIONS ", self.theme.attrs.panel)
+        if self.mode == "home":
+            keys = "Tab focus | Enter/Space activate | Arrows navigate | q quit"
+        elif self.mode in {"install_editor", "uninstall_editor"}:
+            keys = "Tab focus | Arrows move/select | Enter edit/toggle | Esc back | F5 run"
+        elif self.mode == "run":
+            keys = "F5 rerun | F9 diagnose | / search logs | PgUp/PgDn scroll | Tab focus"
+        else:
+            keys = "Tab focus | Enter activate | Esc back"
+        safe_addstr(self.stdscr, y + 1, 2, keys, self.theme.attrs.muted)
+        safe_addstr(self.stdscr, y + 1, max(2, w - min(70, w - 4)), self.ui.status_line[: max(0, w - 6)], self.theme.attrs.muted)
+
+    def _draw_home(self, y: int, h: int, w: int) -> None:
+        left_w = max(36, int(w * 0.42))
         right_w = w - left_w
+        draw_box(self.stdscr, y, 0, h, left_w, " HOME :: OPERATIONS ", self.theme.attrs.panel)
+        draw_box(self.stdscr, y, left_w, h, right_w, " DETAILS ", self.theme.attrs.panel)
 
-        draw_box(self.stdscr, y, 0, h, left_w, " OPERATIONS ")
-        draw_box(self.stdscr, y, left_w, h, right_w, " DETAILS ")
+        items: list[str] = []
+        row = y + 2
+        for idx, card in enumerate(self.cards):
+            fid = f"home:op:{idx}"
+            items.append(fid)
+            focused = self.focus.current == fid
+            selected = idx == self.selected_operation
+            attr = self.theme.attrs.focus if focused else (self.theme.attrs.primary if selected else 0)
+            safe_addstr(self.stdscr, row, 2, f"{card.title}", attr)
+            risk_kind = "error" if card.risk == "HIGH" else "warning" if card.risk == "MEDIUM" else "info"
+            draw_badge(self.stdscr, self.theme, row, max(2, left_w - 12), card.risk, risk_kind)
+            row += 2
+            self.mouse_targets.append(Rect(row - 2, 2, 1, left_w - 4, fid))
 
-        for idx, op in enumerate(self.operations):
-            row = y + 2 + idx
-            if row >= y + h - 1:
-                break
-            marker = ">" if idx == self.ui.selected_operation else " "
-            danger = " [danger]" if op.danger else ""
-            attr = curses.A_REVERSE if idx == self.ui.selected_operation else 0
-            safe_addstr(self.stdscr, row, 2, f"{marker} {op.title}{danger}", attr)
+        selected = self.cards[self.selected_operation]
+        safe_addstr(self.stdscr, y + 2, left_w + 2, selected.title, self.theme.attrs.heading)
+        safe_addstr(self.stdscr, y + 4, left_w + 2, selected.summary, self.theme.attrs.info)
+        safe_addstr(self.stdscr, y + 6, left_w + 2, "Prerequisites:", self.theme.attrs.heading)
+        safe_addstr(self.stdscr, y + 7, left_w + 2, selected.prerequisites, self.theme.attrs.panel)
+        safe_addstr(self.stdscr, y + 9, left_w + 2, "Flow is button-driven: no y/n prompts in this UI.", self.theme.attrs.muted)
 
-        sel = self.operations[self.ui.selected_operation]
-        safe_addstr(self.stdscr, y + 2, left_w + 2, f"Action: {sel.title}", curses.A_BOLD)
-        safe_addstr(self.stdscr, y + 4, left_w + 2, sel.summary)
-        safe_addstr(self.stdscr, y + 6, left_w + 2, "Press Enter to configure/run.")
-        safe_addstr(self.stdscr, y + 7, left_w + 2, "Use j/k or arrows to select operation.")
+        btn_y = y + h - 3
+        for idx, (label, action, primary, danger) in enumerate(
+            [
+                ("Configure", "home:btn:configure", False, False),
+                ("Run", "home:btn:run", True, selected.danger),
+                ("Quit", "home:btn:quit", False, False),
+            ]
+        ):
+            fid = action
+            items.append(fid)
+            focused = self.focus.current == fid
+            rect = draw_button(
+                self.stdscr,
+                self.theme,
+                btn_y,
+                2 + idx * 16,
+                label,
+                focused=focused,
+                primary=primary,
+                danger=danger,
+                action=action,
+            )
+            self.mouse_targets.append(rect)
 
-    def _draw_form(self, y: int, h: int, w: int, title: str, fields: list[tuple], obj: Any) -> None:
-        draw_box(self.stdscr, y, 0, h, w, f" {title} ")
-        max_rows = h - 5
-        start = clamp(self.ui.selected_field - max_rows + 1, 0, max(0, len(fields) - max_rows))
+        self.focus.set_items(items, preferred=f"home:op:{self.selected_operation}")
 
-        for i in range(start, min(len(fields), start + max_rows)):
-            f = fields[i]
-            name = f[0]
-            label = f[1]
-            ftype = f[2]
-            value = getattr(obj, name)
-            if isinstance(value, bool):
-                value_text = "yes" if value else "no"
-            else:
-                value_text = str(value)
-            attr = curses.A_REVERSE if i == self.ui.selected_field else 0
-            safe_addstr(self.stdscr, y + 2 + (i - start), 2, f"{label:<30} {value_text}", attr)
+    def _draw_editor(self, y: int, h: int, w: int) -> None:
+        if self.editor is None:
+            return
+        install_mode = self.editor.operation == "install"
+        spec: Any = self.install_spec if install_mode else self.uninstall_spec
+        steps: tuple[WizardStep, ...] = INSTALL_STEPS if install_mode else UNINSTALL_STEPS
+        fields_index: dict[str, FieldDef] = FIELD_INDEX_INSTALL if install_mode else FIELD_INDEX_UNINSTALL
+        all_fields: tuple[FieldDef, ...] = INSTALL_FIELDS if install_mode else UNINSTALL_FIELDS
 
-        if self.ui.mode == "install_form":
+        draw_box(self.stdscr, y, 0, h, w, f" {'INSTALL' if install_mode else 'UNINSTALL'} :: SPEC EDITOR ", self.theme.attrs.panel)
+        tab_y = y + 1
+        col = 2
+        items: list[str] = []
+        for idx, step in enumerate(steps):
+            fid = f"editor:tab:{idx}"
+            items.append(fid)
+            focused = self.focus.current == fid
+            rect = draw_button(
+                self.stdscr,
+                self.theme,
+                tab_y,
+                col,
+                step.title,
+                focused=focused,
+                primary=idx == self.editor.step_idx,
+                action=fid,
+            )
+            self.mouse_targets.append(rect)
+            col += rect.w + 1
+
+        content_y = y + 3
+        content_h = h - 8
+        draw_box(self.stdscr, content_y, 1, content_h, w - 2, f" STEP :: {steps[self.editor.step_idx].title} ", self.theme.attrs.panel)
+
+        step = steps[self.editor.step_idx]
+        if step.key == "review":
+            review_lines = build_review_lines(spec, all_fields)
+            for idx, line in enumerate(review_lines[: max(0, content_h - 3)]):
+                safe_addstr(self.stdscr, content_y + 1 + idx, 3, line, self.theme.attrs.panel)
+            if install_mode:
+                errors = self.install_spec.validate()
+                if errors:
+                    safe_addstr(self.stdscr, content_y + content_h - 2, 3, f"Validation: {errors[0]}", self.theme.attrs.error)
+                else:
+                    safe_addstr(self.stdscr, content_y + content_h - 2, 3, "Validation: OK", self.theme.attrs.success)
+        else:
+            row = content_y + 1
+            fields = [fields_index[name] for name in step.fields if name in fields_index]
+            self.editor.row_idx = clamp(self.editor.row_idx, 0, max(0, len(fields) - 1))
+            for idx, field in enumerate(fields):
+                fid = f"editor:field:{field.name}"
+                items.append(fid)
+                focused = self.focus.current == fid
+                label_attr = self.theme.attrs.focus if focused else self.theme.attrs.heading
+                safe_addstr(self.stdscr, row, 3, f"{field.label}", label_attr)
+                value = getattr(spec, field.name)
+                if field.ftype == "bool":
+                    rect = draw_toggle(
+                        self.stdscr,
+                        self.theme,
+                        row,
+                        40,
+                        bool(value),
+                        focused=focused,
+                        action=fid,
+                    )
+                    self.mouse_targets.append(rect)
+                elif field.ftype == "choice":
+                    options = list(field.options)
+                    selected_idx = options.index(str(value)) if str(value) in options else 0
+                    focus_idx = selected_idx if focused else -1
+                    rects = draw_segmented(
+                        self.stdscr,
+                        self.theme,
+                        row,
+                        40,
+                        options,
+                        selected_idx,
+                        focus_idx,
+                        f"editor:choice:{field.name}",
+                    )
+                    self.mouse_targets.extend(rects)
+                else:
+                    shown = str(value) or "(empty)"
+                    shown = shown[: max(8, w - 58)]
+                    safe_addstr(self.stdscr, row, 40, shown, self.theme.attrs.panel)
+                    rect = draw_button(
+                        self.stdscr,
+                        self.theme,
+                        row,
+                        max(42, w - 14),
+                        "Edit",
+                        focused=focused,
+                        action=fid,
+                    )
+                    self.mouse_targets.append(rect)
+                if field.help_text:
+                    safe_addstr(self.stdscr, row + 1, 5, field.help_text[: max(0, w - 12)], self.theme.attrs.muted)
+                    row += 1
+                row += 1
+
+        btn_y = y + h - 3
+        btns = [
+            ("Back", "editor:btn:back", False, False),
+            ("Next", "editor:btn:next", False, False),
+            ("Run", "editor:btn:run", True, not install_mode),
+        ]
+        if self.editor.step_idx >= len(steps) - 1:
+            btns[1] = ("Prev", "editor:btn:prev", False, False)
+        for idx, (label, action, primary, danger) in enumerate(btns):
+            fid = action
+            items.append(fid)
+            rect = draw_button(
+                self.stdscr,
+                self.theme,
+                btn_y,
+                3 + idx * 16,
+                label,
+                focused=self.focus.current == fid,
+                primary=primary,
+                danger=danger,
+                action=action,
+            )
+            self.mouse_targets.append(rect)
+
+        if install_mode:
             errors = self.install_spec.validate()
             if errors:
-                safe_addstr(self.stdscr, y + h - 3, 2, f"Validation: {errors[0]}", curses.color_pair(3) | curses.A_BOLD)
+                safe_addstr(self.stdscr, btn_y, 52, f"Install blocked: {errors[0]}", self.theme.attrs.error)
             else:
-                safe_addstr(self.stdscr, y + h - 3, 2, "Validation: OK", curses.color_pair(4) | curses.A_BOLD)
+                safe_addstr(self.stdscr, btn_y, 52, "Install spec valid.", self.theme.attrs.success)
+
+        preferred = f"editor:tab:{self.editor.step_idx}" if self.focus.current == "" else None
+        self.focus.set_items(items, preferred=preferred)
 
     def _draw_run_dashboard(self, y: int, h: int, w: int) -> None:
         run = self.run_state
@@ -265,197 +457,501 @@ class DespatchTUI:
             safe_addstr(self.stdscr, y + 2, 2, "No active run.")
             return
 
-        top_h = max(9, int(h * 0.42))
-        bottom_h = h - top_h
-        left_w = max(42, int(w * 0.45))
+        left_w = max(38, int(w * 0.40))
         right_w = w - left_w
+        top_h = max(11, int(h * 0.42))
+        bottom_h = h - top_h
 
-        draw_box(self.stdscr, y, 0, top_h, left_w, " STAGES ")
-        draw_box(self.stdscr, y, left_w, top_h, right_w, " RUN STATUS ")
-        draw_box(self.stdscr, y + top_h, 0, bottom_h, w, " LIVE LOG ")
+        draw_box(self.stdscr, y, 0, top_h, left_w, " STAGE TIMELINE ", self.theme.attrs.panel)
+        draw_box(self.stdscr, y, left_w, top_h, right_w, " RUN CONTEXT ", self.theme.attrs.panel)
+        draw_box(self.stdscr, y + top_h, 0, bottom_h, w, " LIVE LOG ", self.theme.attrs.panel)
 
-        ratio = run.overall_progress
-        safe_addstr(self.stdscr, y + 1, left_w + 2, f"Run ID: {run.run_id}")
-        safe_addstr(self.stdscr, y + 2, left_w + 2, f"Operation: {run.operation}")
-        safe_addstr(self.stdscr, y + 3, left_w + 2, f"Status: {run.status}")
-        safe_addstr(self.stdscr, y + 4, left_w + 2, f"Progress: {progress_bar(max(20, right_w - 8), ratio)} {int(ratio * 100):3d}%")
-        if run.status == "running":
-            safe_addstr(self.stdscr, y + 5, left_w + 2, f"Active: {spinner(self.ui.spinner_tick)} {run.active_stage_id}")
-        elif run.failed_stage:
-            safe_addstr(self.stdscr, y + 5, left_w + 2, f"Failed stage: {run.failed_stage}", curses.color_pair(3) | curses.A_BOLD)
-        if run.status == "failed" and self.last_result:
-            self._draw_failure_inspector(y + 6, left_w + 2, top_h - 7, right_w - 4)
-
-        rows = top_h - 3
-        for idx, stage_id in enumerate(run.stage_order[:rows]):
+        row = y + 1
+        viewport = top_h - 2
+        for stage_id in run.stage_order[:viewport]:
             stage = run.stages[stage_id]
+            icon, kind = STAGE_META.get(stage_id, ("[ ]", "info"))
             if stage.status == "ok":
-                icon = "[+]"
-                attr = curses.color_pair(4)
+                status_text = "[+]"
+                attr = self.theme.attrs.success
             elif stage.status == "failed":
-                icon = "[!]"
-                attr = curses.color_pair(3)
+                status_text = "[!]"
+                attr = self.theme.attrs.error
             elif stage.status == "running":
-                icon = f"[{spinner(self.ui.spinner_tick)}]"
-                attr = curses.color_pair(5)
+                status_text = f"[{spinner(self.ui.spinner_tick)}]"
+                attr = self.theme.attrs.primary
+            elif stage.status == "skipped":
+                status_text = "[-]"
+                attr = self.theme.attrs.muted
             else:
-                icon = "[ ]"
-                attr = 0
-            message = f"{icon} {stage.title}"
-            if stage.status == "running" and stage.message:
-                message += f" - {stage.message}"
-            safe_addstr(self.stdscr, y + 1 + idx, 2, message, attr)
+                status_text = "[ ]"
+                attr = self.theme.attrs.muted
+            safe_addstr(self.stdscr, row, 2, f"{icon} {status_text} {stage.title}", attr)
+            row += 1
 
-        filtered = self.logstore.filtered(self.ui.log_level_mask, self.ui.log_search)
-        viewport = bottom_h - 2
+        overall = run.overall_progress
+        draw_meter(self.stdscr, self.theme, y + 1, left_w + 2, right_w - 4, overall, "Overall")
+        active = run.stages.get(run.active_stage_id, None) if run.active_stage_id else None
+        stage_ratio = 0.0
+        if active and active.total > 0:
+            stage_ratio = min(1.0, max(0.0, active.current / active.total))
+        draw_meter(self.stdscr, self.theme, y + 2, left_w + 2, right_w - 4, stage_ratio, "Stage  ")
+        safe_addstr(self.stdscr, y + 4, left_w + 2, f"Run ID: {run.run_id}", self.theme.attrs.panel)
+        safe_addstr(self.stdscr, y + 5, left_w + 2, f"Status: {run.status}", self.theme.attrs.heading)
+        safe_addstr(self.stdscr, y + 6, left_w + 2, f"Active stage: {run.active_stage_id or '-'}", self.theme.attrs.info)
+        if active:
+            safe_addstr(self.stdscr, y + 7, left_w + 2, f"Message: {active.message or '(working)'}", self.theme.attrs.muted)
+            if active.rate_hint:
+                safe_addstr(self.stdscr, y + 8, left_w + 2, f"Rate: {active.rate_hint}", self.theme.attrs.muted)
+            if active.eta_hint:
+                safe_addstr(self.stdscr, y + 9, left_w + 2, f"ETA: {active.eta_hint}", self.theme.attrs.muted)
+        if run.status == "failed" and self.last_result:
+            self._draw_failure_inspector(y + 10, left_w + 2, right_w - 4)
+
+        items: list[str] = []
+        log_header_y = y + top_h + 1
+        safe_addstr(self.stdscr, log_header_y, 2, "Levels:", self.theme.attrs.heading)
+        x = 10
+        for level in self.log_level_order:
+            fid = f"run:level:{level}"
+            items.append(fid)
+            enabled = level in self.ui.log_level_mask
+            rect = draw_toggle(self.stdscr, self.theme, log_header_y, x, enabled, focused=self.focus.current == fid, action=fid)
+            self.mouse_targets.append(rect)
+            safe_addstr(self.stdscr, log_header_y, x + 2, level.upper(), self.theme.attrs.panel)
+            x += rect.w + 1
+
+        safe_addstr(self.stdscr, log_header_y + 1, 2, "Categories:", self.theme.attrs.heading)
+        x = 14
+        for cat in ["system", "network", "proxy", "service", "auth"]:
+            fid = f"run:cat:{cat}"
+            items.append(fid)
+            enabled = cat in self.log_category_mask
+            rect = draw_toggle(self.stdscr, self.theme, log_header_y + 1, x, enabled, focused=self.focus.current == fid, action=fid)
+            self.mouse_targets.append(rect)
+            safe_addstr(self.stdscr, log_header_y + 1, x + 2, cat, self.theme.attrs.panel)
+            x += rect.w + 1
+
+        filtered = self.logstore.filtered(self.ui.log_level_mask, self.ui.log_search, self.log_category_mask)
+        viewport = bottom_h - 6
         max_scroll = max(0, len(filtered) - viewport)
         self.ui.run_scroll = clamp(self.ui.run_scroll, 0, max_scroll)
         start = max(0, len(filtered) - viewport - self.ui.run_scroll)
         slice_entries = filtered[start : start + viewport]
         for idx, entry in enumerate(slice_entries):
-            attr = 0
+            attr = self.theme.attrs.panel
             if entry.level == "warn":
-                attr = curses.color_pair(2)
+                attr = self.theme.attrs.warning
             elif entry.level == "error":
-                attr = curses.color_pair(3)
+                attr = self.theme.attrs.error
             elif entry.level == "debug":
-                attr = curses.color_pair(6)
-            safe_addstr(self.stdscr, y + top_h + 1 + idx, 2, entry.format_line(), attr)
+                attr = self.theme.attrs.muted
+            safe_addstr(self.stdscr, log_header_y + 2 + idx, 2, entry.format_line(), attr)
 
-    def _draw_failure_inspector(self, y: int, x: int, h: int, w: int) -> None:
-        if h < 3 or w < 20 or not self.last_result:
+        btn_row = y + h - 3
+        for idx, (label, action, primary) in enumerate(
+            [
+                ("Retry", "run:btn:retry", False),
+                ("Diagnose", "run:btn:diagnose", False),
+                ("Export", "run:btn:export", False),
+                ("Back", "run:btn:back", False),
+            ]
+        ):
+            fid = action
+            items.append(fid)
+            disabled = bool(self.run_thread and self.run_thread.is_alive() and action in {"run:btn:retry", "run:btn:back"})
+            rect = draw_button(
+                self.stdscr,
+                self.theme,
+                btn_row,
+                2 + idx * 15,
+                label,
+                focused=self.focus.current == fid,
+                primary=primary,
+                disabled=disabled,
+                action=action,
+            )
+            self.mouse_targets.append(rect)
+
+        if self.ui.log_search:
+            safe_addstr(self.stdscr, btn_row, 64, f"Search: {self.ui.log_search}", self.theme.attrs.muted)
+        self.focus.set_items(items, preferred=self.focus.current or "run:btn:retry")
+
+    def _draw_failure_inspector(self, y: int, x: int, w: int) -> None:
+        if not self.last_result or not self.last_result.errors:
             return
-        errors = self.last_result.errors
-        if not errors:
-            safe_addstr(self.stdscr, y, x, "Failure inspector: no detailed errors.")
-            return
-        primary = errors[0]
-        category = self._failure_category(errors)
-        safe_addstr(self.stdscr, y, x, f"Failure Inspector [{category}]", curses.A_BOLD)
-        safe_addstr(self.stdscr, y + 1, x, f"{primary.code}: {primary.message}"[:w], curses.color_pair(3))
+        primary = self.last_result.errors[0]
+        safe_addstr(self.stdscr, y, x, f"Failure: {primary.code}", self.theme.attrs.error)
+        safe_addstr(self.stdscr, y + 1, x, primary.message[:w], self.theme.attrs.error)
         if primary.suggested_fix:
-            safe_addstr(self.stdscr, y + 2, x, f"Fix: {primary.suggested_fix}"[:w], curses.A_DIM)
-        for idx, action in enumerate(self.last_result.next_actions[: max(0, h - 4)]):
-            safe_addstr(self.stdscr, y + 3 + idx, x, f"- {action}"[:w], curses.A_DIM)
+            safe_addstr(self.stdscr, y + 2, x, f"Fix: {primary.suggested_fix}"[:w], self.theme.attrs.muted)
+        for idx, action in enumerate(self.last_result.next_actions[:2]):
+            safe_addstr(self.stdscr, y + 3 + idx, x, f"- {action}"[:w], self.theme.attrs.muted)
 
-    def _draw_footer(self, y: int, w: int) -> None:
-        draw_box(self.stdscr, y, 0, 3, w, " KEYS ")
-        if self.ui.mode == "catalog":
-            keys = "j/k move | enter open | q quit"
-        elif self.ui.mode in {"install_form", "uninstall_form"}:
-            keys = "j/k move | enter edit | r run | b back | editor: enter save / esc cancel / ctrl+u clear"
-        else:
-            keys = "x cancel | r rerun | d diagnose | l levels | / search logs | g/G scroll | e export | b back"
-        safe_addstr(self.stdscr, y + 1, 2, keys)
-        safe_addstr(self.stdscr, y + 1, max(2, w - min(65, w - 4)), self.ui.status_line[: max(0, w - 6)], curses.A_DIM)
+    def _draw_status(self, y: int, h: int, w: int) -> None:
+        draw_box(self.stdscr, y, 0, h, w, " STATUS ", self.theme.attrs.panel)
+        service = detect_service_state()
+        safe_addstr(self.stdscr, y + 2, 2, f"mailclient service: {service}", self.theme.attrs.heading)
+        safe_addstr(self.stdscr, y + 4, 2, f"Host: {detect_host()}", self.theme.attrs.panel)
+        safe_addstr(self.stdscr, y + 5, 2, f"Arch: {detect_arch()}", self.theme.attrs.panel)
+        safe_addstr(self.stdscr, y + 7, 2, f"Runner logs: {self.logstore.log_path}", self.theme.attrs.muted)
+        safe_addstr(self.stdscr, y + 8, 2, "Use Diagnose for full network/proxy checks.", self.theme.attrs.muted)
+        items = ["status:btn:diagnose", "status:btn:back"]
+        r1 = draw_button(
+            self.stdscr,
+            self.theme,
+            y + h - 3,
+            2,
+            "Diagnose",
+            focused=self.focus.current == "status:btn:diagnose",
+            action="status:btn:diagnose",
+        )
+        r2 = draw_button(
+            self.stdscr,
+            self.theme,
+            y + h - 3,
+            18,
+            "Back",
+            focused=self.focus.current == "status:btn:back",
+            action="status:btn:back",
+        )
+        self.mouse_targets.extend([r1, r2])
+        self.focus.set_items(items, preferred=self.focus.current or "status:btn:diagnose")
 
-    def _handle_key(self, key: object) -> bool:
-        if key in ("q", "Q") and self.ui.mode == "catalog":
-            return True
+    def _handle_key(self, key: object) -> None:
+        if key == curses.KEY_MOUSE:
+            self._handle_mouse()
+            return
+        if key in ("\t",):
+            self.focus.next()
+            return
+        if key == curses.KEY_BTAB:
+            self.focus.prev()
+            return
+        if key in ("q", "Q") and self.mode == "home":
+            self.running = False
+            return
+        if key == curses.KEY_F5 and self.mode in {"run", "install_editor", "uninstall_editor"}:
+            self._rerun_current_operation()
+            return
+        if key == curses.KEY_F9:
+            self._start_run("diagnose")
+            return
+        if key in ("/",) and self.mode == "run":
+            query = self._prompt_line("Log search", self.ui.log_search)
+            if query is not None:
+                self.ui.log_search = query
+                self.ui.status_line = f"Log search set: {query or '(none)'}"
+            return
+        if key == curses.KEY_NPAGE and self.mode == "run":
+            self.ui.run_scroll = max(0, self.ui.run_scroll - 10)
+            return
+        if key == curses.KEY_PPAGE and self.mode == "run":
+            self.ui.run_scroll += 10
+            return
+        if key in (curses.KEY_UP, "k"):
+            self._handle_vertical(-1)
+            return
+        if key in (curses.KEY_DOWN, "j"):
+            self._handle_vertical(1)
+            return
+        if key in (curses.KEY_LEFT, "h"):
+            self._handle_horizontal(-1)
+            return
+        if key in (curses.KEY_RIGHT, "l"):
+            self._handle_horizontal(1)
+            return
+        if key in ("\x1b", 27, curses.KEY_EXIT):
+            self._handle_escape()
+            return
+        if is_enter(key) or key == " ":
+            self._activate_focus(self.focus.current)
 
-        if self.ui.mode == "catalog":
-            return self._handle_catalog_key(key)
-        if self.ui.mode == "install_form":
-            return self._handle_form_key(key, self.install_fields, self.install_spec)
-        if self.ui.mode == "uninstall_form":
-            return self._handle_form_key(key, self.uninstall_fields, self.uninstall_spec)
-        if self.ui.mode == "run":
-            return self._handle_run_key(key)
-        return False
+    def _handle_escape(self) -> None:
+        if self.mode in {"install_editor", "uninstall_editor", "status"}:
+            self.mode = "home"
+            self.editor = None
+            self.ui.status_line = "Back to home."
+            return
+        if self.mode == "run":
+            if self.run_thread and self.run_thread.is_alive():
+                self.ui.status_line = "Run is active. Cancel first."
+                return
+            self.mode = "home"
+            self.ui.status_line = "Back to home."
 
-    def _handle_catalog_key(self, key: object) -> bool:
-        if key in ("j", curses.KEY_DOWN):
-            self.ui.selected_operation = clamp(self.ui.selected_operation + 1, 0, len(self.operations) - 1)
-            return False
-        if key in ("k", curses.KEY_UP):
-            self.ui.selected_operation = clamp(self.ui.selected_operation - 1, 0, len(self.operations) - 1)
-            return False
-        if is_enter(key):
-            op = self.operations[self.ui.selected_operation].key
-            self.ui.selected_field = 0
-            if op == "install":
-                self.ui.mode = "install_form"
-            elif op == "uninstall":
-                self.ui.mode = "uninstall_form"
+    def _handle_vertical(self, delta: int) -> None:
+        cur = self.focus.current
+        if self.mode == "home":
+            if cur.startswith("home:op:"):
+                idx = clamp(int(cur.rsplit(":", 1)[1]) + delta, 0, len(self.cards) - 1)
+                self.selected_operation = idx
+                self.focus.set_items(self.focus.items, preferred=f"home:op:{idx}")
+            return
+        if self.mode in {"install_editor", "uninstall_editor"} and self.editor is not None:
+            step = self._current_step()
+            if step and step.fields:
+                self.editor.row_idx = clamp(self.editor.row_idx + delta, 0, len(step.fields) - 1)
+                field_name = step.fields[self.editor.row_idx]
+                self.focus.set_items(self.focus.items, preferred=f"editor:field:{field_name}")
+
+    def _handle_horizontal(self, delta: int) -> None:
+        cur = self.focus.current
+        if cur.startswith("editor:tab:") and self.editor is not None:
+            steps = self._editor_steps()
+            idx = clamp(int(cur.rsplit(":", 1)[1]) + delta, 0, len(steps) - 1)
+            self.editor.step_idx = idx
+            self.editor.row_idx = 0
+            return
+        if cur.startswith("editor:choice:"):
+            parts = cur.split(":")
+            if len(parts) < 4:
+                return
+            field_name = parts[2]
+            choice_idx = int(parts[3]) + delta
+            self._set_choice(field_name, choice_idx)
+
+    def _handle_mouse(self) -> None:
+        try:
+            _, mx, my, _, _ = curses.getmouse()
+        except Exception:
+            return
+        for rect in self.mouse_targets:
+            if rect.contains(my, mx):
+                self._activate_focus(rect.action)
+                return
+
+    def _activate_focus(self, focus_id: str) -> None:
+        if not focus_id:
+            return
+        if focus_id.startswith("home:"):
+            self._activate_home(focus_id)
+            return
+        if focus_id.startswith("editor:"):
+            self._activate_editor(focus_id)
+            return
+        if focus_id.startswith("run:"):
+            self._activate_run(focus_id)
+            return
+        if focus_id.startswith("status:"):
+            self._activate_status(focus_id)
+
+    def _activate_home(self, focus_id: str) -> None:
+        if focus_id.startswith("home:op:"):
+            self.selected_operation = clamp(int(focus_id.rsplit(":", 1)[1]), 0, len(self.cards) - 1)
+            return
+        if focus_id == "home:btn:quit":
+            self.running = False
+            return
+        selected = self.cards[self.selected_operation]
+        if focus_id == "home:btn:configure":
+            if selected.key == "install":
+                self.mode = "install_editor"
+                self.editor = EditorState(operation="install")
+            elif selected.key == "uninstall":
+                self.mode = "uninstall_editor"
+                self.editor = EditorState(operation="uninstall")
+            elif selected.key == "status":
+                self.mode = "status"
             else:
                 self._start_run("diagnose")
-            return False
-        return False
+            self.ui.status_line = f"Configured action: {selected.title}"
+            return
+        if focus_id == "home:btn:run":
+            if selected.key == "status":
+                self.mode = "status"
+                return
+            if selected.key == "install":
+                self._start_run("install")
+            elif selected.key == "uninstall":
+                if not self._confirm_dialog(
+                    ConfirmModal(
+                        title="Proceed with uninstall?",
+                        detail="This action may remove app files and data according to your toggles.",
+                        cancel_label="Cancel",
+                        confirm_label="Run",
+                    )
+                ):
+                    self.ui.status_line = "Uninstall cancelled."
+                    return
+                self._start_run("uninstall")
+            else:
+                self._start_run("diagnose")
 
-    def _handle_form_key(self, key: object, fields: list[tuple], obj: Any) -> bool:
-        if key in ("b", "B"):
-            self.ui.mode = "catalog"
-            self.ui.status_line = "Back to operation catalog."
-            return False
-        if key in ("j", curses.KEY_DOWN):
-            self.ui.selected_field = clamp(self.ui.selected_field + 1, 0, len(fields) - 1)
-            return False
-        if key in ("k", curses.KEY_UP):
-            self.ui.selected_field = clamp(self.ui.selected_field - 1, 0, len(fields) - 1)
-            return False
-        if key in ("r", "R"):
-            if self.ui.mode == "install_form":
+    def _activate_editor(self, focus_id: str) -> None:
+        if self.editor is None:
+            return
+        if focus_id.startswith("editor:tab:"):
+            self.editor.step_idx = clamp(int(focus_id.rsplit(":", 1)[1]), 0, len(self._editor_steps()) - 1)
+            self.editor.row_idx = 0
+            return
+        if focus_id == "editor:btn:back":
+            self.mode = "home"
+            self.editor = None
+            self.ui.status_line = "Back to home."
+            return
+        if focus_id == "editor:btn:next":
+            self.editor.step_idx = clamp(self.editor.step_idx + 1, 0, len(self._editor_steps()) - 1)
+            self.editor.row_idx = 0
+            return
+        if focus_id == "editor:btn:prev":
+            self.editor.step_idx = clamp(self.editor.step_idx - 1, 0, len(self._editor_steps()) - 1)
+            self.editor.row_idx = 0
+            return
+        if focus_id == "editor:btn:run":
+            if self.editor.operation == "install":
                 errors = self.install_spec.validate()
                 if errors:
-                    self.ui.status_line = f"Cannot start: {errors[0]}"
-                    return False
-                self._start_run("install")
-            else:
-                self._start_run("uninstall")
-            return False
-        if is_enter(key):
-            field = fields[self.ui.selected_field]
-            self._edit_field(obj, field)
-            return False
-        return False
-
-    def _edit_field(self, obj: Any, field: tuple) -> None:
-        name = field[0]
-        ftype = field[2]
-        current = getattr(obj, name)
-
-        if ftype == "bool":
-            next_value = not bool(current)
-            if name in {"install_service", "proxy_setup"} and not next_value:
-                if not self._confirm_dialog(
-                    f"Disable {field[1]}?",
-                    "This may prevent service startup or external access.",
-                ):
-                    self.ui.status_line = f"{name} unchanged"
+                    self.ui.status_line = f"Cannot run install: {errors[0]}"
                     return
-            setattr(obj, name, next_value)
-            self.ui.status_line = f"{name} set to {getattr(obj, name)}"
+            self._start_run(self.editor.operation)
             return
-
-        if ftype == "choice":
-            selected = self._select_choice(field[1], list(field[3]), str(current))
-            if selected is None:
-                self.ui.status_line = f"{name} unchanged"
+        if focus_id.startswith("editor:choice:"):
+            parts = focus_id.split(":")
+            if len(parts) < 4:
                 return
-            setattr(obj, name, selected)
-            self.ui.status_line = f"{name} set to {selected}"
+            self._set_choice(parts[2], int(parts[3]))
             return
+        if focus_id.startswith("editor:field:"):
+            field_name = focus_id.split(":", 2)[2]
+            field = self._field_def(field_name)
+            if field is None:
+                return
+            self._edit_field(field)
 
-        value = self._prompt_line(f"{field[1]}", str(current))
-        if value is not None:
-            setattr(obj, name, value)
-            self.ui.status_line = f"{name} updated"
+    def _activate_run(self, focus_id: str) -> None:
+        if focus_id.startswith("run:level:"):
+            level = focus_id.split(":")[-1]
+            if level in self.ui.log_level_mask:
+                self.ui.log_level_mask.remove(level)
+            else:
+                self.ui.log_level_mask.add(level)
+            if not self.ui.log_level_mask:
+                self.ui.log_level_mask.add("error")
+            return
+        if focus_id.startswith("run:cat:"):
+            cat = focus_id.split(":")[-1]
+            if cat in self.log_category_mask:
+                self.log_category_mask.remove(cat)
+            else:
+                self.log_category_mask.add(cat)
+            if not self.log_category_mask:
+                self.log_category_mask.add("system")
+            return
+        if focus_id == "run:btn:retry":
+            self._rerun_current_operation()
+            return
+        if focus_id == "run:btn:diagnose":
+            self._start_run("diagnose")
+            return
+        if focus_id == "run:btn:export":
+            if self.last_result:
+                payload = self.last_summary_payload or self._build_summary_payload(self.active_operation, self.last_result)
+                path = self.logstore.export_summary(payload)
+                self.ui.status_line = f"Summary exported: {path}"
+            else:
+                self.ui.status_line = "No result to export yet."
+            return
+        if focus_id == "run:btn:back":
+            if self.run_thread and self.run_thread.is_alive():
+                self.ui.status_line = "Run in progress. Cancel first."
+                return
+            self.mode = "home"
+            self.ui.status_line = "Back to home."
+
+    def _activate_status(self, focus_id: str) -> None:
+        if focus_id == "status:btn:back":
+            self.mode = "home"
+            self.ui.status_line = "Back to home."
+        elif focus_id == "status:btn:diagnose":
+            self._start_run("diagnose")
+
+    def _editor_steps(self) -> tuple[WizardStep, ...]:
+        if self.editor and self.editor.operation == "install":
+            return INSTALL_STEPS
+        return UNINSTALL_STEPS
+
+    def _current_step(self) -> WizardStep | None:
+        if self.editor is None:
+            return None
+        steps = self._editor_steps()
+        if not steps:
+            return None
+        idx = clamp(self.editor.step_idx, 0, len(steps) - 1)
+        self.editor.step_idx = idx
+        return steps[idx]
+
+    def _field_def(self, field_name: str) -> FieldDef | None:
+        if self.editor and self.editor.operation == "install":
+            return FIELD_INDEX_INSTALL.get(field_name)
+        return FIELD_INDEX_UNINSTALL.get(field_name)
+
+    def _editor_obj(self) -> Any:
+        if self.editor and self.editor.operation == "install":
+            return self.install_spec
+        return self.uninstall_spec
+
+    def _set_choice(self, field_name: str, idx: int) -> None:
+        field = self._field_def(field_name)
+        if field is None or field.ftype != "choice":
+            return
+        opts = list(field.options)
+        if not opts:
+            return
+        idx = clamp(idx, 0, len(opts) - 1)
+        setattr(self._editor_obj(), field_name, opts[idx])
+        self.ui.status_line = f"{field.label} set to {opts[idx]}"
+
+    def _edit_field(self, field: FieldDef) -> None:
+        obj = self._editor_obj()
+        current = getattr(obj, field.name)
+        if field.ftype == "bool":
+            next_value = not bool(current)
+            if field.name in {"install_service", "proxy_setup"} and not next_value:
+                confirmed = self._confirm_dialog(
+                    ConfirmModal(
+                        title=f"Disable {field.label}?",
+                        detail="This may prevent service startup or external access.",
+                        cancel_label="Keep Enabled",
+                        confirm_label="Disable",
+                    )
+                )
+                if not confirmed:
+                    self.ui.status_line = f"{field.label} unchanged."
+                    return
+            setattr(obj, field.name, next_value)
+            self.ui.status_line = f"{field.label} set to {'Enabled' if next_value else 'Disabled'}"
+            return
+        if field.ftype == "choice":
+            selected = self._select_choice(field.label, list(field.options), str(current))
+            if selected is None:
+                self.ui.status_line = f"{field.label} unchanged."
+                return
+            setattr(obj, field.name, selected)
+            self.ui.status_line = f"{field.label} set to {selected}"
+            return
+        value = self._prompt_line(field.label, str(current))
+        if value is None:
+            self.ui.status_line = f"{field.label} unchanged."
+            return
+        setattr(obj, field.name, value)
+        self.ui.status_line = f"{field.label} updated."
 
     def _prompt_line(self, label: str, initial: str) -> str | None:
         h, w = self.stdscr.getmaxyx()
-        win_h = 5
-        win_y = max(0, h - win_h - 1)
-        draw_box(self.stdscr, win_y, 2, win_h, w - 4, " INPUT ")
-        safe_addstr(self.stdscr, win_y + 1, 4, f"{label}:")
-        safe_addstr(self.stdscr, win_y + 3, 4, "Enter=save Esc=cancel Ctrl+U=clear", curses.A_DIM)
-        self.stdscr.timeout(-1)
-        curses.curs_set(1)
+        win_h = 6
+        win_w = max(60, int(w * 0.75))
+        y = max(1, (h - win_h) // 2)
+        x = max(2, (w - win_w) // 2)
         buf = list(initial)
         cur = len(buf)
-        input_x = len(label) + 7
-        max_len = max(8, w - input_x - 6)
+        self.stdscr.timeout(-1)
+        curses.curs_set(1)
         try:
             while True:
+                draw_box(self.stdscr, y, x, win_h, win_w, f" EDIT :: {label} ", self.theme.attrs.panel)
+                safe_addstr(self.stdscr, y + 1, x + 2, "Enter=Save  Esc=Cancel  Ctrl+U=Clear", self.theme.attrs.muted)
+                max_len = win_w - 4
                 text = "".join(buf)
                 if len(text) <= max_len:
                     display = text
@@ -463,25 +959,24 @@ class DespatchTUI:
                 else:
                     offset = max(0, cur - max_len)
                     display = text[offset : offset + max_len]
-                safe_addstr(self.stdscr, win_y + 1, input_x, " " * max_len)
-                safe_addstr(self.stdscr, win_y + 1, input_x, display)
-                cursor_col = input_x + max(0, min(max_len - 1, cur - offset))
-                self.stdscr.move(win_y + 1, cursor_col)
+                safe_addstr(self.stdscr, y + 3, x + 2, " " * max_len)
+                safe_addstr(self.stdscr, y + 3, x + 2, display, self.theme.attrs.panel)
+                cursor_col = x + 2 + max(0, min(max_len - 1, cur - offset))
+                self.stdscr.move(y + 3, cursor_col)
                 self.stdscr.refresh()
                 key = self.stdscr.get_wch()
-
                 if is_enter(key):
                     return "".join(buf).strip()
                 if key in ("\x1b", 27, curses.KEY_EXIT):
                     return None
-                if key == "\x15":  # Ctrl+U
+                if key == "\x15":
                     buf = []
                     cur = 0
                     continue
-                if key in (curses.KEY_LEFT, "h"):
+                if key in (curses.KEY_LEFT,):
                     cur = max(0, cur - 1)
                     continue
-                if key in (curses.KEY_RIGHT, "l"):
+                if key in (curses.KEY_RIGHT,):
                     cur = min(len(buf), cur + 1)
                     continue
                 if key == curses.KEY_HOME:
@@ -490,22 +985,17 @@ class DespatchTUI:
                 if key == curses.KEY_END:
                     cur = len(buf)
                     continue
-                if key == curses.KEY_DC:
-                    if cur < len(buf):
-                        del buf[cur]
+                if key == curses.KEY_DC and cur < len(buf):
+                    del buf[cur]
                     continue
                 if is_backspace(key) or key in ("\x7f", "\b"):
                     if cur > 0:
                         cur -= 1
                         del buf[cur]
                     continue
-                if isinstance(key, str) and key.isprintable():
-                    if len(buf) < 2048:
-                        buf.insert(cur, key)
-                        cur += 1
-                    continue
-        except Exception:
-            return None
+                if isinstance(key, str) and key.isprintable() and len(buf) < 2048:
+                    buf.insert(cur, key)
+                    cur += 1
         finally:
             self.stdscr.timeout(120)
             curses.curs_set(0)
@@ -514,8 +1004,8 @@ class DespatchTUI:
         if not options:
             return None
         h, w = self.stdscr.getmaxyx()
-        win_h = min(max(8, len(options) + 4), h - 2)
-        win_w = min(max(40, len(label) + 10), w - 4)
+        win_h = min(max(10, len(options) + 5), h - 2)
+        win_w = min(max(44, len(label) + 14), w - 4)
         y = max(1, (h - win_h) // 2)
         x = max(2, (w - win_w) // 2)
         idx = options.index(current) if current in options else 0
@@ -523,7 +1013,7 @@ class DespatchTUI:
         self.stdscr.timeout(-1)
         try:
             while True:
-                draw_box(self.stdscr, y, x, win_h, win_w, f" {label} ")
+                draw_box(self.stdscr, y, x, win_h, win_w, f" SELECT :: {label} ", self.theme.attrs.panel)
                 viewport = win_h - 4
                 if idx < top:
                     top = idx
@@ -531,20 +1021,20 @@ class DespatchTUI:
                     top = idx - viewport + 1
                 for row in range(viewport):
                     opt_i = top + row
-                    line_y = y + 2 + row
-                    safe_addstr(self.stdscr, line_y, x + 2, " " * (win_w - 4))
+                    ly = y + 2 + row
+                    safe_addstr(self.stdscr, ly, x + 2, " " * (win_w - 4))
                     if opt_i >= len(options):
                         continue
                     opt = options[opt_i]
-                    attr = curses.A_REVERSE if opt_i == idx else 0
-                    safe_addstr(self.stdscr, line_y, x + 2, opt[: win_w - 5], attr)
-                safe_addstr(self.stdscr, y + win_h - 2, x + 2, "Enter=select Esc=cancel", curses.A_DIM)
+                    attr = self.theme.attrs.focus if opt_i == idx else self.theme.attrs.panel
+                    safe_addstr(self.stdscr, ly, x + 2, opt[: win_w - 5], attr)
+                safe_addstr(self.stdscr, y + win_h - 2, x + 2, "Arrows move | Enter select | Esc cancel", self.theme.attrs.muted)
                 self.stdscr.refresh()
                 key = self.stdscr.get_wch()
-                if key in ("j", curses.KEY_DOWN):
+                if key in (curses.KEY_DOWN, "j"):
                     idx = clamp(idx + 1, 0, len(options) - 1)
                     continue
-                if key in ("k", curses.KEY_UP):
+                if key in (curses.KEY_UP, "k"):
                     idx = clamp(idx - 1, 0, len(options) - 1)
                     continue
                 if key in (curses.KEY_NPAGE,):
@@ -560,38 +1050,59 @@ class DespatchTUI:
         finally:
             self.stdscr.timeout(120)
 
-    def _confirm_dialog(self, title: str, detail: str) -> bool:
+    def _confirm_dialog(self, modal: ConfirmModal) -> bool:
         h, w = self.stdscr.getmaxyx()
-        win_h = 8
-        win_w = min(max(56, len(detail) + 6), w - 4)
+        win_h = 9
+        win_w = min(max(64, len(modal.detail) + 8), w - 4)
         y = max(1, (h - win_h) // 2)
         x = max(2, (w - win_w) // 2)
-        selected_yes = False
+        selected = 0
         self.stdscr.timeout(-1)
         try:
             while True:
-                draw_box(self.stdscr, y, x, win_h, win_w, " CONFIRM ")
-                safe_addstr(self.stdscr, y + 1, x + 2, title[: win_w - 4], curses.A_BOLD)
-                safe_addstr(self.stdscr, y + 2, x + 2, detail[: win_w - 4])
-                no_attr = curses.A_REVERSE if not selected_yes else 0
-                yes_attr = curses.A_REVERSE if selected_yes else 0
-                safe_addstr(self.stdscr, y + 5, x + 2, "[ No ]", no_attr)
-                safe_addstr(self.stdscr, y + 5, x + 12, "[ Yes ]", yes_attr)
-                safe_addstr(self.stdscr, y + 6, x + 2, "Left/Right select, Enter confirm, Esc cancel", curses.A_DIM)
+                draw_box(self.stdscr, y, x, win_h, win_w, " CONFIRM ", self.theme.attrs.panel)
+                safe_addstr(self.stdscr, y + 1, x + 2, modal.title[: win_w - 4], self.theme.attrs.heading)
+                safe_addstr(self.stdscr, y + 3, x + 2, modal.detail[: win_w - 4], self.theme.attrs.panel)
+                r_cancel = draw_button(
+                    self.stdscr,
+                    self.theme,
+                    y + 6,
+                    x + 2,
+                    modal.cancel_label,
+                    focused=selected == 0,
+                    action="modal:cancel",
+                )
+                r_confirm = draw_button(
+                    self.stdscr,
+                    self.theme,
+                    y + 6,
+                    x + 18,
+                    modal.confirm_label,
+                    focused=selected == 1,
+                    primary=True,
+                    action="modal:confirm",
+                )
+                safe_addstr(self.stdscr, y + 7, x + 2, "Left/Right select | Enter confirm | Esc cancel", self.theme.attrs.muted)
                 self.stdscr.refresh()
                 key = self.stdscr.get_wch()
-                if key in (curses.KEY_LEFT, "h"):
-                    selected_yes = False
+                if key == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, _ = curses.getmouse()
+                        if r_cancel.contains(my, mx):
+                            return False
+                        if r_confirm.contains(my, mx):
+                            return True
+                    except Exception:
+                        pass
+                    continue
+                if key in (curses.KEY_LEFT, "h", "\t", curses.KEY_BTAB):
+                    selected = 0
                     continue
                 if key in (curses.KEY_RIGHT, "l"):
-                    selected_yes = True
+                    selected = 1
                     continue
-                if key in ("y", "Y"):
-                    return True
-                if key in ("n", "N"):
-                    return False
                 if is_enter(key):
-                    return selected_yes
+                    return selected == 1
                 if key in ("\x1b", 27, curses.KEY_EXIT):
                     return False
         finally:
@@ -613,7 +1124,7 @@ class DespatchTUI:
         self.active_operation = operation
         self.last_result = None
         self.last_summary_payload = {}
-        self.ui.mode = "run"
+        self.mode = "run"
         self.ui.run_scroll = 0
         self.ui.status_line = f"Running {operation}..."
 
@@ -633,7 +1144,7 @@ class DespatchTUI:
                     self.run_state,
                     {"type": "run_result", "status": "failed", "failed_stage": "preflight", "exit_code": "1"},
                 )
-                self.logstore.append("error", "preflight", preflight_error.message)
+                self.logstore.append("error", "preflight", preflight_error.message, category="system")
                 self.last_result = OperationResult(
                     status="failed",
                     errors=[preflight_error],
@@ -649,6 +1160,7 @@ class DespatchTUI:
                 return
 
         self.cancel_token = CancelToken()
+
         def emit(evt: dict[str, Any]) -> None:
             self.events.put(evt)
 
@@ -663,7 +1175,7 @@ class DespatchTUI:
             payload = self._build_summary_payload(operation, result)
             self.last_summary_payload = payload
             summary = self.logstore.export_summary(payload)
-            self.events.put({"type": "log", "level": "info", "stage_id": "summary", "message": f"Summary exported: {summary}"})
+            self.events.put({"type": "log", "level": "info", "category": "system", "stage_id": "summary", "message": f"Summary exported: {summary}"})
 
         self.run_thread = threading.Thread(target=worker, daemon=True)
         self.run_thread.start()
@@ -674,18 +1186,14 @@ class DespatchTUI:
                 evt = self.events.get_nowait()
             except queue.Empty:
                 break
-
             if self.run_state is None:
                 continue
-
             etype = evt.get("type", "")
             if etype == "log":
-                # already persisted by runner; no-op here except status update
-                message = str(evt.get("message", ""))
-                if message:
-                    self.ui.status_line = message[:120]
+                msg = str(evt.get("message", ""))
+                if msg:
+                    self.ui.status_line = msg[:120]
                 continue
-
             apply_runner_event(self.run_state, evt)
             if etype == "run_result":
                 status = str(evt.get("status", ""))
@@ -696,92 +1204,17 @@ class DespatchTUI:
                 else:
                     self.ui.status_line = f"Run failed in stage {self.run_state.failed_stage or 'unknown'}."
 
-    def _handle_run_key(self, key: object) -> bool:
-        if key in ("b", "B"):
-            if self.run_thread and self.run_thread.is_alive():
-                self.ui.status_line = "Run in progress. Cancel first with x."
-                return False
-            self.ui.mode = "catalog"
-            self.ui.status_line = "Back to operation catalog."
-            return False
-
-        if key in ("x", "X"):
-            if self.cancel_token and self.run_thread and self.run_thread.is_alive():
-                self.cancel_token.cancel()
-                self.ui.status_line = "Cancellation requested..."
-            return False
-
-        if key in ("r", "R"):
-            if self.run_thread and self.run_thread.is_alive():
-                self.ui.status_line = "Run already in progress."
-                return False
-            if self.active_operation:
-                self._start_run(self.active_operation)
-            return False
-
-        if key in ("d", "D"):
-            if self.run_thread and self.run_thread.is_alive():
-                self.ui.status_line = "Run already in progress."
-                return False
-            self._start_run("diagnose")
-            return False
-
-        if key == "l":
-            masks = [
-                {"debug", "info", "warn", "error"},
-                {"info", "warn", "error"},
-                {"warn", "error"},
-                {"error"},
-            ]
-            current = self.ui.log_level_mask
-            idx = 0
-            for i, m in enumerate(masks):
-                if m == current:
-                    idx = i
-                    break
-            self.ui.log_level_mask = masks[(idx + 1) % len(masks)]
-            self.ui.status_line = f"Log levels: {','.join(sorted(self.ui.log_level_mask))}"
-            return False
-
-        if key == "/":
-            query = self._prompt_line("Log search", self.ui.log_search)
-            if query is not None:
-                self.ui.log_search = query
-                self.ui.status_line = f"Log search set: {query or '(none)'}"
-            return False
-
-        if key in ("g",):
-            self.ui.run_scroll = 999999
-            return False
-
-        if key in ("G",):
-            self.ui.run_scroll = 0
-            return False
-
-        if key == curses.KEY_PPAGE:
-            self.ui.run_scroll += 10
-            return False
-
-        if key == curses.KEY_NPAGE:
-            self.ui.run_scroll = max(0, self.ui.run_scroll - 10)
-            return False
-
-        if key in ("e", "E"):
-            if self.last_result:
-                payload = self.last_summary_payload or self._build_summary_payload(self.active_operation, self.last_result)
-                path = self.logstore.export_summary(payload)
-                self.ui.status_line = f"Exported summary: {path}"
-            else:
-                self.ui.status_line = "No run result to export yet."
-            return False
-
-        if key in ("q", "Q"):
-            if self.run_thread and self.run_thread.is_alive():
-                self.ui.status_line = "Run is active. Cancel first with x."
-                return False
-            return True
-
-        return False
+    def _rerun_current_operation(self) -> None:
+        if self.run_thread and self.run_thread.is_alive():
+            self.ui.status_line = "Run already in progress."
+            return
+        if self.mode in {"install_editor", "home"}:
+            selected = self.cards[self.selected_operation].key if self.mode == "home" else (self.editor.operation if self.editor else "install")
+            if selected in {"install", "uninstall", "diagnose"}:
+                self._start_run(selected)
+            return
+        if self.active_operation:
+            self._start_run(self.active_operation)
 
     def _check_install_preflight(self) -> RunnerError | None:
         if os.geteuid() == 0:
@@ -852,28 +1285,156 @@ class DespatchTUI:
                 raw[key] = "***REDACTED***"
         return raw
 
-    @staticmethod
-    def _failure_category(errors: list[RunnerError]) -> str:
-        codes = {err.code for err in errors}
-        if "UNIT_MISSING" in codes:
-            return "UNIT_MISSING"
-        if "SERVICE_INACTIVE" in codes:
-            return "SERVICE_INACTIVE"
-        if "HEALTH_FAIL" in codes:
-            return "HEALTH_FAIL"
-        if "E_PREFLIGHT" in codes:
-            return "E_PREFLIGHT"
-        if "E_PROTOCOL" in codes:
-            return "E_PROTOCOL"
-        if "E_SERVICE" in codes:
-            return "E_SERVICE"
-        return "GENERAL_FAILURE"
-
 
 def _main(stdscr: curses.window) -> None:
     app = DespatchTUI(stdscr)
     app.run()
 
+
+def _run_with_event_stream(runner: OperationRunner, op: str, spec: Any, logstore: LogStore) -> int:
+    stage_defs = INSTALL_STAGE_DEFS if op == "install" else UNINSTALL_STAGE_DEFS if op == "uninstall" else DIAG_STAGE_DEFS
+    run_state = new_run_state(op, f"plain-{int(time.time())}", stage_defs)
+    cancel = CancelToken()
+
+    def on_event(evt: dict[str, Any]) -> None:
+        apply_runner_event(run_state, evt)
+        etype = evt.get("type", "")
+        if etype == "stage_start" and evt.get("message") != "pending":
+            title = evt.get("title", evt.get("stage_id", "stage"))
+            print(f"\n==> {title}")
+        elif etype == "log":
+            level = str(evt.get("level", "info")).upper()
+            category = str(evt.get("category", "system"))
+            print(f"[{level:<5}] [{category}] {evt.get('message', '')}")
+        elif etype == "run_result":
+            print(f"\nRun result: {evt.get('status')} (exit_code={evt.get('exit_code')})")
+
+    if op == "install":
+        result = runner.run_install(spec, logstore, cancel, on_event)
+    elif op == "uninstall":
+        result = runner.run_uninstall(spec, logstore, cancel, on_event)
+    else:
+        result = runner.run_diagnose(spec, logstore, cancel, on_event)
+    print(f"Log file: {logstore.log_path}")
+    return 0 if result.status == "ok" else 1
+
+
+def _plain_choose(title: str, options: list[str]) -> int:
+    while True:
+        print(f"\n{title}")
+        for idx, opt in enumerate(options, start=1):
+            print(f"{idx}) {opt}")
+        raw = input("Select number: ").strip()
+        if raw.isdigit():
+            val = int(raw)
+            if 1 <= val <= len(options):
+                return val - 1
+        print("Invalid selection.")
+
+
+def _plain_edit_value(label: str, current: str) -> str:
+    raw = input(f"{label} [{current}] (blank keep): ").strip()
+    return current if raw == "" else raw
+
+
+def _plain_edit_install(spec: InstallSpec) -> bool:
+    field_defs = list(INSTALL_FIELDS)
+    while True:
+        print("\n=== Install Spec Editor ===")
+        for idx, field in enumerate(field_defs, start=1):
+            value = getattr(spec, field.name)
+            shown = "Enabled" if isinstance(value, bool) and value else "Disabled" if isinstance(value, bool) else (str(value) or "(empty)")
+            print(f"{idx:2d}) {field.label:<35} {shown}")
+        print("R) Run install   B) Back")
+        cmd = input("Action: ").strip().lower()
+        if cmd == "r":
+            errs = spec.validate()
+            if errs:
+                print(f"Validation error: {errs[0]}")
+                continue
+            return True
+        if cmd == "b":
+            return False
+        if not cmd.isdigit():
+            print("Use field number, R, or B.")
+            continue
+        idx = int(cmd) - 1
+        if idx < 0 or idx >= len(field_defs):
+            print("Invalid field number.")
+            continue
+        field = field_defs[idx]
+        cur = getattr(spec, field.name)
+        if field.ftype == "bool":
+            setattr(spec, field.name, not bool(cur))
+            continue
+        if field.ftype == "choice":
+            choice_idx = _plain_choose(field.label, list(field.options))
+            setattr(spec, field.name, list(field.options)[choice_idx])
+            continue
+        setattr(spec, field.name, _plain_edit_value(field.label, str(cur)))
+
+
+def _plain_edit_uninstall(spec: UninstallSpec) -> bool:
+    field_defs = list(UNINSTALL_FIELDS)
+    while True:
+        print("\n=== Uninstall Spec Editor ===")
+        for idx, field in enumerate(field_defs, start=1):
+            value = getattr(spec, field.name)
+            shown = "Enabled" if bool(value) else "Disabled"
+            print(f"{idx:2d}) {field.label:<35} {shown}")
+        print("R) Run uninstall   B) Back")
+        cmd = input("Action: ").strip().lower()
+        if cmd == "r":
+            return True
+        if cmd == "b":
+            return False
+        if not cmd.isdigit():
+            print("Use field number, R, or B.")
+            continue
+        idx = int(cmd) - 1
+        if idx < 0 or idx >= len(field_defs):
+            print("Invalid field number.")
+            continue
+        field = field_defs[idx]
+        cur = getattr(spec, field.name)
+        setattr(spec, field.name, not bool(cur))
+
+
+def run_plain_console() -> int:
+    paths = detect_paths()
+    runner = OperationRunner(paths)
+    logstore = LogStore(max_entries=8000)
+    hostname = socket.gethostname()
+    default_domain = hostname if "." in hostname else "example.com"
+    proxies = detect_proxy_candidates()
+    install_spec = InstallSpec(
+        base_domain=default_domain,
+        proxy_server=proxies[0] if proxies else "nginx",
+        proxy_server_name=default_domain,
+    )
+    uninstall_spec = UninstallSpec()
+
+    while True:
+        print("\nDespatch Plain Console")
+        print("======================")
+        print("1) Install / Upgrade")
+        print("2) Uninstall")
+        print("3) Diagnose Access")
+        print("4) Quit")
+        choice = input("Select [1-4]: ").strip()
+        if choice == "1":
+            if _plain_edit_install(install_spec):
+                return _run_with_event_stream(runner, "install", install_spec, logstore)
+            continue
+        if choice == "2":
+            if _plain_edit_uninstall(uninstall_spec):
+                return _run_with_event_stream(runner, "uninstall", uninstall_spec, logstore)
+            continue
+        if choice == "3":
+            return _run_with_event_stream(runner, "diagnose", DiagnoseSpec(), logstore)
+        if choice == "4":
+            return 0
+        print("Unknown option.")
 
 
 def _prompt_text(label: str, default: str) -> str:
@@ -889,13 +1450,12 @@ def _prompt_bool(label: str, default: bool) -> bool:
     return raw in {"y", "yes", "1", "true"}
 
 
-def run_plain_console() -> int:
+def run_plain_console_legacy() -> int:
     paths = detect_paths()
     runner = OperationRunner(paths)
     logstore = LogStore(max_entries=8000)
-
-    print("Despatch Plain Console")
-    print("=====================")
+    print("Despatch Legacy Prompt Mode")
+    print("===========================")
     print("1) Install / Upgrade")
     print("2) Uninstall")
     print("3) Diagnose Access")
@@ -903,7 +1463,6 @@ def run_plain_console() -> int:
     choice = input("Select [1-4]: ").strip()
     if choice == "4":
         return 0
-
     if choice == "1":
         hostname = socket.gethostname()
         default_domain = hostname if "." in hostname else "example.com"
@@ -919,38 +1478,16 @@ def run_plain_console() -> int:
             run_diagnose=_prompt_bool("Run diagnose at end", True),
         )
         if spec.proxy_tls:
-            spec.proxy_cert = _prompt_text(
-                "TLS cert path", f"/etc/letsencrypt/live/{spec.proxy_server_name}/fullchain.pem"
-            )
-            spec.proxy_key = _prompt_text(
-                "TLS key path", f"/etc/letsencrypt/live/{spec.proxy_server_name}/privkey.pem"
-            )
+            spec.proxy_cert = _prompt_text("TLS cert path", f"/etc/letsencrypt/live/{spec.proxy_server_name}/fullchain.pem")
+            spec.proxy_key = _prompt_text("TLS key path", f"/etc/letsencrypt/live/{spec.proxy_server_name}/privkey.pem")
         if spec.dovecot_auth_mode == "sql":
             spec.dovecot_auth_db_driver = _prompt_text("Dovecot SQL driver", "mysql")
             spec.dovecot_auth_db_dsn = _prompt_text("Dovecot SQL DSN", "")
-
         errors = spec.validate()
         if errors:
             print(f"Validation failed: {errors[0]}")
             return 1
-
-        stage_state = new_run_state("install", f"plain-{int(time.time())}", INSTALL_STAGE_DEFS)
-        cancel = CancelToken()
-
-        def on_event(evt: dict[str, Any]) -> None:
-            apply_runner_event(stage_state, evt)
-            t = evt.get("type", "")
-            if t == "stage_start" and evt.get("message") != "pending":
-                print(f"\n==> {evt.get('title', evt.get('stage_id', 'stage'))}")
-            elif t == "log":
-                print(f"[{evt.get('level', 'info')}] {evt.get('message', '')}")
-            elif t == "run_result":
-                print(f"\nRun result: {evt.get('status')} (exit_code={evt.get('exit_code')})")
-
-        result = runner.run_install(spec, logstore, cancel, on_event)
-        print(f"Log file: {logstore.log_path}")
-        return 0 if result.status == "ok" else 1
-
+        return _run_with_event_stream(runner, "install", spec, logstore)
     if choice == "2":
         spec = UninstallSpec(
             backup_env=_prompt_bool("Backup /opt/mailclient/.env", True),
@@ -962,43 +1499,15 @@ def run_plain_console() -> int:
             remove_apache_site=_prompt_bool("Remove apache2 site", True),
             remove_checkout=_prompt_bool("Remove /opt/mailclient-installer", False),
         )
-        stage_state = new_run_state("uninstall", f"plain-{int(time.time())}", UNINSTALL_STAGE_DEFS)
-        cancel = CancelToken()
-
-        def on_event(evt: dict[str, Any]) -> None:
-            apply_runner_event(stage_state, evt)
-            t = evt.get("type", "")
-            if t == "stage_start" and evt.get("message") != "pending":
-                print(f"\n==> {evt.get('title', evt.get('stage_id', 'stage'))}")
-            elif t == "log":
-                print(f"[{evt.get('level', 'info')}] {evt.get('message', '')}")
-            elif t == "run_result":
-                print(f"\nRun result: {evt.get('status')} (exit_code={evt.get('exit_code')})")
-
-        result = runner.run_uninstall(spec, logstore, cancel, on_event)
-        print(f"Log file: {logstore.log_path}")
-        return 0 if result.status == "ok" else 1
-
+        return _run_with_event_stream(runner, "uninstall", spec, logstore)
     if choice == "3":
-        stage_state = new_run_state("diagnose", f"plain-{int(time.time())}", DIAG_STAGE_DEFS)
-        cancel = CancelToken()
-
-        def on_event(evt: dict[str, Any]) -> None:
-            apply_runner_event(stage_state, evt)
-            if evt.get("type") == "log":
-                print(f"[{evt.get('level', 'info')}] {evt.get('message', '')}")
-            elif evt.get("type") == "run_result":
-                print(f"\nRun result: {evt.get('status')} (exit_code={evt.get('exit_code')})")
-
-        result = runner.run_diagnose(DiagnoseSpec(), logstore, cancel, on_event)
-        print(f"Log file: {logstore.log_path}")
-        return 0 if result.status == "ok" else 1
-
-    print("Unknown option.")
+        return _run_with_event_stream(runner, "diagnose", DiagnoseSpec(), logstore)
     return 1
 
 
 if __name__ == "__main__":
+    if "--legacy-prompts" in sys.argv:
+        raise SystemExit(run_plain_console_legacy())
     if "--plain" in sys.argv:
         raise SystemExit(run_plain_console())
     try:

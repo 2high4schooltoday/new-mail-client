@@ -170,6 +170,8 @@ class StageState:
     current: int = 0
     total: int = 1
     message: str = ""
+    rate_hint: str = ""
+    eta_hint: str = ""
     error_code: str = ""
     duration_ms: int = 0
 

@@ -70,6 +70,8 @@ def apply_runner_event(run_state: RunState, event: dict[str, Any]) -> None:
             except Exception:
                 pass
             stage.message = msg
+            stage.rate_hint = str(event.get("rate_hint", stage.rate_hint))
+            stage.eta_hint = str(event.get("eta_hint", stage.eta_hint))
             if stage.status == "running":
                 run_state.active_stage_id = stage_id
         return

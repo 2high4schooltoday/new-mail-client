@@ -12,12 +12,14 @@ class LogEntry:
     ts: float
     level: str
     stage_id: str
+    category: str
     message: str
 
     def format_line(self) -> str:
         stamp = time.strftime("%H:%M:%S", time.localtime(self.ts))
         stage = self.stage_id or "-"
-        return f"{stamp} [{self.level.upper():5}] [{stage}] {self.message}"
+        category = self.category or "system"
+        return f"{stamp} [{self.level.upper():5}] [{category}] [{stage}] {self.message}"
 
 
 class LogStore:
@@ -62,19 +64,29 @@ class LogStore:
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback, last_err or "using fallback log directory"
 
-    def append(self, level: str, stage_id: str, message: str, ts: float | None = None) -> LogEntry:
-        entry = LogEntry(ts=ts or time.time(), level=level, stage_id=stage_id, message=message)
+    def append(
+        self,
+        level: str,
+        stage_id: str,
+        message: str,
+        ts: float | None = None,
+        category: str = "system",
+    ) -> LogEntry:
+        entry = LogEntry(ts=ts or time.time(), level=level, stage_id=stage_id, category=category, message=message)
         self.entries.append(entry)
         with self.log_path.open("a", encoding="utf-8") as fh:
             fh.write(entry.format_line())
             fh.write("\n")
         return entry
 
-    def filtered(self, levels: set[str], search: str) -> list[LogEntry]:
+    def filtered(self, levels: set[str], search: str, categories: set[str] | None = None) -> list[LogEntry]:
         needle = search.lower().strip()
         out: list[LogEntry] = []
+        cat_mask = categories or {"system", "network", "proxy", "service", "auth"}
         for entry in self.entries:
             if entry.level not in levels:
+                continue
+            if entry.category not in cat_mask:
                 continue
             if needle and needle not in entry.format_line().lower():
                 continue

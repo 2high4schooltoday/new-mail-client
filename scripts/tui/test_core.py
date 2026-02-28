@@ -60,6 +60,15 @@ class LogStoreTests(unittest.TestCase):
                 self.assertTrue(str(store.log_dir).startswith(str(expected_root)))
                 self.assertTrue(store.log_path.exists())
 
+    def test_log_category_filtering(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = LogStore(max_entries=32, log_dir=Path(td))
+            store.append("info", "proxy", "proxy up", category="proxy")
+            store.append("info", "service", "service active", category="service")
+            only_proxy = store.filtered({"info"}, "", {"proxy"})
+            self.assertEqual(len(only_proxy), 1)
+            self.assertEqual(only_proxy[0].category, "proxy")
+
 
 class RunnerTests(unittest.TestCase):
     def _runner(self, tmp: Path) -> OperationRunner:
