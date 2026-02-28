@@ -133,8 +133,8 @@ remove_mailclient_user() {
   fi
 }
 
-log "U.S. Mail Office interactive uninstaller"
-warn "This removes only Mailclient-managed artifacts."
+log "Despatch interactive uninstaller"
+warn "This removes only Despatch-managed artifacts."
 warn "It does NOT remove Postfix, Dovecot, Nginx, Apache2, databases, or TLS packages."
 
 if ! prompt_yes_no "Continue with uninstall?" 0; then

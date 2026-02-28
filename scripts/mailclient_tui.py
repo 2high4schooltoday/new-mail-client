@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mailclient installer/uninstaller terminal dashboard."""
+"""Despatch installer/uninstaller terminal dashboard."""
 
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ class MailclientTUI:
         self.actions = [
             Action(
                 key="install",
-                name="Install / Upgrade Mailclient",
+                name="Install / Upgrade Despatch",
                 tab="Operations",
                 summary="Runs the interactive auto installer.",
                 details=[
@@ -113,7 +113,7 @@ class MailclientTUI:
             ),
             Action(
                 key="uninstall",
-                name="Uninstall Mailclient (Safe)",
+                name="Uninstall Despatch (Safe)",
                 tab="Operations",
                 summary="Runs interactive uninstaller with backup prompts.",
                 details=[
@@ -148,6 +148,19 @@ class MailclientTUI:
                     "Command: ss/netstat fallback probe",
                 ],
                 shell_cmd="if command -v ss >/dev/null 2>&1; then ss -ltnp | awk 'NR==1 || /:25 |:143 |:465 |:587 |:993 /'; else netstat -ltnp 2>/dev/null | awk 'NR==1 || /:25 |:143 |:465 |:587 |:993 /'; fi",
+            ),
+            Action(
+                key="diagnose",
+                name="Diagnose Internet Access",
+                tab="Tools",
+                summary="Runs deployment-aware connectivity checks and root-cause labels.",
+                details=[
+                    "Script: scripts/diagnose_access.sh",
+                    "Reports: APP_DOWN / PROXY_DOWN / PROXY_MISROUTE / PORT_BLOCKED / DNS_MISMATCH",
+                    "Safe: read-only diagnostics, no config changes",
+                ],
+                local_script=ROOT_DIR / "scripts" / "diagnose_access.sh",
+                remote_script_name="diagnose_access.sh",
             ),
         ]
 
@@ -446,7 +459,7 @@ class MailclientTUI:
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
         if h < 20 or w < 80:
-            self.stdscr.addstr(1, 2, "Terminal too small. Resize to at least 80x20.")
+            self._addn(0, 0, "Terminal too small. Resize to at least 80x20.", max(1, w - 1), self._color(4))
             self.stdscr.refresh()
             return
 
@@ -465,7 +478,7 @@ class MailclientTUI:
         self.stdscr.refresh()
 
     def _draw_header(self, y: int, x: int, h: int, w: int) -> None:
-        self._box(y, x, h, w, " MAILCLIENT TUI ")
+        self._box(y, x, h, w, " DESPATCH TUI ")
         title = "Keyboard-driven installer/uninstaller dashboard"
         runtime = f"service={self.status['service_state']}  unit={'yes' if self.status['service_unit'] else 'no'}"
         self._addn(y + 1, x + 2, title, w - 4, self._color(3))

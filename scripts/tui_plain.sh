@@ -5,6 +5,7 @@ IFS=$'\n\t'
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_SCRIPT="$ROOT_DIR/scripts/auto_install.sh"
 UNINSTALL_SCRIPT="$ROOT_DIR/scripts/uninstall.sh"
+DIAG_SCRIPT="$ROOT_DIR/scripts/diagnose_access.sh"
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
@@ -17,7 +18,7 @@ show_header() {
   clear
   cat <<'EOF'
 +--------------------------------------------------------------+
-|                      MAILCLIENT CONSOLE                      |
+|                       DESPATCH CONSOLE                       |
 |               Plain Bash (no extra dependencies)             |
 +--------------------------------------------------------------+
 EOF
@@ -80,25 +81,37 @@ run_uninstall() {
   pause
 }
 
+run_diagnose() {
+  show_header
+  if [[ -x "$DIAG_SCRIPT" ]]; then
+    bash "$DIAG_SCRIPT" || true
+  else
+    echo "Diagnostics script not found: $DIAG_SCRIPT"
+  fi
+  pause
+}
+
 main_menu() {
   while true; do
     show_header
     echo "Service state: $(service_state)"
     echo
-    echo "1) Install / Upgrade Mailclient"
-    echo "2) Uninstall Mailclient (safe)"
+    echo "1) Install / Upgrade Despatch"
+    echo "2) Uninstall Despatch (safe)"
     echo "3) Service Status"
     echo "4) Mail Port Probe"
-    echo "5) Quit"
+    echo "5) Diagnose Internet Access"
+    echo "6) Quit"
     echo
-    printf 'Select an option [1-5]: '
+    printf 'Select an option [1-6]: '
     read -r choice
     case "${choice:-}" in
       1) run_install ;;
       2) run_uninstall ;;
       3) show_status ;;
       4) show_ports ;;
-      5) exit 0 ;;
+      5) run_diagnose ;;
+      6) exit 0 ;;
       *) echo "Invalid option"; sleep 1 ;;
     esac
   done

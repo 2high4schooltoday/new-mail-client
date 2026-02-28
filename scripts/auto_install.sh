@@ -404,6 +404,97 @@ detect_web_servers() {
   printf '%s\n' "${found[@]}"
 }
 
+detect_primary_ip() {
+  local ip
+  if have_cmd hostname; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    ip="$(trim "${ip:-}")"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return
+    fi
+  fi
+  if have_cmd ip; then
+    ip="$(ip route get 1.1.1.1 2>/dev/null | sed -nE 's/.* src ([^ ]+).*/\1/p' | head -n1 || true)"
+    ip="$(trim "${ip:-}")"
+    if [[ -n "$ip" ]]; then
+      printf '%s' "$ip"
+      return
+    fi
+  fi
+  printf '<server-ip>'
+}
+
+verify_direct_access() {
+  local listen_addr="$1"
+  local check_url
+  if [[ "$listen_addr" =~ ^:([0-9]+)$ ]]; then
+    check_url="http://127.0.0.1:${BASH_REMATCH[1]}/health/live"
+  elif [[ "$listen_addr" =~ ^127\.0\.0\.1:([0-9]+)$ ]]; then
+    check_url="http://127.0.0.1:${BASH_REMATCH[1]}/health/live"
+  elif [[ "$listen_addr" =~ ^0\.0\.0\.0:([0-9]+)$ ]]; then
+    check_url="http://127.0.0.1:${BASH_REMATCH[1]}/health/live"
+  else
+    check_url="http://127.0.0.1:8080/health/live"
+  fi
+  curl -fsS --max-time 5 "$check_url" >/dev/null
+}
+
+verify_proxy_access() {
+  local server="$1" tls_enabled="$2"
+  if [[ "$tls_enabled" == "1" ]]; then
+    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/health/live" >/dev/null
+    return
+  fi
+  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/health/live" >/dev/null
+}
+
+apply_ufw_rules() {
+  local mode="$1"
+  if ! have_cmd ufw; then
+    return
+  fi
+  if ! run_as_root ufw status >/dev/null 2>&1; then
+    warn "ufw exists but could not be queried; skipping firewall automation."
+    return
+  fi
+  if [[ "$mode" == "proxy" ]]; then
+    if prompt_yes_no "Open firewall ports 80/tcp and 443/tcp via ufw?" 1; then
+      run_as_root ufw allow 80/tcp >/dev/null
+      run_as_root ufw allow 443/tcp >/dev/null
+      log "Applied ufw rules: 80/tcp, 443/tcp"
+    fi
+    return
+  fi
+  if prompt_yes_no "Open firewall port 8080/tcp via ufw for direct access?" 1; then
+    run_as_root ufw allow 8080/tcp >/dev/null
+    log "Applied ufw rule: 8080/tcp"
+  fi
+}
+
+print_cloud_firewall_checklist() {
+  local mode="$1"
+  cat <<EOF
+
+Cloud firewall / security-group checklist:
+  - Ensure DNS points to this server public IP.
+  - Ensure inbound rules allow required ports.
+EOF
+  if [[ "$mode" == "proxy" ]]; then
+    cat <<EOF
+  - Required inbound: TCP 80 and TCP 443.
+EOF
+  else
+    cat <<EOF
+  - Required inbound: TCP 8080.
+EOF
+  fi
+  cat <<EOF
+  - Verify no provider-level ACL/NACL blocks these ports.
+
+EOF
+}
+
 ensure_service_dependencies() {
   local os_id="$1"
   local missing=()
@@ -424,6 +515,10 @@ ensure_service_dependencies() {
   if ! have_cmd pkg-config; then
     missing+=("pkg-config")
     install_pkgs+=("pkg-config")
+  fi
+  if ! have_cmd curl; then
+    missing+=("curl")
+    install_pkgs+=("curl")
   fi
 
   if [[ "${#missing[@]}" -eq 0 ]]; then
@@ -558,6 +653,11 @@ setup_nginx_proxy() {
   "${PREFIX[@]}" ln -sfn "$conf" "$enabled"
   rm -f "$tmp"
 
+  if [[ ! -L "$enabled" ]]; then
+    err "Nginx site enablement failed: ${enabled} symlink missing"
+    exit 1
+  fi
+
   "${PREFIX[@]}" nginx -t
   "${PREFIX[@]}" systemctl enable --now nginx
   "${PREFIX[@]}" systemctl reload nginx
@@ -578,6 +678,10 @@ setup_apache_proxy() {
     "${PREFIX[@]}" a2enmod ssl >/dev/null
   fi
   "${PREFIX[@]}" a2ensite mailclient.conf >/dev/null
+  if [[ ! -L /etc/apache2/sites-enabled/mailclient.conf && ! -f /etc/apache2/sites-enabled/mailclient.conf ]]; then
+    err "Apache2 site enablement failed: /etc/apache2/sites-enabled/mailclient.conf missing"
+    exit 1
+  fi
   "${PREFIX[@]}" apache2ctl configtest
   "${PREFIX[@]}" systemctl enable --now apache2
   "${PREFIX[@]}" systemctl reload apache2
@@ -654,7 +758,7 @@ if [[ "$OS_ID" != "ubuntu" ]]; then
   warn "Detected OS: $OS_ID $OS_VER. This script is validated for Ubuntu Server; continuing in best-effort mode."
 fi
 
-log "U.S. Mail Office interactive installer"
+log "Despatch interactive installer"
 log "Detected platform: ${OS_ID} ${OS_VER}, arch ${UNAME_ARCH} (${GOARCH})"
 
 if ! prompt_yes_no "Continue with installation?" 1; then
@@ -671,6 +775,7 @@ PROXY_SERVER_NAME=""
 PROXY_TLS=0
 PROXY_CERT=""
 PROXY_KEY=""
+DEPLOY_MODE="direct"
 
 BASE_DOMAIN="$(prompt_input "Primary mail domain (used by first-run web setup)" "$BASE_DOMAIN_DEFAULT")"
 LISTEN_ADDR="$(prompt_input "HTTP listen address" "$LISTEN_ADDR_DEFAULT")"
@@ -686,6 +791,7 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
   if [[ "${#WEB_SERVERS[@]}" -gt 0 ]]; then
     if prompt_yes_no "Detected installed reverse proxy ($(IFS=,; echo "${WEB_SERVERS[*]}")). Configure it automatically?" 1; then
       PROXY_SETUP=1
+      DEPLOY_MODE="proxy"
       if [[ "${#WEB_SERVERS[@]}" -eq 1 ]]; then
         PROXY_SERVER="${WEB_SERVERS[0]}"
       else
@@ -808,6 +914,7 @@ set_env_var "$OUT_ENV" "LISTEN_ADDR" "$LISTEN_ADDR"
 set_env_var "$OUT_ENV" "APP_DB_PATH" "$APP_DB_PATH"
 set_env_var "$OUT_ENV" "SESSION_ENCRYPT_KEY" "$SESSION_KEY"
 set_env_var "$OUT_ENV" "COOKIE_SECURE" "true"
+set_env_var "$OUT_ENV" "DEPLOY_MODE" "$DEPLOY_MODE"
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
   set_env_var "$OUT_ENV" "TRUST_PROXY" "true"
 fi
@@ -838,6 +945,7 @@ set_env_var "$OUT_ENV" "DOVECOT_AUTH_MAILDIR_COL" "$DOVECOT_MAILDIR_COL"
 
 log "Generated $OUT_ENV"
 log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
+log "Deployment mode: $DEPLOY_MODE"
 if [[ -n "$SQL_CONF" ]]; then
   log "Detected Dovecot SQL file: $SQL_CONF"
 fi
@@ -906,6 +1014,9 @@ fi
 
 log "Service installed and started: mailclient"
 
+apply_ufw_rules "$DEPLOY_MODE"
+print_cloud_firewall_checklist "$DEPLOY_MODE"
+
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
   log "Configuring ${PROXY_SERVER} reverse proxy"
   APP_UPSTREAM="$LISTEN_ADDR"
@@ -915,14 +1026,68 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
     setup_apache_proxy "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY"
   fi
   log "Reverse proxy configured: ${PROXY_SERVER} (${PROXY_SERVER_NAME})"
+  if [[ "$PROXY_SERVER" == "nginx" ]]; then
+    log "Reverse proxy config path: /etc/nginx/sites-available/mailclient.conf"
+  else
+    log "Reverse proxy config path: /etc/apache2/sites-available/mailclient.conf"
+  fi
 fi
+
+if ! "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
+  err "mailclient service is not active after install."
+  err "Run: systemctl status mailclient --no-pager"
+  exit 1
+fi
+
+if ! verify_direct_access "$LISTEN_ADDR"; then
+  err "Local app health check failed on ${LISTEN_ADDR}."
+  err "Run: /opt/mailclient/mailclient (or check /opt/mailclient/.env and service logs)"
+  err "Run: journalctl -u mailclient -n 100 --no-pager"
+  exit 1
+fi
+
+if [[ "$DEPLOY_MODE" == "proxy" ]]; then
+  if ! verify_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS"; then
+    err "Reverse proxy health check failed for ${PROXY_SERVER_NAME}."
+    err "Component likely failing: proxy routing or vhost mismatch."
+    if [[ "$PROXY_SERVER" == "nginx" ]]; then
+      err "Run: nginx -t && systemctl status nginx --no-pager"
+    else
+      err "Run: apache2ctl configtest && systemctl status apache2 --no-pager"
+    fi
+    err "Run: bash $ROOT_DIR/scripts/diagnose_access.sh"
+    exit 1
+  fi
+fi
+
+SERVER_IP="$(detect_primary_ip)"
 cat <<DONE
 
 Open in browser:
-  http://<server-ip-or-domain>:8080
+DONE
+if [[ "$DEPLOY_MODE" == "proxy" ]]; then
+  if [[ "$PROXY_TLS" == "1" ]]; then
+    cat <<DONE
+  https://${PROXY_SERVER_NAME}
+DONE
+  else
+    cat <<DONE
+  http://${PROXY_SERVER_NAME}
+DONE
+  fi
+else
+  cat <<DONE
+  http://${SERVER_IP}:8080
+DONE
+fi
+cat <<DONE
 
 First-run OOBE is web-only and will ask for:
   - domain (pre-filled: ${BASE_DOMAIN})
   - admin email (default: webmaster@${BASE_DOMAIN})
   - admin password
 DONE
+
+if prompt_yes_no "Run Internet accessibility diagnostics now?" 1; then
+  bash "$ROOT_DIR/scripts/diagnose_access.sh" || true
+fi

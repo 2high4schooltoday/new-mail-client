@@ -1,4 +1,4 @@
-# U.S. Mail Office (Go)
+# Despatch (Go)
 
 Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot + Maildir infrastructure.
 
@@ -29,7 +29,8 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 1. Run interactive installer:
    - `./scripts/auto_install.sh`
 2. Open:
-   - `http://<server-ip>:8080`
+   - `proxy mode`: `http(s)://<your-domain>`
+   - `direct mode`: `http://<server-ip>:8080`
 3. Complete web OOBE:
    - Choose region
    - Set domain
@@ -69,6 +70,11 @@ What it auto-detects:
 - sensible default domain from host (`/etc/mailname` or FQDN)
 - installed reverse proxy (`nginx` or `apache2`) and can configure it automatically
 
+Installer deployment modes:
+- `proxy` mode (recommended): app binds to `127.0.0.1:8080`, reverse proxy serves public traffic on `80/443`.
+- `direct` mode: app serves directly on `:8080`.
+- Final install message is mode-aware and shows the correct URL for your chosen mode.
+
 What is intentionally deferred to web UI OOBE:
 - Admin email/password creation
 - Final first-run setup confirmation
@@ -76,13 +82,24 @@ What is intentionally deferred to web UI OOBE:
 Note: fully custom SQL/auth setups may still need manual `.env` tweaks.
 
 ## Uninstall (safe, interactive)
-Removes only Mailclient-managed artifacts and leaves Postfix/Dovecot/other services untouched.
+Removes only Despatch-managed artifacts and leaves Postfix/Dovecot/other services untouched.
 
 From local checkout:
 - `./scripts/uninstall.sh`
 
 Standalone from server console (`wget`):
 - `wget -O uninstall.sh https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/uninstall.sh && chmod +x uninstall.sh && ./uninstall.sh`
+
+## Internet access diagnostics
+Run connectivity doctor at any time:
+- `./scripts/diagnose_access.sh`
+
+It checks:
+- `mailclient` service health and local `/health/live`
+- reverse proxy status/routing (Nginx/Apache2)
+- listening ports
+- `ufw` rules
+- DNS vs server public IP (when tools are available)
 
 ## Dovecot provisioning notes
 Set `DOVECOT_AUTH_DB_DRIVER` and `DOVECOT_AUTH_DB_DSN` to enable automatic writes to your Dovecot auth DB.
