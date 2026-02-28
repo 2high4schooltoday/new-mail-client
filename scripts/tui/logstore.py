@@ -23,17 +23,44 @@ class LogEntry:
 class LogStore:
     def __init__(self, max_entries: int = 5000, log_dir: Path | None = None) -> None:
         self.entries: deque[LogEntry] = deque(maxlen=max_entries)
-        if log_dir is None:
-            preferred = Path("/var/log/despatch")
-            if preferred.exists() or preferred.parent.exists():
-                log_dir = preferred
-            else:
-                log_dir = Path.home() / ".cache" / "mailclient-tui"
-        self.log_dir = log_dir
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir, fallback_reason = self._resolve_log_dir(log_dir)
         ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         self.log_path = self.log_dir / f"tui-{ts}.log"
         self.summary_path = self.log_dir / f"summary-{ts}.json"
+        self.append(
+            "info",
+            "startup",
+            f"log_path={self.log_path}{f' (fallback: {fallback_reason})' if fallback_reason else ''}",
+        )
+
+    @staticmethod
+    def _resolve_log_dir(log_dir: Path | None) -> tuple[Path, str]:
+        fallback = Path.home() / ".cache" / "mailclient-tui" / "logs"
+        candidates: list[Path] = []
+        if log_dir is not None:
+            candidates.append(log_dir)
+        else:
+            candidates.append(Path("/var/log/despatch"))
+            candidates.append(fallback)
+
+        last_err = ""
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                # Explicit writability probe.
+                probe = candidate / ".write-test"
+                with probe.open("w", encoding="utf-8") as fh:
+                    fh.write("ok\n")
+                probe.unlink(missing_ok=True)
+                return candidate, last_err
+            except PermissionError as exc:
+                last_err = f"permission denied for {candidate}: {exc}"
+            except OSError as exc:
+                last_err = f"cannot use {candidate}: {exc}"
+
+        # Final guaranteed attempt for caller-provided unwritable path.
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback, last_err or "using fallback log directory"
 
     def append(self, level: str, stage_id: str, message: str, ts: float | None = None) -> LogEntry:
         entry = LogEntry(ts=ts or time.time(), level=level, stage_id=stage_id, message=message)

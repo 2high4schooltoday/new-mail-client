@@ -11,6 +11,7 @@ APT_UPDATED=0
 DESPATCH_NONINTERACTIVE="${DESPATCH_NONINTERACTIVE:-0}"
 DESPATCH_TUI_MODE="${DESPATCH_TUI_MODE:-0}"
 DESPATCH_RUN_ID="${DESPATCH_RUN_ID:-run-$(date +%s)}"
+DESPATCH_BOOTSTRAPPED="${DESPATCH_BOOTSTRAPPED:-0}"
 CURRENT_STAGE_ID=""
 CURRENT_STAGE_TITLE=""
 CURRENT_STAGE_WEIGHT=0
@@ -354,6 +355,11 @@ ensure_repo_checkout_or_bootstrap() {
   if [[ -f "$ENV_EXAMPLE" && -f "$ROOT_DIR/go.mod" && -f "$ROOT_DIR/cmd/server/main.go" ]]; then
     return
   fi
+  if [[ "$DESPATCH_BOOTSTRAPPED" == "1" ]]; then
+    err "Bootstrap relaunch already attempted, but source files are still missing."
+    err "Check repository URL/ref and permissions for installer workspace."
+    exit 1
+  fi
 
   warn "App source files were not found next to this script."
   warn "Switching to standalone bootstrap mode (fetch from GitHub)."
@@ -396,7 +402,17 @@ ensure_repo_checkout_or_bootstrap() {
   fi
 
   log "Re-launching installer from: $checkout_dir"
-  run_as_root env MAILCLIENT_REPO_URL="$repo_url" MAILCLIENT_REPO_REF="$repo_ref" bash "$target"
+  local -a relaunch_env=()
+  local env_line env_key env_val
+  while IFS= read -r env_line; do
+    env_key="${env_line%%=*}"
+    env_val="${env_line#*=}"
+    relaunch_env+=("${env_key}=${env_val}")
+  done < <(env | grep -E '^DESPATCH_[A-Za-z0-9_]*=' || true)
+  relaunch_env+=("DESPATCH_BOOTSTRAPPED=1")
+  relaunch_env+=("MAILCLIENT_REPO_URL=${repo_url}")
+  relaunch_env+=("MAILCLIENT_REPO_REF=${repo_ref}")
+  run_as_root env "${relaunch_env[@]}" bash "$target"
   exit 0
 }
 

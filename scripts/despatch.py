@@ -7,6 +7,7 @@ import curses
 import os
 import queue
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -62,6 +63,7 @@ from tui.models import (
     DiagnoseSpec,
     InstallSpec,
     OperationResult,
+    RunnerError,
     RunState,
     UninstallSpec,
 )
@@ -91,6 +93,7 @@ class DespatchTUI:
         self.cancel_token: CancelToken | None = None
         self.run_state: RunState | None = None
         self.last_result: OperationResult | None = None
+        self.last_summary_payload: dict[str, Any] = {}
         self.active_operation: str = ""
         self.search_query = ""
 
@@ -139,6 +142,7 @@ class DespatchTUI:
             ("remove_apache_site", "Remove Apache2 site", "bool"),
             ("remove_checkout", "Remove /opt/mailclient-installer", "bool"),
         ]
+        self.ui.status_line = f"Ready. Log file: {self.logstore.log_path}"
 
     def run(self) -> None:
         curses.curs_set(0)
@@ -279,6 +283,8 @@ class DespatchTUI:
             safe_addstr(self.stdscr, y + 5, left_w + 2, f"Active: {spinner(self.ui.spinner_tick)} {run.active_stage_id}")
         elif run.failed_stage:
             safe_addstr(self.stdscr, y + 5, left_w + 2, f"Failed stage: {run.failed_stage}", curses.color_pair(3) | curses.A_BOLD)
+        if run.status == "failed" and self.last_result:
+            self._draw_failure_inspector(y + 6, left_w + 2, top_h - 7, right_w - 4)
 
         rows = top_h - 3
         for idx, stage_id in enumerate(run.stage_order[:rows]):
@@ -316,14 +322,30 @@ class DespatchTUI:
                 attr = curses.color_pair(6)
             safe_addstr(self.stdscr, y + top_h + 1 + idx, 2, entry.format_line(), attr)
 
+    def _draw_failure_inspector(self, y: int, x: int, h: int, w: int) -> None:
+        if h < 3 or w < 20 or not self.last_result:
+            return
+        errors = self.last_result.errors
+        if not errors:
+            safe_addstr(self.stdscr, y, x, "Failure inspector: no detailed errors.")
+            return
+        primary = errors[0]
+        category = self._failure_category(errors)
+        safe_addstr(self.stdscr, y, x, f"Failure Inspector [{category}]", curses.A_BOLD)
+        safe_addstr(self.stdscr, y + 1, x, f"{primary.code}: {primary.message}"[:w], curses.color_pair(3))
+        if primary.suggested_fix:
+            safe_addstr(self.stdscr, y + 2, x, f"Fix: {primary.suggested_fix}"[:w], curses.A_DIM)
+        for idx, action in enumerate(self.last_result.next_actions[: max(0, h - 4)]):
+            safe_addstr(self.stdscr, y + 3 + idx, x, f"- {action}"[:w], curses.A_DIM)
+
     def _draw_footer(self, y: int, w: int) -> None:
         draw_box(self.stdscr, y, 0, 3, w, " KEYS ")
         if self.ui.mode == "catalog":
             keys = "j/k move | enter open | q quit"
         elif self.ui.mode in {"install_form", "uninstall_form"}:
-            keys = "j/k move | enter edit/toggle | r run | b back"
+            keys = "j/k move | enter edit | r run | b back | editor: enter save / esc cancel / ctrl+u clear"
         else:
-            keys = "x cancel | r rerun | l levels | / search logs | g/G scroll | e export | b back"
+            keys = "x cancel | r rerun | d diagnose | l levels | / search logs | g/G scroll | e export | b back"
         safe_addstr(self.stdscr, y + 1, 2, keys)
         safe_addstr(self.stdscr, y + 1, max(2, w - min(65, w - 4)), self.ui.status_line[: max(0, w - 6)], curses.A_DIM)
 
@@ -393,19 +415,25 @@ class DespatchTUI:
         current = getattr(obj, name)
 
         if ftype == "bool":
-            setattr(obj, name, not bool(current))
+            next_value = not bool(current)
+            if name in {"install_service", "proxy_setup"} and not next_value:
+                if not self._confirm_dialog(
+                    f"Disable {field[1]}?",
+                    "This may prevent service startup or external access.",
+                ):
+                    self.ui.status_line = f"{name} unchanged"
+                    return
+            setattr(obj, name, next_value)
             self.ui.status_line = f"{name} set to {getattr(obj, name)}"
             return
 
         if ftype == "choice":
-            options = field[3]
-            cur = str(current)
-            try:
-                idx = options.index(cur)
-            except ValueError:
-                idx = 0
-            setattr(obj, name, options[(idx + 1) % len(options)])
-            self.ui.status_line = f"{name} set to {getattr(obj, name)}"
+            selected = self._select_choice(field[1], list(field[3]), str(current))
+            if selected is None:
+                self.ui.status_line = f"{name} unchanged"
+                return
+            setattr(obj, name, selected)
+            self.ui.status_line = f"{name} set to {selected}"
             return
 
         value = self._prompt_line(f"{field[1]}", str(current))
@@ -415,22 +443,159 @@ class DespatchTUI:
 
     def _prompt_line(self, label: str, initial: str) -> str | None:
         h, w = self.stdscr.getmaxyx()
-        win_y = h - 5
-        draw_box(self.stdscr, win_y, 2, 4, w - 4, " INPUT ")
-        safe_addstr(self.stdscr, win_y + 1, 4, f"{label}: ")
-        curses.echo()
+        win_h = 5
+        win_y = max(0, h - win_h - 1)
+        draw_box(self.stdscr, win_y, 2, win_h, w - 4, " INPUT ")
+        safe_addstr(self.stdscr, win_y + 1, 4, f"{label}:")
+        safe_addstr(self.stdscr, win_y + 3, 4, "Enter=save Esc=cancel Ctrl+U=clear", curses.A_DIM)
+        self.stdscr.timeout(-1)
         curses.curs_set(1)
-        self.stdscr.refresh()
+        buf = list(initial)
+        cur = len(buf)
+        input_x = len(label) + 7
+        max_len = max(8, w - input_x - 6)
         try:
-            raw = self.stdscr.getstr(win_y + 1, len(label) + 6, w - len(label) - 12)
-            if not raw:
-                return initial
-            return raw.decode("utf-8", errors="ignore").strip() or initial
+            while True:
+                text = "".join(buf)
+                if len(text) <= max_len:
+                    display = text
+                    offset = 0
+                else:
+                    offset = max(0, cur - max_len)
+                    display = text[offset : offset + max_len]
+                safe_addstr(self.stdscr, win_y + 1, input_x, " " * max_len)
+                safe_addstr(self.stdscr, win_y + 1, input_x, display)
+                cursor_col = input_x + max(0, min(max_len - 1, cur - offset))
+                self.stdscr.move(win_y + 1, cursor_col)
+                self.stdscr.refresh()
+                key = self.stdscr.get_wch()
+
+                if is_enter(key):
+                    return "".join(buf).strip()
+                if key in ("\x1b", 27, curses.KEY_EXIT):
+                    return None
+                if key == "\x15":  # Ctrl+U
+                    buf = []
+                    cur = 0
+                    continue
+                if key in (curses.KEY_LEFT, "h"):
+                    cur = max(0, cur - 1)
+                    continue
+                if key in (curses.KEY_RIGHT, "l"):
+                    cur = min(len(buf), cur + 1)
+                    continue
+                if key == curses.KEY_HOME:
+                    cur = 0
+                    continue
+                if key == curses.KEY_END:
+                    cur = len(buf)
+                    continue
+                if key == curses.KEY_DC:
+                    if cur < len(buf):
+                        del buf[cur]
+                    continue
+                if is_backspace(key) or key in ("\x7f", "\b"):
+                    if cur > 0:
+                        cur -= 1
+                        del buf[cur]
+                    continue
+                if isinstance(key, str) and key.isprintable():
+                    if len(buf) < 2048:
+                        buf.insert(cur, key)
+                        cur += 1
+                    continue
         except Exception:
             return None
         finally:
-            curses.noecho()
+            self.stdscr.timeout(120)
             curses.curs_set(0)
+
+    def _select_choice(self, label: str, options: list[str], current: str) -> str | None:
+        if not options:
+            return None
+        h, w = self.stdscr.getmaxyx()
+        win_h = min(max(8, len(options) + 4), h - 2)
+        win_w = min(max(40, len(label) + 10), w - 4)
+        y = max(1, (h - win_h) // 2)
+        x = max(2, (w - win_w) // 2)
+        idx = options.index(current) if current in options else 0
+        top = 0
+        self.stdscr.timeout(-1)
+        try:
+            while True:
+                draw_box(self.stdscr, y, x, win_h, win_w, f" {label} ")
+                viewport = win_h - 4
+                if idx < top:
+                    top = idx
+                if idx >= top + viewport:
+                    top = idx - viewport + 1
+                for row in range(viewport):
+                    opt_i = top + row
+                    line_y = y + 2 + row
+                    safe_addstr(self.stdscr, line_y, x + 2, " " * (win_w - 4))
+                    if opt_i >= len(options):
+                        continue
+                    opt = options[opt_i]
+                    attr = curses.A_REVERSE if opt_i == idx else 0
+                    safe_addstr(self.stdscr, line_y, x + 2, opt[: win_w - 5], attr)
+                safe_addstr(self.stdscr, y + win_h - 2, x + 2, "Enter=select Esc=cancel", curses.A_DIM)
+                self.stdscr.refresh()
+                key = self.stdscr.get_wch()
+                if key in ("j", curses.KEY_DOWN):
+                    idx = clamp(idx + 1, 0, len(options) - 1)
+                    continue
+                if key in ("k", curses.KEY_UP):
+                    idx = clamp(idx - 1, 0, len(options) - 1)
+                    continue
+                if key in (curses.KEY_NPAGE,):
+                    idx = clamp(idx + viewport, 0, len(options) - 1)
+                    continue
+                if key in (curses.KEY_PPAGE,):
+                    idx = clamp(idx - viewport, 0, len(options) - 1)
+                    continue
+                if is_enter(key):
+                    return options[idx]
+                if key in ("\x1b", 27, curses.KEY_EXIT):
+                    return None
+        finally:
+            self.stdscr.timeout(120)
+
+    def _confirm_dialog(self, title: str, detail: str) -> bool:
+        h, w = self.stdscr.getmaxyx()
+        win_h = 8
+        win_w = min(max(56, len(detail) + 6), w - 4)
+        y = max(1, (h - win_h) // 2)
+        x = max(2, (w - win_w) // 2)
+        selected_yes = False
+        self.stdscr.timeout(-1)
+        try:
+            while True:
+                draw_box(self.stdscr, y, x, win_h, win_w, " CONFIRM ")
+                safe_addstr(self.stdscr, y + 1, x + 2, title[: win_w - 4], curses.A_BOLD)
+                safe_addstr(self.stdscr, y + 2, x + 2, detail[: win_w - 4])
+                no_attr = curses.A_REVERSE if not selected_yes else 0
+                yes_attr = curses.A_REVERSE if selected_yes else 0
+                safe_addstr(self.stdscr, y + 5, x + 2, "[ No ]", no_attr)
+                safe_addstr(self.stdscr, y + 5, x + 12, "[ Yes ]", yes_attr)
+                safe_addstr(self.stdscr, y + 6, x + 2, "Left/Right select, Enter confirm, Esc cancel", curses.A_DIM)
+                self.stdscr.refresh()
+                key = self.stdscr.get_wch()
+                if key in (curses.KEY_LEFT, "h"):
+                    selected_yes = False
+                    continue
+                if key in (curses.KEY_RIGHT, "l"):
+                    selected_yes = True
+                    continue
+                if key in ("y", "Y"):
+                    return True
+                if key in ("n", "N"):
+                    return False
+                if is_enter(key):
+                    return selected_yes
+                if key in ("\x1b", 27, curses.KEY_EXIT):
+                    return False
+        finally:
+            self.stdscr.timeout(120)
 
     def _start_run(self, operation: str) -> None:
         if self.run_thread and self.run_thread.is_alive():
@@ -445,13 +610,45 @@ class DespatchTUI:
 
         run_id = f"local-{int(time.time())}"
         self.run_state = new_run_state(operation, run_id, stage_defs)
-        self.cancel_token = CancelToken()
         self.active_operation = operation
         self.last_result = None
+        self.last_summary_payload = {}
         self.ui.mode = "run"
         self.ui.run_scroll = 0
         self.ui.status_line = f"Running {operation}..."
 
+        if operation == "install":
+            preflight_error = self._check_install_preflight()
+            if preflight_error is not None:
+                apply_runner_event(self.run_state, {"type": "run_start", "run_id": run_id, "operation": operation})
+                apply_runner_event(
+                    self.run_state,
+                    {"type": "stage_start", "stage_id": "preflight", "title": "Preflight", "weight": "10", "message": "started"},
+                )
+                apply_runner_event(
+                    self.run_state,
+                    {"type": "stage_result", "stage_id": "preflight", "status": "failed", "error_code": "E_PREFLIGHT"},
+                )
+                apply_runner_event(
+                    self.run_state,
+                    {"type": "run_result", "status": "failed", "failed_stage": "preflight", "exit_code": "1"},
+                )
+                self.logstore.append("error", "preflight", preflight_error.message)
+                self.last_result = OperationResult(
+                    status="failed",
+                    errors=[preflight_error],
+                    artifacts={"full_log": str(self.logstore.log_path)},
+                    next_actions=[
+                        "Run as root, or pre-authorize sudo: sudo -v",
+                        "Then restart despatch.py and run install again.",
+                    ],
+                )
+                self.last_summary_payload = self._build_summary_payload(operation, self.last_result)
+                self.logstore.export_summary(self.last_summary_payload)
+                self.ui.status_line = preflight_error.message
+                return
+
+        self.cancel_token = CancelToken()
         def emit(evt: dict[str, Any]) -> None:
             self.events.put(evt)
 
@@ -463,14 +660,8 @@ class DespatchTUI:
             else:
                 result = self.runner.run_diagnose(DiagnoseSpec(), self.logstore, self.cancel_token or CancelToken(), emit)
             self.last_result = result
-            payload = {
-                "status": result.status,
-                "operation": operation,
-                "errors": [e.__dict__ for e in result.errors],
-                "artifacts": result.artifacts,
-                "next_actions": result.next_actions,
-                "ts": time.time(),
-            }
+            payload = self._build_summary_payload(operation, result)
+            self.last_summary_payload = payload
             summary = self.logstore.export_summary(payload)
             self.events.put({"type": "log", "level": "info", "stage_id": "summary", "message": f"Summary exported: {summary}"})
 
@@ -528,6 +719,13 @@ class DespatchTUI:
                 self._start_run(self.active_operation)
             return False
 
+        if key in ("d", "D"):
+            if self.run_thread and self.run_thread.is_alive():
+                self.ui.status_line = "Run already in progress."
+                return False
+            self._start_run("diagnose")
+            return False
+
         if key == "l":
             masks = [
                 {"debug", "info", "warn", "error"},
@@ -570,14 +768,7 @@ class DespatchTUI:
 
         if key in ("e", "E"):
             if self.last_result:
-                payload = {
-                    "status": self.last_result.status,
-                    "operation": self.active_operation,
-                    "errors": [e.__dict__ for e in self.last_result.errors],
-                    "artifacts": self.last_result.artifacts,
-                    "next_actions": self.last_result.next_actions,
-                    "ts": time.time(),
-                }
+                payload = self.last_summary_payload or self._build_summary_payload(self.active_operation, self.last_result)
                 path = self.logstore.export_summary(payload)
                 self.ui.status_line = f"Exported summary: {path}"
             else:
@@ -591,6 +782,92 @@ class DespatchTUI:
             return True
 
         return False
+
+    def _check_install_preflight(self) -> RunnerError | None:
+        if os.geteuid() == 0:
+            return None
+        if not self._command_exists("sudo"):
+            return RunnerError(
+                code="E_PREFLIGHT",
+                message="Install requires root privileges or sudo, but sudo is unavailable.",
+                stage_id="preflight",
+                suggested_fix="Run the TUI as root.",
+            )
+        try:
+            probe = subprocess.run(
+                ["sudo", "-n", "true"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                check=False,
+            )
+        except Exception as exc:
+            return RunnerError(
+                code="E_PREFLIGHT",
+                message=f"Failed privilege preflight: {exc}",
+                stage_id="preflight",
+                suggested_fix="Run as root or refresh sudo credentials.",
+            )
+        if probe.returncode == 0:
+            return None
+        return RunnerError(
+            code="E_PREFLIGHT",
+            message="Install requires root privileges. sudo -n failed (no cached credentials).",
+            stage_id="preflight",
+            suggested_fix="Run 'sudo -v' first, or launch despatch.py as root.",
+        )
+
+    @staticmethod
+    def _command_exists(name: str) -> bool:
+        return any(
+            os.access(Path(path) / name, os.X_OK)
+            for path in os.environ.get("PATH", "").split(os.pathsep)
+            if path
+        )
+
+    def _build_summary_payload(self, operation: str, result: OperationResult) -> dict[str, Any]:
+        failing_invariant = ""
+        if result.errors:
+            failing_invariant = f"{result.errors[0].code}: {result.errors[0].message}"
+        return {
+            "status": result.status,
+            "operation": operation,
+            "errors": [e.__dict__ for e in result.errors],
+            "artifacts": result.artifacts,
+            "next_actions": result.next_actions,
+            "failing_invariant": failing_invariant,
+            "spec_snapshot": self._spec_snapshot(operation),
+            "ts": time.time(),
+        }
+
+    def _spec_snapshot(self, operation: str) -> dict[str, Any]:
+        if operation == "install":
+            raw = dict(self.install_spec.__dict__)
+        elif operation == "uninstall":
+            raw = dict(self.uninstall_spec.__dict__)
+        else:
+            raw = {}
+        for key in ("dovecot_auth_db_dsn", "proxy_key"):
+            if key in raw and raw[key]:
+                raw[key] = "***REDACTED***"
+        return raw
+
+    @staticmethod
+    def _failure_category(errors: list[RunnerError]) -> str:
+        codes = {err.code for err in errors}
+        if "UNIT_MISSING" in codes:
+            return "UNIT_MISSING"
+        if "SERVICE_INACTIVE" in codes:
+            return "SERVICE_INACTIVE"
+        if "HEALTH_FAIL" in codes:
+            return "HEALTH_FAIL"
+        if "E_PREFLIGHT" in codes:
+            return "E_PREFLIGHT"
+        if "E_PROTOCOL" in codes:
+            return "E_PROTOCOL"
+        if "E_SERVICE" in codes:
+            return "E_SERVICE"
+        return "GENERAL_FAILURE"
 
 
 def _main(stdscr: curses.window) -> None:

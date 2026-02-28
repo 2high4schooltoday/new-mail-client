@@ -3,8 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.tui.models import INSTALL_STAGE_DEFS, InstallSpec
+from scripts.tui.logstore import LogStore
+from scripts.tui.models import AppPaths
+from scripts.tui.runner import OperationRunner
 from scripts.tui.state import apply_runner_event, new_run_state
 
 
@@ -34,6 +38,82 @@ class StateReducerTests(unittest.TestCase):
         apply_runner_event(run, {"type": "run_result", "status": "failed", "failed_stage": "deps", "exit_code": "1"})
         self.assertEqual(run.status, "failed")
         self.assertEqual(run.failed_stage, "deps")
+
+
+class LogStoreTests(unittest.TestCase):
+    def test_logstore_falls_back_when_preferred_dir_unwritable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            real_mkdir = Path.mkdir
+
+            def fake_mkdir(path_obj: Path, *args: object, **kwargs: object) -> None:
+                if str(path_obj) == "/var/log/despatch":
+                    raise PermissionError("denied")
+                return real_mkdir(path_obj, *args, **kwargs)
+
+            with mock.patch("scripts.tui.logstore.Path.home", return_value=home), mock.patch(
+                "scripts.tui.logstore.Path.mkdir",
+                new=fake_mkdir,
+            ):
+                store = LogStore(max_entries=32, log_dir=Path("/var/log/despatch"))
+                expected_root = home / ".cache" / "mailclient-tui" / "logs"
+                self.assertTrue(str(store.log_dir).startswith(str(expected_root)))
+                self.assertTrue(store.log_path.exists())
+
+
+class RunnerTests(unittest.TestCase):
+    def _runner(self, tmp: Path) -> OperationRunner:
+        paths = AppPaths(
+            root_dir=tmp,
+            scripts_dir=tmp,
+            install_script=tmp / "auto_install.sh",
+            uninstall_script=tmp / "uninstall.sh",
+            diagnose_script=tmp / "diagnose_access.sh",
+        )
+        return OperationRunner(paths)
+
+    def test_missing_run_result_is_protocol_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            runner = self._runner(tmp)
+            logstore = LogStore(max_entries=128, log_dir=tmp / "logs")
+            spec = InstallSpec(base_domain="example.com", proxy_setup=False, install_service=False)
+
+            def fake_stream(_cmd, _cwd, _env, _cancel, on_line):  # type: ignore[no-untyped-def]
+                on_line('::despatch-event::{"type":"stage_result","stage_id":"preflight","status":"ok","error_code":""}')
+                return 0
+
+            with mock.patch("scripts.tui.runner.stream_command", new=fake_stream):
+                result = runner.run_install(spec, logstore, mock.Mock(cancelled=False), lambda _evt: None)
+            self.assertEqual(result.status, "failed")
+            self.assertTrue(any(err.code == "E_PROTOCOL" for err in result.errors))
+
+    def test_post_install_verifier_reports_service_error_when_unit_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            runner = self._runner(tmp)
+            logstore = LogStore(max_entries=128, log_dir=tmp / "logs")
+            spec = InstallSpec(base_domain="example.com", proxy_setup=False, install_service=True)
+
+            def fake_cmd_output(cmd: list[str], timeout: float = 2.0) -> str:
+                _ = timeout
+                if cmd[:2] == ["systemctl", "list-unit-files"]:
+                    return ""
+                if cmd[:2] == ["systemctl", "is-active"]:
+                    return "inactive"
+                return ""
+
+            with mock.patch("scripts.tui.runner.command_output", side_effect=fake_cmd_output), mock.patch(
+                "scripts.tui.runner.OperationRunner._http_health_ok",
+                return_value=(True, "ok"),
+            ):
+                verify = runner._verify_install_postchecks(spec, logstore, "run1")
+            self.assertFalse(bool(verify["ok"]))
+            errs = verify["errors"]
+            assert isinstance(errs, list)
+            codes = {err.code for err in errs}
+            self.assertIn("E_SERVICE", codes)
+            self.assertIn("UNIT_MISSING", codes)
 
 
 if __name__ == "__main__":

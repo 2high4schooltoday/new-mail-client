@@ -4,6 +4,8 @@ import json
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -20,7 +22,7 @@ from .models import (
     StageDef,
     UninstallSpec,
 )
-from .system_ops import CancelToken, AppPaths, stream_command
+from .system_ops import CancelToken, AppPaths, command_output, stream_command
 
 EVENT_PREFIX = "::despatch-event::"
 LOG_RE = re.compile(r"^\[(INFO|WARN|ERR\s*)\]\s*(.*)$")
@@ -50,6 +52,7 @@ class OperationRunner:
             logstore=logstore,
             cancel=cancel,
             on_event=on_event,
+            install_spec=spec,
         )
 
     def run_uninstall(
@@ -102,6 +105,7 @@ class OperationRunner:
         logstore: LogStore,
         cancel: CancelToken,
         on_event: EventCb,
+        install_spec: InstallSpec | None = None,
     ) -> OperationResult:
         run_id = str(uuid.uuid4())
         env["DESPATCH_TUI_MODE"] = "1"
@@ -109,6 +113,10 @@ class OperationRunner:
 
         seen_run_result = False
         seen_stage_result = False
+        had_run_result_event = False
+        run_result_status = ""
+        terminal_stage_id = stage_defs[-1].stage_id if stage_defs else ""
+        terminal_stage_ok = False
         errors: list[RunnerError] = []
         active_stage = stage_defs[0].stage_id if stage_defs else ""
 
@@ -148,7 +156,7 @@ class OperationRunner:
             )
 
         def on_line(line: str) -> None:
-            nonlocal seen_run_result, seen_stage_result, active_stage
+            nonlocal seen_run_result, seen_stage_result, had_run_result_event, active_stage, run_result_status, terminal_stage_ok
             if line.startswith(EVENT_PREFIX):
                 payload = line[len(EVENT_PREFIX) :].strip()
                 try:
@@ -158,8 +166,12 @@ class OperationRunner:
                         active_stage = str(evt.get("stage_id", active_stage))
                     if evt_type == "stage_result":
                         seen_stage_result = True
+                        if str(evt.get("stage_id", "")) == terminal_stage_id:
+                            terminal_stage_ok = str(evt.get("status", "")) == "ok"
                     if evt_type == "run_result":
                         seen_run_result = True
+                        had_run_result_event = True
+                        run_result_status = str(evt.get("status", ""))
                     on_event(evt)
                 except json.JSONDecodeError:
                     logstore.append("warn", active_stage, f"Malformed event: {payload}")
@@ -233,22 +245,101 @@ class OperationRunner:
 
         if not seen_run_result:
             status = "ok" if exit_code == 0 else "failed"
+            run_result_status = status
+            if operation == "diagnose":
+                on_event(
+                    {
+                        "type": "run_result",
+                        "status": status,
+                        "failed_stage": "" if exit_code == 0 else active_stage,
+                        "exit_code": str(exit_code),
+                    }
+                )
+                seen_run_result = True
+
+        protocol_issue = self._detect_protocol_issue(
+            operation=operation,
+            exit_code=exit_code,
+            seen_run_result=had_run_result_event,
+            seen_stage_result=seen_stage_result,
+            run_result_status=run_result_status,
+            terminal_stage_id=terminal_stage_id,
+            terminal_stage_ok=terminal_stage_ok,
+        )
+        if protocol_issue:
             on_event(
                 {
                     "type": "run_result",
-                    "status": status,
-                    "failed_stage": "" if exit_code == 0 else active_stage,
-                    "exit_code": str(exit_code),
+                    "status": "failed",
+                    "failed_stage": active_stage or terminal_stage_id,
+                    "exit_code": str(exit_code if exit_code != 0 else 1),
                 }
+            )
+            return OperationResult(
+                status="failed",
+                errors=[
+                    RunnerError(
+                        code="E_PROTOCOL",
+                        message=protocol_issue,
+                        stage_id=active_stage or terminal_stage_id,
+                        suggested_fix="Re-run installer from latest scripts and inspect event/log output.",
+                    )
+                ],
+                artifacts={"full_log": str(logstore.log_path)},
+                next_actions=[
+                    "Update scripts and retry.",
+                    "Run diagnostics to confirm current deployment state.",
+                ],
+            )
+
+        if run_result_status and run_result_status not in {"ok", "partial"}:
+            if not errors:
+                errors.append(
+                    RunnerError(
+                        code="E_COMMAND",
+                        message=f"Operation reported status={run_result_status}",
+                        stage_id=active_stage,
+                        suggested_fix="Inspect failure inspector and logs.",
+                    )
+                )
+            return OperationResult(
+                status="failed",
+                errors=errors,
+                artifacts={"full_log": str(logstore.log_path)},
+                next_actions=[
+                    "Review failure inspector details.",
+                    "Run diagnostics from the tool catalog.",
+                ],
             )
 
         if exit_code == 0:
+            artifacts = {"full_log": str(logstore.log_path)}
+            if operation == "install" and install_spec is not None:
+                verify = self._verify_install_postchecks(install_spec, logstore, run_id)
+                artifacts.update(verify["artifacts"])
+                if not verify["ok"]:
+                    on_event(
+                        {
+                            "type": "run_result",
+                            "status": "failed",
+                            "failed_stage": "post_checks",
+                            "exit_code": "1",
+                        }
+                    )
+                    return OperationResult(
+                        status="failed",
+                        errors=verify["errors"],
+                        artifacts=artifacts,
+                        next_actions=verify["next_actions"],
+                    )
+
+            next_actions = ["Open web UI and verify OOBE/mail access."]
+            if operation == "install" and install_spec is not None and not install_spec.install_service:
+                next_actions = ["Service install skipped intentionally (install_service=false). Start manually if needed."]
             return OperationResult(
                 status="ok",
-                artifacts={
-                    "full_log": str(logstore.log_path),
-                },
-                next_actions=["Open web UI and verify OOBE/mail access."],
+                artifacts=artifacts,
+                next_actions=next_actions,
             )
 
         if not errors:
@@ -272,3 +363,143 @@ class OperationRunner:
                 "Run diagnostics from the tool catalog.",
             ],
         )
+
+    @staticmethod
+    def _detect_protocol_issue(
+        *,
+        operation: str,
+        exit_code: int,
+        seen_run_result: bool,
+        seen_stage_result: bool,
+        run_result_status: str,
+        terminal_stage_id: str,
+        terminal_stage_ok: bool,
+    ) -> str:
+        if operation not in {"install", "uninstall"}:
+            return ""
+
+        if not seen_run_result:
+            return "Missing run_result event from installer protocol."
+
+        if exit_code == 0 and not terminal_stage_ok and terminal_stage_id:
+            return f"Missing terminal stage_result success for '{terminal_stage_id}'."
+
+        if run_result_status == "ok" and not seen_stage_result:
+            return "run_result=ok received without any stage_result events."
+
+        return ""
+
+    def _verify_install_postchecks(
+        self,
+        spec: InstallSpec,
+        logstore: LogStore,
+        run_id: str,
+    ) -> dict[str, object]:
+        if not spec.install_service:
+            return {
+                "ok": True,
+                "errors": [],
+                "artifacts": {},
+                "next_actions": ["Service install skipped intentionally (install_service=false)."],
+            }
+
+        checks: dict[str, str] = {}
+        errors: list[RunnerError] = []
+
+        unit_listing = command_output(
+            ["systemctl", "list-unit-files", "--type=service", "--no-pager", "mailclient.service"],
+            timeout=5.0,
+        )
+        checks["systemctl_list_unit_files"] = unit_listing
+        if "mailclient.service" not in unit_listing:
+            errors.append(
+                RunnerError(
+                    code="UNIT_MISSING",
+                    message="mailclient.service unit file was not found after install.",
+                    stage_id="post_checks",
+                    suggested_fix="Run: systemctl list-unit-files | grep mailclient",
+                )
+            )
+
+        is_active = command_output(["systemctl", "is-active", "mailclient"], timeout=5.0).strip()
+        checks["systemctl_is_active"] = is_active
+        if is_active != "active":
+            errors.append(
+                RunnerError(
+                    code="SERVICE_INACTIVE",
+                    message=f"mailclient service is not active (is-active={is_active or 'unknown'}).",
+                    stage_id="post_checks",
+                    suggested_fix="Run: systemctl status mailclient --no-pager",
+                )
+            )
+
+        health_url = self._health_url_for_listen(spec.listen_addr)
+        health_ok, health_detail = self._http_health_ok(health_url)
+        checks["health_url"] = health_url
+        checks["health_response"] = health_detail
+        if not health_ok:
+            errors.append(
+                RunnerError(
+                    code="HEALTH_FAIL",
+                    message=f"Local health check failed for {health_url}.",
+                    stage_id="post_checks",
+                    suggested_fix="Run: curl -fsS " + health_url,
+                )
+            )
+
+        artifact_path = logstore.log_dir / f"post-checks-{run_id}.json"
+        with artifact_path.open("w", encoding="utf-8") as fh:
+            json.dump(checks, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+
+        artifacts = {"post_checks": str(artifact_path)}
+        if not errors:
+            logstore.append("info", "post_checks", "Post-install service invariants verified.")
+            return {"ok": True, "errors": [], "artifacts": artifacts, "next_actions": []}
+
+        for err in errors:
+            logstore.append("error", "post_checks", f"{err.code}: {err.message}")
+        return {
+            "ok": False,
+            "errors": [
+                RunnerError(
+                    code="E_SERVICE",
+                    message="Post-install service invariants failed.",
+                    stage_id="post_checks",
+                    suggested_fix="Inspect post-check artifact and run remediation commands.",
+                ),
+                *errors,
+            ],
+            "artifacts": artifacts,
+            "next_actions": [
+                "Run: systemctl status mailclient --no-pager",
+                "Run: journalctl -u mailclient -n 100 --no-pager",
+                "Run diagnose from the tool catalog.",
+            ],
+        }
+
+    @staticmethod
+    def _health_url_for_listen(listen_addr: str) -> str:
+        val = (listen_addr or "").strip()
+        host = "127.0.0.1"
+        port = "8080"
+        if val.startswith(":"):
+            port = val[1:] or port
+        elif ":" in val:
+            host_part, port_part = val.rsplit(":", 1)
+            host_part = host_part.strip("[]")
+            host = host_part or host
+            port = port_part or port
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        return f"http://{host}:{port}/health/live"
+
+    @staticmethod
+    def _http_health_ok(url: str) -> tuple[bool, str]:
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                body = resp.read(256).decode("utf-8", errors="ignore")
+                return 200 <= resp.status < 300, f"status={resp.status} body={body}"
+        except urllib.error.URLError as exc:
+            return False, str(exc)
