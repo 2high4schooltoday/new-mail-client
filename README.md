@@ -94,6 +94,7 @@ PAM mode notes:
 Installer troubleshooting:
 - Installer now prints exact failing line/command on errors.
 - For full trace, run: `bash -x ./scripts/auto_install.sh`
+- If UFW rule application fails, installer continues and prints manual commands instead of aborting.
 
 ## Uninstall (safe, interactive)
 Removes only Despatch-managed artifacts and leaves Postfix/Dovecot/other services untouched.

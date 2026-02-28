@@ -12,6 +12,7 @@ APT_UPDATED=0
 log() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 err() { printf '[ERR ] %s\n' "$*" >&2; }
+step() { log "==> $*"; }
 
 on_install_error() {
   local code="$1" line="$2" cmd="$3"
@@ -425,13 +426,51 @@ detect_smtp_port() {
 
 detect_web_servers() {
   local found=()
-  if [[ -d /etc/nginx ]] || have_cmd nginx; then
+  if have_cmd nginx; then
     found+=("nginx")
   fi
-  if [[ -d /etc/apache2 ]] || have_cmd apache2 || have_cmd apache2ctl; then
+  if have_cmd apache2ctl || have_cmd apache2; then
     found+=("apache2")
   fi
   printf '%s\n' "${found[@]}"
+}
+
+ensure_proxy_tooling() {
+  local server="$1" os_id="$2"
+  case "$server" in
+    nginx)
+      if have_cmd nginx; then
+        return 0
+      fi
+      if [[ "$os_id" == "ubuntu" || "$os_id" == "debian" ]]; then
+        warn "nginx was selected but command is missing."
+        if prompt_yes_no "Install nginx automatically now?" 1; then
+          install_apt_packages nginx
+          return 0
+        fi
+      fi
+      err "nginx is required for selected proxy mode."
+      return 1
+      ;;
+    apache2)
+      if have_cmd apache2ctl && have_cmd a2enmod && have_cmd a2ensite; then
+        return 0
+      fi
+      if [[ "$os_id" == "ubuntu" || "$os_id" == "debian" ]]; then
+        warn "apache2 was selected but required commands are missing."
+        if prompt_yes_no "Install apache2 automatically now?" 1; then
+          install_apt_packages apache2
+          return 0
+        fi
+      fi
+      err "apache2 + a2enmod + a2ensite are required for selected proxy mode."
+      return 1
+      ;;
+    *)
+      err "unknown proxy server: $server"
+      return 1
+      ;;
+  esac
 }
 
 detect_primary_ip() {
@@ -457,17 +496,36 @@ detect_primary_ip() {
 
 verify_direct_access() {
   local listen_addr="$1"
-  local check_url
-  if [[ "$listen_addr" =~ ^:([0-9]+)$ ]]; then
-    check_url="http://127.0.0.1:${BASH_REMATCH[1]}/health/live"
-  elif [[ "$listen_addr" =~ ^127\.0\.0\.1:([0-9]+)$ ]]; then
-    check_url="http://127.0.0.1:${BASH_REMATCH[1]}/health/live"
-  elif [[ "$listen_addr" =~ ^0\.0\.0\.0:([0-9]+)$ ]]; then
-    check_url="http://127.0.0.1:${BASH_REMATCH[1]}/health/live"
+  local host="" port="" check_url=""
+  if [[ "$listen_addr" == :* ]]; then
+    host="127.0.0.1"
+    port="${listen_addr#:}"
+  elif [[ "$listen_addr" == *:* ]]; then
+    host="${listen_addr%:*}"
+    port="${listen_addr##*:}"
+    host="${host#[}"
+    host="${host%]}"
   else
-    check_url="http://127.0.0.1:8080/health/live"
+    host="127.0.0.1"
+    port="8080"
   fi
-  curl -fsS --max-time 5 "$check_url" >/dev/null
+
+  if [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+    port="8080"
+  fi
+  if [[ -z "$host" || "$host" == "0.0.0.0" || "$host" == "::" ]]; then
+    host="127.0.0.1"
+  fi
+
+  check_url="http://${host}:${port}/health/live"
+  if curl -fsS --max-time 5 "$check_url" >/dev/null; then
+    return 0
+  fi
+  if [[ "$host" != "127.0.0.1" ]]; then
+    curl -fsS --max-time 5 "http://127.0.0.1:${port}/health/live" >/dev/null
+    return
+  fi
+  return 1
 }
 
 verify_proxy_access() {
@@ -503,6 +561,7 @@ apply_ufw_rules() {
         log "Applied ufw rules: 80/tcp, 443/tcp"
       else
         warn "ufw automation incomplete; installer will continue."
+        run_as_root ufw status verbose || true
       fi
     fi
     return
@@ -513,6 +572,7 @@ apply_ufw_rules() {
     else
       warn "Failed to apply ufw rule 8080/tcp. Continue manually: sudo ufw allow 8080/tcp"
       warn "ufw automation incomplete; installer will continue."
+      run_as_root ufw status verbose || true
     fi
   fi
 }
@@ -690,6 +750,10 @@ setup_nginx_proxy() {
   local conf="/etc/nginx/sites-available/mailclient.conf"
   local enabled="/etc/nginx/sites-enabled/mailclient.conf"
   local tmp
+  if ! have_cmd nginx; then
+    err "nginx command not found but nginx proxy setup was requested."
+    exit 1
+  fi
   tmp="$(mktemp)"
   render_nginx_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" >"$tmp"
 
@@ -712,6 +776,10 @@ setup_apache_proxy() {
   local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5"
   local conf="/etc/apache2/sites-available/mailclient.conf"
   local tmp
+  if ! have_cmd apache2ctl || ! have_cmd a2enmod || ! have_cmd a2ensite; then
+    err "apache2 tooling missing (apache2ctl/a2enmod/a2ensite) but apache2 proxy setup was requested."
+    exit 1
+  fi
   tmp="$(mktemp)"
   render_apache_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" >"$tmp"
 
@@ -852,8 +920,21 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
       PROXY_SERVER_NAME="$(prompt_input "Public server name for reverse proxy" "$BASE_DOMAIN")"
       if prompt_yes_no "Enable TLS in reverse proxy config now (requires existing cert files)?" 0; then
         PROXY_TLS=1
-        PROXY_CERT="$(prompt_input "TLS certificate file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/fullchain.pem")"
-        PROXY_KEY="$(prompt_input "TLS private key file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/privkey.pem")"
+        while true; do
+          PROXY_CERT="$(prompt_input "TLS certificate file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/fullchain.pem")"
+          PROXY_KEY="$(prompt_input "TLS private key file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/privkey.pem")"
+          if [[ -f "$PROXY_CERT" && -f "$PROXY_KEY" ]]; then
+            break
+          fi
+          warn "TLS files missing. cert_exists=$( [[ -f "$PROXY_CERT" ]] && echo yes || echo no ), key_exists=$( [[ -f "$PROXY_KEY" ]] && echo yes || echo no )"
+          if ! prompt_yes_no "Re-enter TLS paths?" 1; then
+            warn "Disabling TLS proxy setup for now. You can add TLS later."
+            PROXY_TLS=0
+            PROXY_CERT=""
+            PROXY_KEY=""
+            break
+          fi
+        done
       fi
       if [[ "$LISTEN_ADDR" == ":8080" ]]; then
         LISTEN_ADDR="127.0.0.1:8080"
@@ -1075,11 +1156,13 @@ fi
 
 log "Service installed and started: mailclient"
 
+step "Firewall configuration"
 apply_ufw_rules "$DEPLOY_MODE"
 print_cloud_firewall_checklist "$DEPLOY_MODE"
 
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
-  log "Configuring ${PROXY_SERVER} reverse proxy"
+  step "Reverse proxy configuration (${PROXY_SERVER})"
+  ensure_proxy_tooling "$PROXY_SERVER" "$OS_ID"
   APP_UPSTREAM="$LISTEN_ADDR"
   if [[ "$PROXY_SERVER" == "nginx" ]]; then
     setup_nginx_proxy "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY"
@@ -1100,6 +1183,7 @@ if ! "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
   exit 1
 fi
 
+step "Local service health verification"
 if ! verify_direct_access "$LISTEN_ADDR"; then
   err "Local app health check failed on ${LISTEN_ADDR}."
   err "Run: /opt/mailclient/mailclient (or check /opt/mailclient/.env and service logs)"
@@ -1108,6 +1192,7 @@ if ! verify_direct_access "$LISTEN_ADDR"; then
 fi
 
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
+  step "Reverse proxy health verification"
   if ! verify_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS"; then
     err "Reverse proxy health check failed for ${PROXY_SERVER_NAME}."
     err "Component likely failing: proxy routing or vhost mismatch."
