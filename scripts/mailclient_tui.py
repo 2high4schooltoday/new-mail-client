@@ -15,9 +15,19 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.error import URLError
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+def _detect_root_dir() -> Path:
+    script = Path(__file__).resolve()
+    # In-repo layout: <root>/scripts/mailclient_tui.py
+    if script.parent.name == "scripts" and (script.parent.parent / "go.mod").exists():
+        return script.parent.parent
+    # Standalone mode: keep operations in current shell directory.
+    return Path.cwd()
+
+
+ROOT_DIR = _detect_root_dir()
 CACHE_DIR = Path.home() / ".cache" / "mailclient-tui"
 REMOTE_SCRIPT_BASE = "https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts"
 
@@ -34,16 +44,16 @@ class Action:
     shell_cmd: Optional[str] = None
     danger: bool = False
 
-    def resolve_command(self) -> list[str]:
+    def resolve_command(self) -> tuple[list[str], str]:
         if self.shell_cmd:
-            return ["bash", "-lc", self.shell_cmd]
+            return (["bash", "-lc", self.shell_cmd], "builtin command")
 
-        script_path = self._resolve_script()
-        return ["bash", str(script_path)]
+        script_path, source = self._resolve_script()
+        return (["bash", str(script_path)], source)
 
-    def _resolve_script(self) -> Path:
+    def _resolve_script(self) -> tuple[Path, str]:
         if self.local_script and self.local_script.exists():
-            return self.local_script
+            return (self.local_script, f"local script ({self.local_script})")
 
         if not self.remote_script_name:
             raise FileNotFoundError("no script source defined")
@@ -51,9 +61,15 @@ class Action:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cached = CACHE_DIR / self.remote_script_name
         url = f"{REMOTE_SCRIPT_BASE}/{self.remote_script_name}"
-        urllib.request.urlretrieve(url, cached)
+        try:
+            urllib.request.urlretrieve(url, cached)
+        except URLError as exc:
+            raise RuntimeError(
+                f"failed to fetch {url}: {exc}. "
+                "If repo is private, use token-authenticated download or clone the repo first."
+            ) from exc
         cached.chmod(0o755)
-        return cached
+        return (cached, f"remote script ({url}) cached at {cached}")
 
 
 class MailclientTUI:
@@ -78,6 +94,7 @@ class MailclientTUI:
         self.run_logs: deque[str] = deque(maxlen=4000)
         self.run_partial = ""
         self.run_exit_code: Optional[int] = None
+        self.run_scroll_offset = 0
 
         self.actions = [
             Action(
@@ -269,13 +286,15 @@ class MailclientTUI:
         self.run_logs.clear()
         self.run_partial = ""
         self.run_exit_code = None
+        self.run_scroll_offset = 0
         self.run_action = action
 
         try:
-            cmd = action.resolve_command()
+            cmd, cmd_source = action.resolve_command()
         except Exception as exc:  # pragma: no cover - UI error path
             self.mode = "run"
             self.run_logs.append(f"Failed to prepare command: {exc}")
+            self.run_logs.append(f"Working directory: {ROOT_DIR}")
             self.run_logs.append("Press Enter or Esc to return.")
             return
 
@@ -294,11 +313,14 @@ class MailclientTUI:
             self.run_proc = proc
             self.run_master_fd = master_fd
             self.mode = "run"
+            self.run_logs.append(f"Working directory: {ROOT_DIR}")
+            self.run_logs.append(f"Command source: {cmd_source}")
             self.run_logs.append(f"$ {' '.join(cmd)}")
             self.run_logs.append("-" * 72)
         except Exception as exc:  # pragma: no cover - UI error path
             self.mode = "run"
             self.run_logs.append(f"Failed to execute command: {exc}")
+            self.run_logs.append(f"Working directory: {ROOT_DIR}")
             self.run_logs.append("Press Enter or Esc to return.")
 
     def _handle_run_key(self, key: object) -> bool:
@@ -307,6 +329,18 @@ class MailclientTUI:
         if running:
             if key == "\x18":  # Ctrl+X
                 self._terminate_running_action()
+                return False
+            if key in (curses.KEY_PPAGE,):
+                self.run_scroll_offset = min(self.run_scroll_offset + 10, 100000)
+                return False
+            if key in (curses.KEY_NPAGE,):
+                self.run_scroll_offset = max(self.run_scroll_offset - 10, 0)
+                return False
+            if key in ("g",):
+                self.run_scroll_offset = 100000
+                return False
+            if key in ("G",):
+                self.run_scroll_offset = 0
                 return False
             self._forward_key_to_child(key)
             return False
@@ -379,6 +413,10 @@ class MailclientTUI:
         if self.run_proc is not None and self.run_proc.poll() is not None and self.run_exit_code is None:
             self.run_exit_code = int(self.run_proc.returncode)
             self._append_log(f"\n[exit] command finished with code {self.run_exit_code}")
+            if self.run_exit_code != 0:
+                self._append_log(
+                    "Troubleshooting: check earlier error lines, then run the same command manually in shell."
+                )
             self._append_log("Press Enter, Esc, or q to return to the dashboard.")
 
     def _append_log(self, text: str) -> None:
@@ -488,14 +526,22 @@ class MailclientTUI:
             title = f" LIVE LOG :: {self.run_action.name} "
         self._box(y, x, h, w, title)
 
-        hint = "Ctrl+X terminate running command. Installer prompts accept keyboard input."
+        hint = (
+            "Ctrl+X terminate | PgUp/PgDn scroll logs | g top | G bottom | "
+            "installer prompts accept keyboard input."
+        )
         self._addn(y + 1, x + 2, hint, w - 4, self._color(3))
 
         rows = h - 4
         lines = list(self.run_logs)
         if self.run_partial:
             lines = lines + [self.run_partial]
-        lines = lines[-rows:]
+        if self.run_scroll_offset > 0:
+            start = max(0, len(lines) - rows - self.run_scroll_offset)
+            end = max(0, len(lines) - self.run_scroll_offset)
+            lines = lines[start:end]
+        else:
+            lines = lines[-rows:]
         for idx, line in enumerate(lines):
             self._addn(y + 2 + idx, x + 2, line, w - 4, self._color(5))
 
@@ -508,7 +554,7 @@ class MailclientTUI:
                 msg = "j/k or arrows move | Tab switch panel | / search | Enter run | r refresh | q quit"
         else:
             if self.run_proc is not None and self.run_proc.poll() is None:
-                msg = "Operation running. Inputs are forwarded. Ctrl+X terminate."
+                msg = "Operation running. Keys forwarded to child. PgUp/PgDn scroll, Ctrl+X terminate."
             else:
                 msg = "Operation completed. Enter/Esc/q return to dashboard."
         self._addn(y + 1, x + 2, msg, w - 4, self._color(5))
