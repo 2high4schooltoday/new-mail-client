@@ -8,10 +8,18 @@ OUT_ENV="$ROOT_DIR/.env"
 DEFAULT_REPO_URL="${MAILCLIENT_REPO_URL:-https://github.com/2high4schooltoday/new-mail-client.git}"
 DEFAULT_REPO_REF="${MAILCLIENT_REPO_REF:-main}"
 APT_UPDATED=0
+DESPATCH_NONINTERACTIVE="${DESPATCH_NONINTERACTIVE:-0}"
+DESPATCH_TUI_MODE="${DESPATCH_TUI_MODE:-0}"
+DESPATCH_RUN_ID="${DESPATCH_RUN_ID:-run-$(date +%s)}"
+CURRENT_STAGE_ID=""
+CURRENT_STAGE_TITLE=""
+CURRENT_STAGE_WEIGHT=0
+RUN_RESULT_EMITTED=0
 
 log() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 err() { printf '[ERR ] %s\n' "$*" >&2; }
+ni_log() { printf '[INFO] %s\n' "$*" >&2; }
 INSTALL_ERROR_REPORTED=0
 CURRENT_STEP="bootstrap"
 LAST_COMMAND=""
@@ -20,12 +28,79 @@ step() {
   log "==> $*"
 }
 
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+emit_event_raw() {
+  [[ "$DESPATCH_TUI_MODE" == "1" ]] || return 0
+  printf '::despatch-event::%s\n' "$1"
+}
+
+emit_event() {
+  local type="$1"
+  shift
+  local body=""
+  body="\"type\":\"$(json_escape "$type")\""
+  while [[ $# -gt 1 ]]; do
+    local k="$1"
+    local v="$2"
+    shift 2
+    body="${body},\"$(json_escape "$k")\":\"$(json_escape "$v")\""
+  done
+  emit_event_raw "{${body}}"
+}
+
+begin_stage() {
+  local stage_id="$1" title="$2" weight="$3"
+  if [[ -n "$CURRENT_STAGE_ID" ]]; then
+    emit_event "stage_progress" "stage_id" "$CURRENT_STAGE_ID" "current" "1" "total" "1" "message" "done"
+    emit_event "stage_result" "stage_id" "$CURRENT_STAGE_ID" "status" "ok" "error_code" ""
+  fi
+  CURRENT_STAGE_ID="$stage_id"
+  CURRENT_STAGE_TITLE="$title"
+  CURRENT_STAGE_WEIGHT="$weight"
+  step "$title"
+  emit_event "stage_start" "stage_id" "$stage_id" "title" "$title" "weight" "$weight"
+  emit_event "stage_progress" "stage_id" "$stage_id" "current" "0" "total" "1" "message" "started"
+}
+
+finish_stage_ok() {
+  if [[ -z "$CURRENT_STAGE_ID" ]]; then
+    return
+  fi
+  emit_event "stage_progress" "stage_id" "$CURRENT_STAGE_ID" "current" "1" "total" "1" "message" "done"
+  emit_event "stage_result" "stage_id" "$CURRENT_STAGE_ID" "status" "ok" "error_code" ""
+  CURRENT_STAGE_ID=""
+  CURRENT_STAGE_TITLE=""
+  CURRENT_STAGE_WEIGHT=0
+}
+
+finish_stage_failed() {
+  local code="$1"
+  if [[ -z "$CURRENT_STAGE_ID" ]]; then
+    return
+  fi
+  emit_event "stage_result" "stage_id" "$CURRENT_STAGE_ID" "status" "failed" "error_code" "$code"
+}
+
+emit_run_result_once() {
+  local status="$1" failed_stage="$2" exit_code="$3"
+  if [[ "$RUN_RESULT_EMITTED" == "1" ]]; then
+    return
+  fi
+  RUN_RESULT_EMITTED=1
+  emit_event "run_result" "status" "$status" "failed_stage" "$failed_stage" "exit_code" "$exit_code"
+}
+
 on_install_error() {
   local code="$1" line="$2" cmd="$3"
   INSTALL_ERROR_REPORTED=1
+  finish_stage_failed "E_INSTALL"
   err "Installer failed at line ${line}: ${cmd}"
   err "Current step: ${CURRENT_STEP}"
   err "Run manually for diagnostics: bash -x \"$0\""
+  emit_run_result_once "failed" "${CURRENT_STAGE_ID:-unknown}" "$code"
   exit "$code"
 }
 trap 'on_install_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
@@ -34,10 +109,12 @@ trap 'LAST_COMMAND=$BASH_COMMAND' DEBUG
 on_install_exit() {
   local code="$1"
   if [[ "$code" -ne 0 && "$INSTALL_ERROR_REPORTED" -eq 0 ]]; then
+    finish_stage_failed "E_INSTALL_EXIT"
     err "Installer exited with code ${code}."
     err "Current step: ${CURRENT_STEP}"
     err "Last command: ${LAST_COMMAND}"
     err "Run manually for diagnostics: bash -x \"$0\""
+    emit_run_result_once "failed" "${CURRENT_STAGE_ID:-unknown}" "$code"
   fi
 }
 trap 'on_install_exit "$?"' EXIT
@@ -80,7 +157,7 @@ configure_selected_proxy() {
 }
 
 if [[ $# -ne 0 ]]; then
-  err "This installer is interactive and does not accept arguments. Run: ./scripts/auto_install.sh"
+  err "This installer does not accept CLI arguments. Use environment variables for non-interactive mode."
   exit 1
 fi
 
@@ -109,8 +186,86 @@ lower() {
   echo "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+is_noninteractive() {
+  [[ "$DESPATCH_NONINTERACTIVE" == "1" ]]
+}
+
+env_key_for_input_prompt() {
+  local prompt="$1"
+  case "$prompt" in
+    "GitHub repository URL") echo "DESPATCH_REPO_URL" ;;
+    "Git ref (branch/tag/commit)") echo "DESPATCH_REPO_REF" ;;
+    "Installer workspace directory") echo "DESPATCH_CHECKOUT_DIR" ;;
+    "Primary mail domain (used by first-run web setup)") echo "DESPATCH_BASE_DOMAIN" ;;
+    "HTTP listen address") echo "DESPATCH_LISTEN_ADDR" ;;
+    "Choose proxy server: nginx or apache2") echo "DESPATCH_PROXY_SERVER" ;;
+    "Public server name for reverse proxy") echo "DESPATCH_PROXY_SERVER_NAME" ;;
+    "TLS certificate file") echo "DESPATCH_PROXY_CERT" ;;
+    "TLS private key file") echo "DESPATCH_PROXY_KEY" ;;
+    "Dovecot auth backend mode (pam or sql)") echo "DESPATCH_DOVECOT_AUTH_MODE" ;;
+    "Dovecot auth DB driver (mysql or pgx)") echo "DESPATCH_DOVECOT_AUTH_DB_DRIVER" ;;
+    "Dovecot auth DB DSN") echo "DESPATCH_DOVECOT_AUTH_DB_DSN" ;;
+    "Dovecot auth table") echo "DESPATCH_DOVECOT_AUTH_TABLE" ;;
+    "Email/login column") echo "DESPATCH_DOVECOT_AUTH_EMAIL_COL" ;;
+    "Password hash column") echo "DESPATCH_DOVECOT_AUTH_PASS_COL" ;;
+    "Active/enabled column (blank if none)") echo "DESPATCH_DOVECOT_AUTH_ACTIVE_COL" ;;
+    "Maildir column (blank if none)") echo "DESPATCH_DOVECOT_AUTH_MAILDIR_COL" ;;
+    *) echo "" ;;
+  esac
+}
+
+env_key_for_yes_no_prompt() {
+  local prompt="$1"
+  case "$prompt" in
+    "Continue with installation?") echo "DESPATCH_CONFIRM_CONTINUE" ;;
+    "git is missing. Install git automatically?") echo "DESPATCH_INSTALL_GIT" ;;
+    "Install and start systemd service automatically?") echo "DESPATCH_INSTALL_SERVICE" ;;
+    "Detected installed reverse proxy"*) echo "DESPATCH_PROXY_SETUP" ;;
+    "Install nginx automatically now?") echo "DESPATCH_INSTALL_NGINX" ;;
+    "Install apache2 automatically now?") echo "DESPATCH_INSTALL_APACHE2" ;;
+    "Continue without reverse proxy (direct mode on :8080)?") echo "DESPATCH_PROXY_FALLBACK_DIRECT" ;;
+    "Enable TLS in reverse proxy config now (requires existing cert files)?") echo "DESPATCH_PROXY_TLS" ;;
+    "Re-enter TLS paths?") echo "DESPATCH_RETRY_TLS_PATHS" ;;
+    "Enter Dovecot SQL settings manually now?") echo "DESPATCH_SQL_MANUAL" ;;
+    "Install missing dependencies automatically with apt?") echo "DESPATCH_AUTO_INSTALL_DEPS" ;;
+    "Enable ufw now? (be careful on remote SSH hosts)") echo "DESPATCH_UFW_ENABLE" ;;
+    "Open firewall ports 80/tcp and 443/tcp via ufw?") echo "DESPATCH_UFW_OPEN_PROXY_PORTS" ;;
+    "Open firewall port 8080/tcp via ufw for direct access?") echo "DESPATCH_UFW_OPEN_DIRECT_PORT" ;;
+    "Run Internet accessibility diagnostics now?") echo "DESPATCH_RUN_DIAG" ;;
+    *) echo "" ;;
+  esac
+}
+
+truthy() {
+  local v
+  v="$(lower "$(trim "${1:-}")")"
+  case "$v" in
+    1|y|yes|true|on) return 0 ;;
+  esac
+  return 1
+}
+
 prompt_input() {
   local prompt="$1" default="${2:-}" val
+  if is_noninteractive; then
+    local key env_val
+    key="$(env_key_for_input_prompt "$prompt")"
+    if [[ -n "$key" ]]; then
+      env_val="$(trim "${!key:-}")"
+      if [[ -n "$env_val" ]]; then
+        ni_log "[non-interactive] ${prompt}: ${env_val}"
+        printf '%s' "$env_val"
+        return
+      fi
+    fi
+    if [[ -n "$default" ]]; then
+      ni_log "[non-interactive] ${prompt}: ${default} (default)"
+      printf '%s' "$default"
+      return
+    fi
+    err "Missing non-interactive value for prompt: ${prompt}"
+    exit 1
+  fi
   if [[ -n "$default" ]]; then
     if ! read -r -p "$prompt [$default]: " val; then
       warn "Input stream closed. Using default: $default"
@@ -140,6 +295,28 @@ prompt_input() {
 prompt_yes_no() {
   local prompt="$1" default_yes="$2" ans
   local hint="[y/N]"
+  if is_noninteractive; then
+    local key env_val
+    key="$(env_key_for_yes_no_prompt "$prompt")"
+    env_val=""
+    if [[ -n "$key" ]]; then
+      env_val="${!key:-}"
+    fi
+    if [[ -n "$env_val" ]]; then
+      if truthy "$env_val"; then
+        ni_log "[non-interactive] ${prompt}: yes"
+        return 0
+      fi
+      ni_log "[non-interactive] ${prompt}: no"
+      return 1
+    fi
+    if [[ "$default_yes" == "1" ]]; then
+      ni_log "[non-interactive] ${prompt}: yes (default)"
+      return 0
+    fi
+    ni_log "[non-interactive] ${prompt}: no (default)"
+    return 1
+  fi
   if [[ "$default_yes" == "1" ]]; then
     hint="[Y/n]"
   fi
@@ -1005,13 +1182,18 @@ generate_secret() {
   date +%s | sha256sum | awk '{print $1}'
 }
 
+emit_event "run_start" "run_id" "$DESPATCH_RUN_ID" "operation" "install"
+
+begin_stage "fetch_source" "Source Fetch / Bootstrap" "10"
 ensure_repo_checkout_or_bootstrap
 
 if [[ ! -f "$ENV_EXAMPLE" ]]; then
   err ".env.example not found at $ENV_EXAMPLE"
   exit 1
 fi
+finish_stage_ok
 
+begin_stage "preflight" "Preflight and Configuration" "10"
 OS_ID="unknown"
 OS_VER="unknown"
 UNAME_ARCH="$(uname -m)"
@@ -1242,6 +1424,8 @@ if [[ "$SMTP_TLS" == "true" || "$SMTP_STARTTLS" == "true" ]]; then
   SMTP_INSECURE_SKIP_VERIFY="true"
 fi
 
+finish_stage_ok
+begin_stage "env_generation" "Environment Generation" "10"
 SESSION_KEY="$(generate_secret)"
 APP_DB_PATH="./data/app.db"
 if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
@@ -1298,6 +1482,8 @@ if [[ -n "$SQL_CONF" ]]; then
 fi
 
 if [[ "$INSTALL_SERVICE" -eq 0 ]]; then
+  finish_stage_ok
+  begin_stage "final_summary" "Final Summary" "0"
   cat <<NEXT
 
 Run locally:
@@ -1310,14 +1496,19 @@ Open:
 The first web visit will launch OOBE where you set admin email/password.
 Default admin email in OOBE is webmaster@${BASE_DOMAIN}.
 NEXT
+  finish_stage_ok
+  emit_run_result_once "ok" "" "0"
   exit 0
 fi
 
+finish_stage_ok
+begin_stage "deps" "Dependency Checks" "15"
 ensure_service_dependencies "$OS_ID"
 if ! have_cmd go; then
   err "Go toolchain is still unavailable after dependency checks."
   exit 1
 fi
+finish_stage_ok
 
 if [[ "$OS_ID" != "ubuntu" ]]; then
   warn "Proceeding with best-effort service install on non-Ubuntu Linux"
@@ -1337,12 +1528,15 @@ if [[ "${EUID:-1}" -ne 0 ]]; then
   PREFIX=(sudo)
 fi
 
+begin_stage "build" "Build Binary" "15"
 log "Building mailclient binary for linux/${GOARCH}"
 (
   cd "$ROOT_DIR"
   GOOS=linux GOARCH="$GOARCH" go build -o "$ROOT_DIR/mailclient" ./cmd/server
 )
+finish_stage_ok
 
+begin_stage "filesystem_and_user" "Filesystem and User Setup" "10"
 "${PREFIX[@]}" mkdir -p /opt/mailclient /var/lib/mailclient
 if ! id -u mailclient >/dev/null 2>&1; then
   "${PREFIX[@]}" useradd --system --home /var/lib/mailclient --shell /usr/sbin/nologin mailclient
@@ -1355,16 +1549,21 @@ fi
 "${PREFIX[@]}" cp -R "$ROOT_DIR/migrations" /opt/mailclient/migrations
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient.service" /etc/systemd/system/mailclient.service
 "${PREFIX[@]}" chown -R mailclient:mailclient /opt/mailclient /var/lib/mailclient
+finish_stage_ok
 
+begin_stage "service_install_start" "Service Install and Start" "10"
 "${PREFIX[@]}" systemctl daemon-reload
 "${PREFIX[@]}" systemctl enable --now mailclient
 
 log "Service installed and started: mailclient"
+finish_stage_ok
 
-step "Firewall configuration"
+begin_stage "firewall" "Firewall Configuration" "5"
 run_nonfatal_step "firewall configuration" apply_ufw_rules "$DEPLOY_MODE"
 print_cloud_firewall_checklist "$DEPLOY_MODE"
+finish_stage_ok
 
+begin_stage "proxy" "Reverse Proxy Configuration" "10"
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
   step "Reverse proxy configuration (${PROXY_SERVER})"
   if ! ensure_proxy_tooling "$PROXY_SERVER" "$OS_ID"; then
@@ -1388,8 +1587,12 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
       fi
     fi
   fi
+else
+  log "Reverse proxy stage skipped (direct mode)."
 fi
+finish_stage_ok
 
+begin_stage "post_checks" "Post-install Checks" "5"
 if ! wait_for_condition "mailclient service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
   err "mailclient service is not active after install."
   err "Run: systemctl status mailclient --no-pager"
@@ -1430,7 +1633,9 @@ if [[ "$DEPLOY_MODE" == "proxy" ]]; then
     fi
   fi
 fi
+finish_stage_ok
 
+begin_stage "final_summary" "Final Summary" "0"
 SERVER_IP="$(detect_primary_ip)"
 cat <<DONE
 
@@ -1462,3 +1667,5 @@ DONE
 if prompt_yes_no "Run Internet accessibility diagnostics now?" 1; then
   bash "$ROOT_DIR/scripts/diagnose_access.sh" || true
 fi
+finish_stage_ok
+emit_run_result_once "ok" "" "0"

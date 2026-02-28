@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
+DESPATCH_NONINTERACTIVE="${DESPATCH_NONINTERACTIVE:-0}"
+DESPATCH_TUI_MODE="${DESPATCH_TUI_MODE:-0}"
+DESPATCH_RUN_ID="${DESPATCH_RUN_ID:-run-$(date +%s)}"
+CURRENT_STAGE_ID=""
+RUN_RESULT_EMITTED=0
 
 log() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 err() { printf '[ERR ] %s\n' "$*" >&2; }
 
 if [[ $# -ne 0 ]]; then
-  err "This uninstaller is interactive and does not accept arguments. Run: ./scripts/uninstall.sh"
+  err "This uninstaller does not accept CLI arguments. Use environment variables for non-interactive mode."
   exit 1
 fi
 
@@ -36,9 +41,107 @@ trim() {
   printf '%s' "$s"
 }
 
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+emit_event() {
+  [[ "$DESPATCH_TUI_MODE" == "1" ]] || return 0
+  local type="$1"
+  shift
+  local body="\"type\":\"$(json_escape "$type")\""
+  while [[ $# -gt 1 ]]; do
+    body="${body},\"$(json_escape "$1")\":\"$(json_escape "$2")\""
+    shift 2
+  done
+  printf '::despatch-event::{%s}\n' "$body"
+}
+
+begin_stage() {
+  local id="$1" title="$2" weight="$3"
+  if [[ -n "$CURRENT_STAGE_ID" ]]; then
+    emit_event "stage_result" "stage_id" "$CURRENT_STAGE_ID" "status" "ok" "error_code" ""
+  fi
+  CURRENT_STAGE_ID="$id"
+  emit_event "stage_start" "stage_id" "$id" "title" "$title" "weight" "$weight"
+}
+
+finish_stage_ok() {
+  if [[ -n "$CURRENT_STAGE_ID" ]]; then
+    emit_event "stage_result" "stage_id" "$CURRENT_STAGE_ID" "status" "ok" "error_code" ""
+  fi
+  CURRENT_STAGE_ID=""
+}
+
+emit_run_result_once() {
+  local status="$1" failed_stage="$2" exit_code="$3"
+  if [[ "$RUN_RESULT_EMITTED" == "1" ]]; then
+    return
+  fi
+  RUN_RESULT_EMITTED=1
+  emit_event "run_result" "status" "$status" "failed_stage" "$failed_stage" "exit_code" "$exit_code"
+}
+
+on_uninstall_error() {
+  local code="$1"
+  if [[ -n "$CURRENT_STAGE_ID" ]]; then
+    emit_event "stage_result" "stage_id" "$CURRENT_STAGE_ID" "status" "failed" "error_code" "E_UNINSTALL"
+  fi
+  emit_run_result_once "failed" "${CURRENT_STAGE_ID:-unknown}" "$code"
+}
+trap 'on_uninstall_error "$?"' ERR
+trap 'rc=$?; if [[ "$rc" -ne 0 ]]; then on_uninstall_error "$rc"; fi' EXIT
+
+truthy() {
+  local v
+  v="$(lower "$(trim "${1:-}")")"
+  case "$v" in
+    1|y|yes|true|on) return 0 ;;
+  esac
+  return 1
+}
+
+env_key_for_prompt() {
+  local prompt="$1"
+  case "$prompt" in
+    "Continue with uninstall?") echo "DESPATCH_CONFIRM_UNINSTALL" ;;
+    "Backup /opt/mailclient/.env before removal?") echo "DESPATCH_BACKUP_ENV" ;;
+    "Backup /var/lib/mailclient before removal?") echo "DESPATCH_BACKUP_DATA" ;;
+    "Remove installed app files from /opt/mailclient ?") echo "DESPATCH_REMOVE_APP_FILES" ;;
+    "Remove app data from /var/lib/mailclient ?") echo "DESPATCH_REMOVE_APP_DATA" ;;
+    "Remove system user 'mailclient'?") echo "DESPATCH_REMOVE_SYSTEM_USER" ;;
+    "Remove mailclient reverse-proxy site config from Nginx (if present)?") echo "DESPATCH_REMOVE_NGINX_SITE" ;;
+    "Remove mailclient reverse-proxy site config from Apache2 (if present)?") echo "DESPATCH_REMOVE_APACHE_SITE" ;;
+    "Remove standalone installer checkout /opt/mailclient-installer ?") echo "DESPATCH_REMOVE_CHECKOUT" ;;
+    *) echo "" ;;
+  esac
+}
+
 prompt_yes_no() {
   local prompt="$1" default_yes="$2" ans
   local hint="[y/N]"
+  if [[ "$DESPATCH_NONINTERACTIVE" == "1" ]]; then
+    local key env_val
+    key="$(env_key_for_prompt "$prompt")"
+    env_val=""
+    if [[ -n "$key" ]]; then
+      env_val="${!key:-}"
+    fi
+    if [[ -n "$env_val" ]]; then
+      if truthy "$env_val"; then
+        log "[non-interactive] ${prompt}: yes"
+        return 0
+      fi
+      log "[non-interactive] ${prompt}: no"
+      return 1
+    fi
+    if [[ "$default_yes" == "1" ]]; then
+      log "[non-interactive] ${prompt}: yes (default)"
+      return 0
+    fi
+    log "[non-interactive] ${prompt}: no (default)"
+    return 1
+  fi
   if [[ "$default_yes" == "1" ]]; then
     hint="[Y/n]"
   fi
@@ -139,9 +242,15 @@ warn "It does NOT remove Postfix, Dovecot, Nginx, Apache2, databases, or TLS pac
 
 if ! prompt_yes_no "Continue with uninstall?" 0; then
   err "Aborted"
+  emit_run_result_once "failed" "preflight" "1"
   exit 1
 fi
 
+emit_event "run_start" "run_id" "$DESPATCH_RUN_ID" "operation" "uninstall"
+begin_stage "preflight" "Preflight" "10"
+finish_stage_ok
+
+begin_stage "backups" "Backup Selected Files" "20"
 if [[ -f /opt/mailclient/.env ]] && prompt_yes_no "Backup /opt/mailclient/.env before removal?" 1; then
   backup_path /opt/mailclient/.env
 fi
@@ -149,7 +258,9 @@ fi
 if [[ -d /var/lib/mailclient ]] && prompt_yes_no "Backup /var/lib/mailclient before removal?" 1; then
   backup_path /var/lib/mailclient
 fi
+finish_stage_ok
 
+begin_stage "service" "Service Teardown" "25"
 log "Removing service files..."
 if have_cmd systemctl; then
   safe_systemctl stop mailclient
@@ -161,7 +272,9 @@ if have_cmd systemctl; then
 else
   warn "systemctl not found; skipping systemd removal."
 fi
+finish_stage_ok
 
+begin_stage "cleanup" "Filesystem Cleanup" "35"
 if prompt_yes_no "Remove installed app files from /opt/mailclient ?" 1; then
   remove_path_if_exists /opt/mailclient
 fi
@@ -185,7 +298,9 @@ fi
 if [[ -d /opt/mailclient-installer ]] && prompt_yes_no "Remove standalone installer checkout /opt/mailclient-installer ?" 0; then
   remove_path_if_exists /opt/mailclient-installer
 fi
+finish_stage_ok
 
+begin_stage "summary" "Final Summary" "10"
 cat <<DONE
 
 Uninstall complete.
@@ -198,3 +313,5 @@ Not touched:
   - TLS/certbot packages and certificates
 
 DONE
+finish_stage_ok
+emit_run_result_once "ok" "" "0"

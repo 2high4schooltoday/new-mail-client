@@ -56,7 +56,7 @@ Plain console-only menu (Bash, dependency-free):
 - `./scripts/tui_plain.sh`
 
 Standalone dashboard via `wget`:
-- `wget -O mailclient_tui.py https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/mailclient_tui.py && chmod +x mailclient_tui.py && ./mailclient_tui.py`
+- `wget -O despatch.py https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/despatch.py && chmod +x despatch.py && ./despatch.py`
 
 Standalone mode (run from any Linux server path):
 - download `scripts/auto_install.sh` and run it
