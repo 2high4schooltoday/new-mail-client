@@ -208,7 +208,11 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, service.ErrPAMVerifierDown):
 			status = http.StatusBadGateway
 			code = "pam_verifier_unavailable"
-			msg = "cannot validate PAM credentials because IMAP connectivity failed"
+			msg = "cannot validate PAM credentials because IMAP connectivity failed; check IMAP_HOST/IMAP_PORT/IMAP_TLS/IMAP_STARTTLS"
+			lowerErr := strings.ToLower(err.Error())
+			if strings.Contains(lowerErr, "x509") || strings.Contains(lowerErr, "certificate") || strings.Contains(lowerErr, "tls") {
+				msg = "IMAP TLS verification failed while validating PAM credentials. If using IMAP_HOST=127.0.0.1, set IMAP_INSECURE_SKIP_VERIFY=true or set IMAP_HOST to your mail FQDN."
+			}
 		case strings.Contains(strings.ToLower(msg), "invalid domain"):
 			code = "invalid_domain"
 		case strings.Contains(strings.ToLower(msg), "invalid admin email"):

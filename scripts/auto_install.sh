@@ -1220,6 +1220,7 @@ if [[ "$IMAP_PORT" == "143" ]]; then
   IMAP_TLS="false"
   IMAP_STARTTLS="true"
 fi
+IMAP_INSECURE_SKIP_VERIFY="false"
 SMTP_TLS="false"
 SMTP_STARTTLS="true"
 if [[ "$SMTP_PORT" == "465" ]]; then
@@ -1228,6 +1229,17 @@ if [[ "$SMTP_PORT" == "465" ]]; then
 fi
 if [[ "$SMTP_PORT" == "25" ]]; then
   SMTP_STARTTLS="false"
+fi
+SMTP_INSECURE_SKIP_VERIFY="false"
+
+# Loopback TLS commonly presents certificates for FQDN, not 127.0.0.1.
+# To avoid false verification failures for local Dovecot/Postfix, default to
+# skipping TLS hostname verification on loopback mail connections.
+if [[ "$IMAP_TLS" == "true" || "$IMAP_STARTTLS" == "true" ]]; then
+  IMAP_INSECURE_SKIP_VERIFY="true"
+fi
+if [[ "$SMTP_TLS" == "true" || "$SMTP_STARTTLS" == "true" ]]; then
+  SMTP_INSECURE_SKIP_VERIFY="true"
 fi
 
 SESSION_KEY="$(generate_secret)"
@@ -1252,10 +1264,12 @@ set_env_var "$OUT_ENV" "IMAP_HOST" "127.0.0.1"
 set_env_var "$OUT_ENV" "IMAP_PORT" "$IMAP_PORT"
 set_env_var "$OUT_ENV" "IMAP_TLS" "$IMAP_TLS"
 set_env_var "$OUT_ENV" "IMAP_STARTTLS" "$IMAP_STARTTLS"
+set_env_var "$OUT_ENV" "IMAP_INSECURE_SKIP_VERIFY" "$IMAP_INSECURE_SKIP_VERIFY"
 set_env_var "$OUT_ENV" "SMTP_HOST" "127.0.0.1"
 set_env_var "$OUT_ENV" "SMTP_PORT" "$SMTP_PORT"
 set_env_var "$OUT_ENV" "SMTP_TLS" "$SMTP_TLS"
 set_env_var "$OUT_ENV" "SMTP_STARTTLS" "$SMTP_STARTTLS"
+set_env_var "$OUT_ENV" "SMTP_INSECURE_SKIP_VERIFY" "$SMTP_INSECURE_SKIP_VERIFY"
 
 set_env_var "$OUT_ENV" "BOOTSTRAP_ADMIN_EMAIL" ""
 set_env_var "$OUT_ENV" "BOOTSTRAP_ADMIN_PASSWORD" ""
@@ -1274,6 +1288,9 @@ set_env_var "$OUT_ENV" "DOVECOT_AUTH_MAILDIR_COL" "$DOVECOT_MAILDIR_COL"
 
 log "Generated $OUT_ENV"
 log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
+if [[ "$IMAP_INSECURE_SKIP_VERIFY" == "true" || "$SMTP_INSECURE_SKIP_VERIFY" == "true" ]]; then
+  warn "Loopback TLS verification bypass enabled for IMAP/SMTP to avoid certificate hostname mismatch (127.0.0.1)."
+fi
 log "Deployment mode: $DEPLOY_MODE"
 log "Dovecot auth mode: $DOVECOT_AUTH_MODE"
 if [[ -n "$SQL_CONF" ]]; then

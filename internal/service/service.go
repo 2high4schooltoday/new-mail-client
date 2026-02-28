@@ -448,7 +448,7 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 		}
 		if err := s.verifyMailCredentials(ctx, adminEmail, req.AdminPassword); err != nil {
 			if isMailConnectivityError(err) {
-				return "", models.User{}, ErrPAMVerifierDown
+				return "", models.User{}, fmt.Errorf("%w: %v", ErrPAMVerifierDown, err)
 			}
 			return "", models.User{}, errors.New("admin credentials are not valid for Dovecot/PAM")
 		}

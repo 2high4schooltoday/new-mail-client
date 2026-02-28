@@ -95,6 +95,21 @@ else
   record_fail 10 "APP_DOWN: local app health check failed (${LOCAL_HEALTH})"
 fi
 
+READY_URL="${LOCAL_HEALTH%/health/live}/health/ready"
+if have_cmd curl; then
+  ready_json="$(curl -fsS --max-time 8 "$READY_URL" || true)"
+  if [[ -n "${ready_json:-}" ]]; then
+    if echo "$ready_json" | grep -q '"imap"[[:space:]]*:[[:space:]]*{[^}]*"ok"[[:space:]]*:[[:space:]]*false'; then
+      printf '[WARN] mail readiness: IMAP probe failed in /health/ready\n'
+      printf '       Check IMAP_HOST/IMAP_PORT/IMAP_TLS/IMAP_STARTTLS and cert verification settings.\n'
+    fi
+    if echo "$ready_json" | grep -q '"smtp"[[:space:]]*:[[:space:]]*{[^}]*"ok"[[:space:]]*:[[:space:]]*false'; then
+      printf '[WARN] mail readiness: SMTP probe failed in /health/ready\n'
+      printf '       Check SMTP_HOST/SMTP_PORT/SMTP_TLS/SMTP_STARTTLS and cert verification settings.\n'
+    fi
+  fi
+fi
+
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   if [[ -z "$PROXY_SERVER" ]]; then
     record_fail 20 "PROXY_DOWN: mailclient proxy config not found for nginx/apache2"
