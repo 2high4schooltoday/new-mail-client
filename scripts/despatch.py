@@ -313,7 +313,8 @@ class DespatchTUI:
             )
             self.mouse_targets.append(rect)
 
-        self.focus.set_items(items, preferred=f"home:op:{self.selected_operation}")
+        preferred = self.focus.current if self.focus.current in items else f"home:op:{self.selected_operation}"
+        self.focus.set_items(items, preferred=preferred)
 
     def _draw_editor(self, y: int, h: int, w: int) -> None:
         if self.editor is None:
@@ -739,24 +740,15 @@ class DespatchTUI:
     def _activate_home(self, focus_id: str) -> None:
         if focus_id.startswith("home:op:"):
             self.selected_operation = clamp(int(focus_id.rsplit(":", 1)[1]), 0, len(self.cards) - 1)
+            self._open_selected_configure()
             return
         if focus_id == "home:btn:quit":
             self.running = False
             return
-        selected = self.cards[self.selected_operation]
         if focus_id == "home:btn:configure":
-            if selected.key == "install":
-                self.mode = "install_editor"
-                self.editor = EditorState(operation="install")
-            elif selected.key == "uninstall":
-                self.mode = "uninstall_editor"
-                self.editor = EditorState(operation="uninstall")
-            elif selected.key == "status":
-                self.mode = "status"
-            else:
-                self._start_run("diagnose")
-            self.ui.status_line = f"Configured action: {selected.title}"
+            self._open_selected_configure()
             return
+        selected = self.cards[self.selected_operation]
         if focus_id == "home:btn:run":
             if selected.key == "status":
                 self.mode = "status"
@@ -777,6 +769,20 @@ class DespatchTUI:
                 self._start_run("uninstall")
             else:
                 self._start_run("diagnose")
+
+    def _open_selected_configure(self) -> None:
+        selected = self.cards[self.selected_operation]
+        if selected.key == "install":
+            self.mode = "install_editor"
+            self.editor = EditorState(operation="install")
+        elif selected.key == "uninstall":
+            self.mode = "uninstall_editor"
+            self.editor = EditorState(operation="uninstall")
+        elif selected.key == "status":
+            self.mode = "status"
+        else:
+            self._start_run("diagnose")
+        self.ui.status_line = f"Configured action: {selected.title}"
 
     def _activate_editor(self, focus_id: str) -> None:
         if self.editor is None:
