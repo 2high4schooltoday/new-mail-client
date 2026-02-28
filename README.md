@@ -43,6 +43,17 @@ Interactive, prompt-driven installer (no CLI arguments). Validated for Ubuntu Se
 Run:
 - `./scripts/auto_install.sh`
 
+Terminal dashboard (Homebrew-style split pane):
+- `./scripts/tui.sh`
+- keyboard: `j/k` move, `Tab` switch tabs, `/` search, `Enter` run action, `Ctrl+X` terminate running action
+- if `python3` is missing, `./scripts/tui.sh` auto-falls back to a plain Bash console menu (no extra deps)
+
+Plain console-only menu (Bash, dependency-free):
+- `./scripts/tui_plain.sh`
+
+Standalone dashboard via `wget`:
+- `wget -O mailclient_tui.py https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/mailclient_tui.py && chmod +x mailclient_tui.py && ./mailclient_tui.py`
+
 Standalone mode (run from any Linux server path):
 - download `scripts/auto_install.sh` and run it
 - if app sources are not present next to the script, it will:
@@ -63,6 +74,15 @@ What is intentionally deferred to web UI OOBE:
 - Final first-run setup confirmation
 
 Note: fully custom SQL/auth setups may still need manual `.env` tweaks.
+
+## Uninstall (safe, interactive)
+Removes only Mailclient-managed artifacts and leaves Postfix/Dovecot/other services untouched.
+
+From local checkout:
+- `./scripts/uninstall.sh`
+
+Standalone from server console (`wget`):
+- `wget -O uninstall.sh https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/uninstall.sh && chmod +x uninstall.sh && ./uninstall.sh`
 
 ## Dovecot provisioning notes
 Set `DOVECOT_AUTH_DB_DRIVER` and `DOVECOT_AUTH_DB_DSN` to enable automatic writes to your Dovecot auth DB.
