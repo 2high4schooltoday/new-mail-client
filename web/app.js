@@ -9,6 +9,11 @@ const state = {
     step: 0,
     baseDomain: "",
     defaultAdminEmail: "",
+    authMode: "sql",
+    passwordMinLength: 12,
+    passwordMaxLength: 128,
+    passwordClassMin: 3,
+    submitting: false,
     adminEmailTouched: false,
     lastAutoAdminEmail: "",
   },
@@ -44,6 +49,7 @@ const el = {
   adminAudit: document.getElementById("admin-audit"),
   setupBackIcon: document.getElementById("setup-back-icon"),
   setupClose: document.getElementById("setup-close"),
+  setupForm: document.getElementById("form-setup"),
   setupBack: document.getElementById("setup-back"),
   setupNext: document.getElementById("setup-next"),
   setupOpenMail: document.getElementById("setup-open-mail"),
@@ -56,6 +62,8 @@ const el = {
   setupSummaryRegion: document.getElementById("setup-summary-region"),
   setupSummaryDomain: document.getElementById("setup-summary-domain"),
   setupSummaryEmail: document.getElementById("setup-summary-email"),
+  setupPasswordHint: document.getElementById("setup-password-hint"),
+  setupInlineStatus: document.getElementById("setup-inline-status"),
   setupCompleteNote: document.getElementById("setup-complete-note"),
   setupModalOverlay: document.getElementById("setup-modal-overlay"),
   setupModalTitle: document.getElementById("setup-modal-title"),
@@ -107,6 +115,14 @@ function setStatus(text, type = "info") {
   else el.status.style.color = "var(--fg-0)";
 }
 
+function setSetupInlineStatus(text, type = "info") {
+  if (!el.setupInlineStatus) return;
+  el.setupInlineStatus.textContent = text || "";
+  if (type === "error") el.setupInlineStatus.style.color = "var(--sig-err)";
+  else if (type === "ok") el.setupInlineStatus.style.color = "var(--sig-ok)";
+  else el.setupInlineStatus.style.color = "var(--fg-muted)";
+}
+
 function getCookie(name) {
   const m = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
   return m ? decodeURIComponent(m[2]) : "";
@@ -138,6 +154,7 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const error = new Error(payload.message || payload.code || `HTTP ${res.status}`);
     error.code = payload.code || "request_failed";
+    error.retryAfterSec = Number(res.headers.get("Retry-After") || "0");
     throw error;
   }
   return payload;
@@ -223,11 +240,24 @@ function validEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 }
 
+function passwordClassCount(password) {
+  let classes = 0;
+  if (/[a-z]/.test(password)) classes += 1;
+  if (/[A-Z]/.test(password)) classes += 1;
+  if (/[0-9]/.test(password)) classes += 1;
+  if (/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/.test(password)) classes += 1;
+  return classes;
+}
+
 async function loadSetupStatus() {
   const data = await api("/api/v1/setup/status");
   state.setup.required = !!data.required;
   state.setup.baseDomain = normalizeDomain(data.base_domain || "example.com");
   state.setup.defaultAdminEmail = String(data.default_admin_email || domainToDefaultEmail(state.setup.baseDomain)).toLowerCase();
+  state.setup.authMode = String(data.auth_mode || "sql").toLowerCase();
+  state.setup.passwordMinLength = Number(data.password_min_length || 12);
+  state.setup.passwordMaxLength = Number(data.password_max_length || 128);
+  state.setup.passwordClassMin = Number(data.password_class_min || 3);
   return data;
 }
 
@@ -269,10 +299,13 @@ const OOBEController = {
     state.setup.adminEmailTouched = false;
     state.setup.lastAutoAdminEmail = email;
     state.setup.modalType = "";
+    state.setup.submitting = false;
     if (state.setup.autoOpenTimer) {
       clearTimeout(state.setup.autoOpenTimer);
       state.setup.autoOpenTimer = 0;
     }
+    setSetupInlineStatus("");
+    this.updatePasswordHint();
     this.setStep(0);
     this.updateSummary();
   },
@@ -287,10 +320,11 @@ const OOBEController = {
     const isReview = state.setup.step === 4;
     const isComplete = state.setup.step === 5;
 
-    el.setupBack.disabled = isFirst || isComplete;
-    el.setupBackIcon.disabled = isFirst || isComplete;
-    el.setupNext.disabled = isComplete;
-    el.setupNext.textContent = isReview ? "Initialize" : "Continue";
+    el.setupBack.disabled = isFirst || isComplete || state.setup.submitting;
+    el.setupBackIcon.disabled = isFirst || isComplete || state.setup.submitting;
+    el.setupNext.disabled = isComplete || state.setup.submitting;
+    el.setupNext.textContent = state.setup.submitting ? "Initializing..." : isReview ? "Initialize" : "Continue";
+    if (!isComplete) setSetupInlineStatus("");
     this.refreshNavState();
   },
 
@@ -318,11 +352,25 @@ const OOBEController = {
     if (stepId === 3) {
       const p1 = el.setupPassword.value;
       const p2 = el.setupPasswordConfirm.value;
-      if (p1.length < 10) {
-        throw new Error("Admin password must be at least 10 characters");
+      if (p1.length === 0) {
+        throw new Error("Admin password is required");
       }
       if (p1 !== p2) {
         throw new Error("Password and verify password must match");
+      }
+      if (state.setup.authMode !== "pam") {
+        const minLen = Number(state.setup.passwordMinLength || 12);
+        const maxLen = Number(state.setup.passwordMaxLength || 128);
+        const classMin = Number(state.setup.passwordClassMin || 3);
+        if (p1.length < minLen) {
+          throw new Error(`Admin password must be at least ${minLen} characters`);
+        }
+        if (p1.length > maxLen) {
+          throw new Error(`Admin password must be at most ${maxLen} characters`);
+        }
+        if (passwordClassCount(p1) < classMin) {
+          throw new Error(`Password must include at least ${classMin} character classes (lower/upper/number/symbol)`);
+        }
       }
     }
   },
@@ -341,10 +389,16 @@ const OOBEController = {
       el.setupNext.disabled = true;
       return;
     }
+    if (state.setup.submitting) {
+      el.setupNext.disabled = true;
+      el.setupBack.disabled = true;
+      return;
+    }
     el.setupNext.disabled = !this.isStepValid(state.setup.step);
   },
 
   async next() {
+    if (state.setup.submitting) return;
     this.validateStep(state.setup.step);
     if (state.setup.step < 4) {
       this.setStep(state.setup.step + 1);
@@ -352,11 +406,39 @@ const OOBEController = {
       return;
     }
     if (state.setup.step === 4) {
-      await completeSetup();
-      this.setStep(5);
-      this.scheduleAutoOpenMail();
+      state.setup.submitting = true;
+      this.refreshNavState();
+      setSetupInlineStatus("Initializing setup...", "info");
+      try {
+        await completeSetup();
+        state.setup.submitting = false;
+        this.setStep(5);
+        this.scheduleAutoOpenMail();
+        setSetupInlineStatus("");
+      } catch (err) {
+        state.setup.submitting = false;
+        this.refreshNavState();
+        if (err.code === "rate_limited") {
+          const wait = Number(err.retryAfterSec || 60);
+          const wrapped = new Error(`Too many setup attempts. Wait about ${wait} seconds and try again.`);
+          wrapped.code = "rate_limited";
+          throw wrapped;
+        }
+        throw err;
+      }
       return;
     }
+  },
+
+  updatePasswordHint() {
+    if (!el.setupPasswordHint) return;
+    if (state.setup.authMode === "pam") {
+      el.setupPasswordHint.textContent = "PAM mode: enter the current password for the selected mailbox account.";
+      return;
+    }
+    const minLen = Number(state.setup.passwordMinLength || 12);
+    const classMin = Number(state.setup.passwordClassMin || 3);
+    el.setupPasswordHint.textContent = `Use at least ${minLen} characters and ${classMin} character classes (lower/upper/number/symbol).`;
   },
 
   back() {
@@ -665,13 +747,36 @@ function bindSetupUI() {
     OOBEController.openConfirm("cancel");
   };
 
-  el.setupNext.onclick = async () => {
+  el.setupForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (state.setup.step >= 5) return;
     try {
       await OOBEController.next();
+      setSetupInlineStatus("");
     } catch (err) {
+      if (err.code === "setup_already_complete") {
+        try {
+          const status = await loadSetupStatus();
+          if (!status.required) {
+            state.setup.required = false;
+            applyNavVisibility();
+            setActiveTab(el.tabAuth);
+            showView("auth");
+            setStatus("SETUP ALREADY COMPLETED. SIGN IN WITH ADMIN ACCOUNT.", "info");
+            setSetupInlineStatus("");
+            return;
+          }
+        } catch {
+          // fallback to normal error rendering below
+        }
+      }
+      if (err.code === "pam_credentials_invalid") {
+        err.message = "PAM mode is enabled. Use an existing mailbox account and its current password.";
+      }
       setStatus(err.message, "error");
+      setSetupInlineStatus(err.message, "error");
     }
-  };
+  });
 
   el.setupOpenMail.onclick = async () => {
     try {
@@ -746,16 +851,6 @@ function bindSetupUI() {
       if (event.key === "Enter") {
         event.preventDefault();
         await OOBEController.confirm();
-      }
-      return;
-    }
-
-    if (event.key === "Enter" && state.setup.step < 5) {
-      event.preventDefault();
-      try {
-        await OOBEController.next();
-      } catch (err) {
-        setStatus(err.message, "error");
       }
       return;
     }

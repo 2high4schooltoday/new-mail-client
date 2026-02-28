@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,7 @@ func RateLimit(l *rate.Limiter, route string, limit int, window time.Duration, t
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := route + ":" + ClientIP(r, trustProxy)
 			if !l.Allow(key, limit, window) {
+				w.Header().Set("Retry-After", strconv.Itoa(int(window.Seconds())))
 				util.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many requests", RequestID(r.Context()))
 				return
 			}

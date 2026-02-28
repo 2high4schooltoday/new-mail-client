@@ -55,8 +55,8 @@
         <article class="panel">
           <h2>Registration</h2>
           <form id="form-register" class="stack">
-            <label>Email <input name="email" type="email" required></label>
-            <label>Password <input name="password" type="password" required></label>
+            <label>Email <input name="email" type="email" required autocomplete="email"></label>
+            <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
             <label>Captcha Token (if enabled)<input name="captcha_token" type="text"></label>
             <button class="cmd-btn" type="submit">Submit For Approval</button>
           </form>
@@ -65,12 +65,12 @@
         <article class="panel">
           <h2>Password Reset</h2>
           <form id="form-reset-request" class="stack boxed">
-            <label>Email <input name="email" type="email" required></label>
+            <label>Email <input name="email" type="email" required autocomplete="email"></label>
             <button class="cmd-btn" type="submit">Request Token</button>
           </form>
           <form id="form-reset-confirm" class="stack">
             <label>Reset Token <input name="token" type="text" required></label>
-            <label>New Password <input name="new_password" type="password" required></label>
+            <label>New Password <input name="new_password" type="password" required autocomplete="new-password"></label>
             <button class="cmd-btn" type="submit">Apply New Password</button>
           </form>
         </article>
@@ -84,92 +84,95 @@
             <button id="setup-close" class="oobe-icon-btn" type="button" aria-label="Cancel setup">×</button>
           </header>
 
-          <div class="oobe-content">
-            <div class="oobe-step-indicator" aria-label="Setup progress">
-              <span class="oobe-dot active" data-dot="0"></span>
-              <span class="oobe-dot" data-dot="1"></span>
-              <span class="oobe-dot" data-dot="2"></span>
-              <span class="oobe-dot" data-dot="3"></span>
-              <span class="oobe-dot" data-dot="4"></span>
-              <span class="oobe-dot" data-dot="5"></span>
-            </div>
-
-            <div id="setup-step-0" class="oobe-step">
-              <div class="oobe-hero-icon" aria-hidden="true">ENTRY</div>
-              <h2>Welcome</h2>
-              <p>This assistant configures your mail domain, webmaster identity, and first admin credentials. You can complete setup in a few minutes.</p>
-              <p class="hint">All settings remain editable from Admin after initialization.</p>
-            </div>
-
-            <div id="setup-step-1" class="oobe-step hidden">
-              <div class="oobe-hero-icon" aria-hidden="true">REGION</div>
-              <h2>Region And Time Profile</h2>
-              <p>Set your default region for timestamps and policy localization.</p>
-              <label>Region
-                <select id="setup-region">
-                  <option value="us-east">United States - East</option>
-                  <option value="us-central">United States - Central</option>
-                  <option value="us-west">United States - West</option>
-                  <option value="eu-west">Europe - West</option>
-                  <option value="apac">Asia Pacific</option>
-                </select>
-              </label>
-              <p class="hint">Timezone mapping follows the selected region profile.</p>
-            </div>
-
-            <div id="setup-step-2" class="oobe-step hidden">
-              <div class="oobe-hero-icon" aria-hidden="true">DOMAIN</div>
-              <h2>Domain And Admin Identity</h2>
-              <p>This controls registration domain policy and default webmaster address.</p>
-              <label>Mail Domain
-                <input id="setup-domain" type="text" placeholder="example.com" autocomplete="off">
-              </label>
-              <label>Admin Email
-                <input id="setup-admin-email" type="email" autocomplete="email">
-              </label>
-              <p class="hint">Default is <code>webmaster@{domain}</code>; you can override it.</p>
-            </div>
-
-            <div id="setup-step-3" class="oobe-step hidden">
-              <div class="oobe-hero-icon" aria-hidden="true">ADMIN</div>
-              <h2>Create Webmaster Credentials</h2>
-              <p>Choose a strong password for the first administrator account.</p>
-              <label>Password
-                <input id="setup-password" type="password" autocomplete="new-password">
-              </label>
-              <label>Verify Password
-                <input id="setup-password-confirm" type="password" autocomplete="new-password">
-              </label>
-              <p class="hint">Use at least 10 characters. Longer is better.</p>
-            </div>
-
-            <div id="setup-step-4" class="oobe-step hidden">
-              <div class="oobe-hero-icon" aria-hidden="true">REVIEW</div>
-              <h2>Review And Initialize</h2>
-              <div class="oobe-summary-card setup-summary">
-                <div><b>Region:</b> <span id="setup-summary-region">-</span></div>
-                <div><b>Domain:</b> <span id="setup-summary-domain">-</span></div>
-                <div><b>Admin:</b> <span id="setup-summary-email">-</span></div>
+          <form id="form-setup" class="oobe-form" novalidate>
+            <div class="oobe-content">
+              <div class="oobe-step-indicator" aria-label="Setup progress">
+                <span class="oobe-dot active" data-dot="0"></span>
+                <span class="oobe-dot" data-dot="1"></span>
+                <span class="oobe-dot" data-dot="2"></span>
+                <span class="oobe-dot" data-dot="3"></span>
+                <span class="oobe-dot" data-dot="4"></span>
+                <span class="oobe-dot" data-dot="5"></span>
               </div>
-              <p>Initialize writes your baseline settings and signs in as webmaster.</p>
-            </div>
 
-            <div id="setup-step-5" class="oobe-step hidden">
-              <div class="oobe-hero-icon" aria-hidden="true">READY</div>
-              <h2>Setup Complete</h2>
-              <p>Despatch is ready. You can open mailbox view now, or go straight to admin controls.</p>
-              <div class="actions">
-                <button id="setup-open-mail" class="cmd-btn cmd-btn--primary" type="button">Open Mail</button>
-                <button id="setup-open-admin" class="cmd-btn" type="button">Open Admin</button>
+              <div id="setup-step-0" class="oobe-step">
+                <div class="oobe-hero-icon" aria-hidden="true">ENTRY</div>
+                <h2>Welcome</h2>
+                <p>This assistant configures your mail domain, webmaster identity, and first admin credentials. You can complete setup in a few minutes.</p>
+                <p class="hint">All settings remain editable from Admin after initialization.</p>
               </div>
-              <p id="setup-complete-note" class="hint">Auto opening mail in 3 seconds.</p>
-            </div>
-          </div>
 
-          <footer class="oobe-footer">
-            <button id="setup-back" class="cmd-btn" type="button">Back</button>
-            <button id="setup-next" class="cmd-btn cmd-btn--primary" type="button">Continue</button>
-          </footer>
+              <div id="setup-step-1" class="oobe-step hidden">
+                <div class="oobe-hero-icon" aria-hidden="true">REGION</div>
+                <h2>Region And Time Profile</h2>
+                <p>Set your default region for timestamps and policy localization.</p>
+                <label>Region
+                  <select id="setup-region">
+                    <option value="us-east">United States - East</option>
+                    <option value="us-central">United States - Central</option>
+                    <option value="us-west">United States - West</option>
+                    <option value="eu-west">Europe - West</option>
+                    <option value="apac">Asia Pacific</option>
+                  </select>
+                </label>
+                <p class="hint">Timezone mapping follows the selected region profile.</p>
+              </div>
+
+              <div id="setup-step-2" class="oobe-step hidden">
+                <div class="oobe-hero-icon" aria-hidden="true">DOMAIN</div>
+                <h2>Domain And Admin Identity</h2>
+                <p>This controls registration domain policy and default webmaster address.</p>
+                <label>Mail Domain
+                  <input id="setup-domain" type="text" placeholder="example.com" autocomplete="off">
+                </label>
+                <label>Admin Email
+                  <input id="setup-admin-email" type="email" autocomplete="email">
+                </label>
+                <p class="hint">Default is <code>webmaster@{domain}</code>; you can override it.</p>
+              </div>
+
+              <div id="setup-step-3" class="oobe-step hidden">
+                <div class="oobe-hero-icon" aria-hidden="true">ADMIN</div>
+                <h2>Create Webmaster Credentials</h2>
+                <p>Choose a strong password for the first administrator account.</p>
+                <label>Password
+                  <input id="setup-password" type="password" autocomplete="new-password">
+                </label>
+                <label>Verify Password
+                  <input id="setup-password-confirm" type="password" autocomplete="new-password">
+                </label>
+                <p id="setup-password-hint" class="hint">Use at least 12 characters and 3 character classes.</p>
+              </div>
+
+              <div id="setup-step-4" class="oobe-step hidden">
+                <div class="oobe-hero-icon" aria-hidden="true">REVIEW</div>
+                <h2>Review And Initialize</h2>
+                <div class="oobe-summary-card setup-summary">
+                  <div><b>Region:</b> <span id="setup-summary-region">-</span></div>
+                  <div><b>Domain:</b> <span id="setup-summary-domain">-</span></div>
+                  <div><b>Admin:</b> <span id="setup-summary-email">-</span></div>
+                </div>
+                <p>Initialize writes your baseline settings and signs in as webmaster.</p>
+              </div>
+
+              <div id="setup-step-5" class="oobe-step hidden">
+                <div class="oobe-hero-icon" aria-hidden="true">READY</div>
+                <h2>Setup Complete</h2>
+                <p>Despatch is ready. You can open mailbox view now, or go straight to admin controls.</p>
+                <div class="actions">
+                  <button id="setup-open-mail" class="cmd-btn cmd-btn--primary" type="button">Open Mail</button>
+                  <button id="setup-open-admin" class="cmd-btn" type="button">Open Admin</button>
+                </div>
+                <p id="setup-complete-note" class="hint">Auto opening mail in 3 seconds.</p>
+              </div>
+            </div>
+
+            <footer class="oobe-footer">
+              <p id="setup-inline-status" class="hint" aria-live="polite"></p>
+              <button id="setup-back" class="cmd-btn" type="button">Back</button>
+              <button id="setup-next" class="cmd-btn cmd-btn--primary" type="submit">Continue</button>
+            </footer>
+          </form>
         </article>
 
         <div id="setup-modal-overlay" class="oobe-modal hidden" aria-hidden="true">

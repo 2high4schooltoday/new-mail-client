@@ -50,92 +50,95 @@
             <button id="mk-close" class="oobe-icon-btn" type="button" aria-label="Cancel setup">×</button>
           </header>
 
-          <div class="oobe-content">
-            <div class="oobe-step-indicator" aria-label="Setup progress">
-              <span class="oobe-dot active" data-dot="0"></span>
-              <span class="oobe-dot" data-dot="1"></span>
-              <span class="oobe-dot" data-dot="2"></span>
-              <span class="oobe-dot" data-dot="3"></span>
-              <span class="oobe-dot" data-dot="4"></span>
-              <span class="oobe-dot" data-dot="5"></span>
-            </div>
-
-            <div class="oobe-step" data-step="0">
-              <div class="oobe-hero-icon" aria-hidden="true">ENTRY</div>
-              <h2>Welcome</h2>
-              <p>This assistant configures your mail domain, webmaster identity, and first admin credentials. You can complete setup in a few minutes.</p>
-              <p class="hint">All settings remain editable from Admin after initialization.</p>
-            </div>
-
-            <div class="oobe-step hidden" data-step="1">
-              <div class="oobe-hero-icon" aria-hidden="true">REGION</div>
-              <h2>Region And Time Profile</h2>
-              <p>Set your default region for timestamps and policy localization.</p>
-              <label>Region
-                <select id="mk-region">
-                  <option value="us-east">United States - East</option>
-                  <option value="us-central">United States - Central</option>
-                  <option value="us-west">United States - West</option>
-                  <option value="eu-west">Europe - West</option>
-                  <option value="apac">Asia Pacific</option>
-                </select>
-              </label>
-              <p class="hint">Timezone mapping follows the selected region profile.</p>
-            </div>
-
-            <div class="oobe-step hidden" data-step="2">
-              <div class="oobe-hero-icon" aria-hidden="true">DOMAIN</div>
-              <h2>Domain And Admin Identity</h2>
-              <p>This controls registration domain policy and default webmaster address.</p>
-              <label>Mail Domain
-                <input id="mk-domain" type="text" value="example.com">
-              </label>
-              <label>Admin Email
-                <input id="mk-email" type="email" value="webmaster@example.com">
-              </label>
-              <p class="hint">Default is <code>webmaster@{domain}</code>; you can override it.</p>
-            </div>
-
-            <div class="oobe-step hidden" data-step="3">
-              <div class="oobe-hero-icon" aria-hidden="true">ADMIN</div>
-              <h2>Create Webmaster Credentials</h2>
-              <p>Choose a strong password for the first administrator account.</p>
-              <label>Password
-                <input id="mk-pass" type="password" value="">
-              </label>
-              <label>Verify Password
-                <input id="mk-pass2" type="password" value="">
-              </label>
-              <p class="hint">Use at least 10 characters. Longer is better.</p>
-            </div>
-
-            <div class="oobe-step hidden" data-step="4">
-              <div class="oobe-hero-icon" aria-hidden="true">REVIEW</div>
-              <h2>Review And Initialize</h2>
-              <div class="oobe-summary-card setup-summary">
-                <div><b>Region:</b> <span id="mk-summary-region">-</span></div>
-                <div><b>Domain:</b> <span id="mk-summary-domain">-</span></div>
-                <div><b>Admin:</b> <span id="mk-summary-email">-</span></div>
+          <form id="mk-form-setup" class="oobe-form" novalidate>
+            <div class="oobe-content">
+              <div class="oobe-step-indicator" aria-label="Setup progress">
+                <span class="oobe-dot active" data-dot="0"></span>
+                <span class="oobe-dot" data-dot="1"></span>
+                <span class="oobe-dot" data-dot="2"></span>
+                <span class="oobe-dot" data-dot="3"></span>
+                <span class="oobe-dot" data-dot="4"></span>
+                <span class="oobe-dot" data-dot="5"></span>
               </div>
-              <p>Initialize writes your baseline settings and signs in as webmaster.</p>
-            </div>
 
-            <div class="oobe-step hidden" data-step="5">
-              <div class="oobe-hero-icon" aria-hidden="true">READY</div>
-              <h2>Setup Complete</h2>
-              <p>Despatch is ready. You can open mailbox view now, or go straight to admin controls.</p>
-              <div class="actions">
-                <button id="mk-open-mail" class="cmd-btn cmd-btn--primary" type="button">Open Mail</button>
-                <button id="mk-open-admin" class="cmd-btn" type="button">Open Admin</button>
+              <div class="oobe-step" data-step="0">
+                <div class="oobe-hero-icon" aria-hidden="true">ENTRY</div>
+                <h2>Welcome</h2>
+                <p>This assistant configures your mail domain, webmaster identity, and first admin credentials. You can complete setup in a few minutes.</p>
+                <p class="hint">All settings remain editable from Admin after initialization.</p>
               </div>
-              <p id="mk-complete-note" class="hint">Auto opening mail in 3 seconds.</p>
-            </div>
-          </div>
 
-          <footer class="oobe-footer">
-            <button id="mk-back" class="cmd-btn" type="button">Back</button>
-            <button id="mk-next" class="cmd-btn cmd-btn--primary" type="button">Continue</button>
-          </footer>
+              <div class="oobe-step hidden" data-step="1">
+                <div class="oobe-hero-icon" aria-hidden="true">REGION</div>
+                <h2>Region And Time Profile</h2>
+                <p>Set your default region for timestamps and policy localization.</p>
+                <label>Region
+                  <select id="mk-region">
+                    <option value="us-east">United States - East</option>
+                    <option value="us-central">United States - Central</option>
+                    <option value="us-west">United States - West</option>
+                    <option value="eu-west">Europe - West</option>
+                    <option value="apac">Asia Pacific</option>
+                  </select>
+                </label>
+                <p class="hint">Timezone mapping follows the selected region profile.</p>
+              </div>
+
+              <div class="oobe-step hidden" data-step="2">
+                <div class="oobe-hero-icon" aria-hidden="true">DOMAIN</div>
+                <h2>Domain And Admin Identity</h2>
+                <p>This controls registration domain policy and default webmaster address.</p>
+                <label>Mail Domain
+                  <input id="mk-domain" type="text" value="example.com">
+                </label>
+                <label>Admin Email
+                  <input id="mk-email" type="email" value="webmaster@example.com">
+                </label>
+                <p class="hint">Default is <code>webmaster@{domain}</code>; you can override it.</p>
+              </div>
+
+              <div class="oobe-step hidden" data-step="3">
+                <div class="oobe-hero-icon" aria-hidden="true">ADMIN</div>
+                <h2>Create Webmaster Credentials</h2>
+                <p>Choose a strong password for the first administrator account.</p>
+                <label>Password
+                  <input id="mk-pass" type="password" value="" autocomplete="new-password">
+                </label>
+                <label>Verify Password
+                  <input id="mk-pass2" type="password" value="" autocomplete="new-password">
+                </label>
+                <p id="mk-password-hint" class="hint">Use at least 12 characters and 3 character classes.</p>
+              </div>
+
+              <div class="oobe-step hidden" data-step="4">
+                <div class="oobe-hero-icon" aria-hidden="true">REVIEW</div>
+                <h2>Review And Initialize</h2>
+                <div class="oobe-summary-card setup-summary">
+                  <div><b>Region:</b> <span id="mk-summary-region">-</span></div>
+                  <div><b>Domain:</b> <span id="mk-summary-domain">-</span></div>
+                  <div><b>Admin:</b> <span id="mk-summary-email">-</span></div>
+                </div>
+                <p>Initialize writes your baseline settings and signs in as webmaster.</p>
+              </div>
+
+              <div class="oobe-step hidden" data-step="5">
+                <div class="oobe-hero-icon" aria-hidden="true">READY</div>
+                <h2>Setup Complete</h2>
+                <p>Despatch is ready. You can open mailbox view now, or go straight to admin controls.</p>
+                <div class="actions">
+                  <button id="mk-open-mail" class="cmd-btn cmd-btn--primary" type="button">Open Mail</button>
+                  <button id="mk-open-admin" class="cmd-btn" type="button">Open Admin</button>
+                </div>
+                <p id="mk-complete-note" class="hint">Auto opening mail in 3 seconds.</p>
+              </div>
+            </div>
+
+            <footer class="oobe-footer">
+              <p id="mk-inline-status" class="hint" aria-live="polite"></p>
+              <button id="mk-back" class="cmd-btn" type="button">Back</button>
+              <button id="mk-next" class="cmd-btn cmd-btn--primary" type="submit">Continue</button>
+            </footer>
+          </form>
         </article>
 
         <div id="mk-modal" class="oobe-modal hidden" aria-hidden="true">

@@ -6,6 +6,7 @@ const back = document.getElementById('mk-back');
 const backIcon = document.getElementById('mk-back-icon');
 const closeBtn = document.getElementById('mk-close');
 const next = document.getElementById('mk-next');
+const setupForm = document.getElementById('mk-form-setup');
 const themeBtn = document.getElementById('mk-theme');
 
 const openMailBtn = document.getElementById('mk-open-mail');
@@ -26,6 +27,7 @@ const pass2 = document.getElementById('mk-pass2');
 const sRegion = document.getElementById('mk-summary-region');
 const sDomain = document.getElementById('mk-summary-domain');
 const sEmail = document.getElementById('mk-summary-email');
+const inlineStatus = document.getElementById('mk-inline-status');
 
 const state = {
   step: 0,
@@ -43,6 +45,13 @@ function setStatus(text, kind = 'info') {
   else statusLine.style.color = 'var(--fg-0)';
 }
 
+function setInlineStatus(text, kind = 'info') {
+  inlineStatus.textContent = text || '';
+  if (kind === 'error') inlineStatus.style.color = 'var(--sig-err)';
+  else if (kind === 'ok') inlineStatus.style.color = 'var(--sig-ok)';
+  else inlineStatus.style.color = 'var(--fg-muted)';
+}
+
 function normDomain(v) {
   return String(v || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '').replace(/\.$/, '');
 }
@@ -53,6 +62,15 @@ function validDomain(value) {
 
 function validEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
+function passwordClassCount(password) {
+  let classes = 0;
+  if (/[a-z]/.test(password)) classes += 1;
+  if (/[A-Z]/.test(password)) classes += 1;
+  if (/[0-9]/.test(password)) classes += 1;
+  if (/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/.test(password)) classes += 1;
+  return classes;
 }
 
 function domainToDefaultEmail(v) {
@@ -91,7 +109,8 @@ function validateStep(step) {
     if (!e.endsWith(`@${d}`)) throw new Error(`Admin email must use @${d}.`);
   }
   if (step === 3) {
-    if ((pass.value || '').length < 10) throw new Error('Password must be at least 10 characters.');
+    if ((pass.value || '').length < 12) throw new Error('Password must be at least 12 characters.');
+    if (passwordClassCount(pass.value || '') < 3) throw new Error('Password must include lower/upper/number/symbol classes.');
     if (pass.value !== pass2.value) throw new Error('Password and verify password must match.');
   }
 }
@@ -121,6 +140,7 @@ function setStep(step) {
   steps.forEach((node, i) => node.classList.toggle('hidden', i !== state.step));
   dots.forEach((node, i) => node.classList.toggle('active', i <= state.step));
   updateSummary();
+  setInlineStatus('');
   refreshNavState();
 }
 
@@ -162,6 +182,7 @@ function resetFlow() {
   completeNote.textContent = 'Auto opening mail in 3 seconds.';
   setStep(0);
   setStatus('MOCKUP MODE - NO BACKEND CALLS');
+  setInlineStatus('');
 }
 
 function confirmModal() {
@@ -232,11 +253,14 @@ function bind() {
     }
     openConfirm('cancel');
   });
-  next.addEventListener('click', async () => {
+  setupForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
     try {
       await nextStep();
+      setInlineStatus('');
     } catch (err) {
       setStatus(err.message, 'error');
+      setInlineStatus(err.message, 'error');
     }
   });
 
@@ -295,16 +319,6 @@ function bind() {
         const idx = focusables.findIndex((f) => f === document.activeElement);
         const nextIdx = (idx + (event.shiftKey ? -1 : 1) + focusables.length) % focusables.length;
         focusables[nextIdx].focus();
-      }
-      return;
-    }
-
-    if (event.key === 'Enter' && state.step < 5) {
-      event.preventDefault();
-      try {
-        await nextStep();
-      } catch (err) {
-        setStatus(err.message, 'error');
       }
       return;
     }

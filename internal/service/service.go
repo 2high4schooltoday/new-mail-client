@@ -37,6 +37,10 @@ type SetupStatus struct {
 	Required          bool   `json:"required"`
 	BaseDomain        string `json:"base_domain"`
 	DefaultAdminEmail string `json:"default_admin_email"`
+	AuthMode          string `json:"auth_mode"`
+	PasswordMinLength int    `json:"password_min_length"`
+	PasswordMaxLength int    `json:"password_max_length"`
+	PasswordClassMin  int    `json:"password_class_min"`
 }
 
 type SetupCompleteRequest struct {
@@ -400,6 +404,10 @@ func (s *Service) SetupStatus(ctx context.Context) (SetupStatus, error) {
 		Required:          adminCount == 0,
 		BaseDomain:        baseDomain,
 		DefaultAdminEmail: defaultAdminEmail(baseDomain),
+		AuthMode:          s.cfg.DovecotAuthMode,
+		PasswordMinLength: s.cfg.PasswordMinLength,
+		PasswordMaxLength: s.cfg.PasswordMaxLength,
+		PasswordClassMin:  3,
 	}, nil
 }
 

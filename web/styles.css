@@ -432,8 +432,14 @@ textarea {
   background: var(--oobe-surface);
   box-shadow: 3px 3px 0 color-mix(in srgb, var(--oobe-border) 50%, transparent);
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr;
   overflow: hidden;
+}
+
+.oobe-form {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 100%;
 }
 
 .oobe-chrome {
@@ -617,11 +623,17 @@ textarea {
   min-height: 78px;
   border-top: 2px dotted var(--dot-line);
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--s-2);
   padding: 0 var(--s-5);
   background: var(--oobe-surface-2);
+}
+
+#setup-inline-status,
+#mk-inline-status {
+  margin: 0;
+  max-width: 64ch;
 }
 
 .oobe-footer .cmd-btn {
@@ -1050,6 +1062,28 @@ textarea {
 
   .oobe-footer .cmd-btn {
     min-width: 128px;
+  }
+
+  .oobe-footer {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "status status"
+      "back next";
+  }
+
+  #setup-inline-status,
+  #mk-inline-status {
+    grid-area: status;
+  }
+
+  .oobe-footer #setup-back,
+  .oobe-footer #mk-back {
+    grid-area: back;
+  }
+
+  .oobe-footer #setup-next,
+  .oobe-footer #mk-next {
+    grid-area: next;
   }
 }
 

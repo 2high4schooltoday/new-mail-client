@@ -103,7 +103,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/setup/status", h.SetupStatus)
-		r.With(middleware.RateLimit(h.limiter, "setup_complete", 5, time.Minute, h.cfg.TrustProxy)).Post("/setup/complete", h.SetupComplete)
+		r.With(middleware.RateLimit(h.limiter, "setup_complete", 20, time.Minute, h.cfg.TrustProxy)).Post("/setup/complete", h.SetupComplete)
 		r.With(middleware.RateLimit(h.limiter, "register", 10, time.Minute, h.cfg.TrustProxy)).Post("/register", h.Register)
 		r.With(middleware.RateLimit(h.limiter, "login", 20, time.Minute, h.cfg.TrustProxy)).Post("/login", h.Login)
 		r.Post("/logout", h.Logout)
@@ -197,7 +197,26 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		Region:        req.Region,
 	}, r.RemoteAddr, r.UserAgent())
 	if err != nil {
-		util.WriteError(w, 400, "setup_failed", err.Error(), middleware.RequestID(r.Context()))
+		msg := err.Error()
+		status := http.StatusBadRequest
+		code := "setup_failed"
+		switch {
+		case strings.EqualFold(strings.TrimSpace(msg), "setup already completed"):
+			status = http.StatusConflict
+			code = "setup_already_complete"
+		case strings.Contains(strings.ToLower(msg), "invalid domain"):
+			code = "invalid_domain"
+		case strings.Contains(strings.ToLower(msg), "invalid admin email"):
+			code = "invalid_admin_email"
+		case strings.Contains(strings.ToLower(msg), "must use @"):
+			code = "admin_email_domain_mismatch"
+		case strings.Contains(strings.ToLower(msg), "password"):
+			code = "invalid_password"
+		case strings.Contains(strings.ToLower(msg), "dovecot/pam"):
+			code = "pam_credentials_invalid"
+			msg = "PAM auth mode is enabled. Use an existing mailbox account email and its current password."
+		}
+		util.WriteError(w, status, code, msg, middleware.RequestID(r.Context()))
 		return
 	}
 	csrfToken := randomToken()
