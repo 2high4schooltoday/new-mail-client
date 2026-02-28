@@ -12,15 +12,35 @@ APT_UPDATED=0
 log() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 err() { printf '[ERR ] %s\n' "$*" >&2; }
-step() { log "==> $*"; }
+INSTALL_ERROR_REPORTED=0
+CURRENT_STEP="bootstrap"
+LAST_COMMAND=""
+step() {
+  CURRENT_STEP="$*"
+  log "==> $*"
+}
 
 on_install_error() {
   local code="$1" line="$2" cmd="$3"
+  INSTALL_ERROR_REPORTED=1
   err "Installer failed at line ${line}: ${cmd}"
+  err "Current step: ${CURRENT_STEP}"
   err "Run manually for diagnostics: bash -x \"$0\""
   exit "$code"
 }
 trap 'on_install_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+trap 'LAST_COMMAND=$BASH_COMMAND' DEBUG
+
+on_install_exit() {
+  local code="$1"
+  if [[ "$code" -ne 0 && "$INSTALL_ERROR_REPORTED" -eq 0 ]]; then
+    err "Installer exited with code ${code}."
+    err "Current step: ${CURRENT_STEP}"
+    err "Last command: ${LAST_COMMAND}"
+    err "Run manually for diagnostics: bash -x \"$0\""
+  fi
+}
+trap 'on_install_exit "$?"' EXIT
 
 run_nonfatal_step() {
   local label="$1"
@@ -41,6 +61,22 @@ run_nonfatal_step() {
     warn "${label} returned non-fatal code ${rc}. Continuing."
   fi
   return 0
+}
+
+configure_selected_proxy() {
+  local server="$1" server_name="$2" upstream="$3" tls_enabled="$4" cert_file="$5" key_file="$6"
+  case "$server" in
+    nginx)
+      setup_nginx_proxy "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file"
+      ;;
+    apache2)
+      setup_apache_proxy "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file"
+      ;;
+    *)
+      err "Unknown proxy server: $server"
+      return 1
+      ;;
+  esac
 }
 
 if [[ $# -ne 0 ]]; then
@@ -121,6 +157,7 @@ prompt_yes_no() {
     case "$ans" in
       y|yes) return 0 ;;
       n|no) return 1 ;;
+      *) warn "Please answer y or n." ;;
     esac
   done
 }
@@ -637,6 +674,29 @@ apply_ufw_rules() {
   fi
 }
 
+fallback_to_direct_mode() {
+  warn "Falling back to direct mode (:8080)."
+  DEPLOY_MODE="direct"
+  PROXY_SETUP=0
+  PROXY_SERVER=""
+  PROXY_SERVER_NAME=""
+  PROXY_TLS=0
+  PROXY_CERT=""
+  PROXY_KEY=""
+  LISTEN_ADDR=":8080"
+
+  set_env_var "$OUT_ENV" "DEPLOY_MODE" "$DEPLOY_MODE"
+  set_env_var "$OUT_ENV" "LISTEN_ADDR" "$LISTEN_ADDR"
+  set_env_var "$OUT_ENV" "TRUST_PROXY" "false"
+
+  "${PREFIX[@]}" install -m 0644 "$OUT_ENV" /opt/mailclient/.env || return 1
+  "${PREFIX[@]}" chown mailclient:mailclient /opt/mailclient/.env || return 1
+  "${PREFIX[@]}" systemctl restart mailclient || return 1
+
+  run_nonfatal_step "firewall reconfiguration (direct mode)" apply_ufw_rules "direct"
+  return 0
+}
+
 print_cloud_firewall_checklist() {
   local mode="$1"
   cat <<EOF
@@ -812,24 +872,49 @@ setup_nginx_proxy() {
   local tmp
   if ! have_cmd nginx; then
     err "nginx command not found but nginx proxy setup was requested."
-    exit 1
+    return 1
   fi
-  tmp="$(mktemp)"
+  if ! tmp="$(mktemp)"; then
+    err "Failed to create temporary file for nginx config."
+    return 1
+  fi
   render_nginx_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" >"$tmp"
 
-  "${PREFIX[@]}" mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-  "${PREFIX[@]}" install -m 0644 "$tmp" "$conf"
-  "${PREFIX[@]}" ln -sfn "$conf" "$enabled"
+  if ! "${PREFIX[@]}" mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled; then
+    err "Failed to create nginx site directories."
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! "${PREFIX[@]}" install -m 0644 "$tmp" "$conf"; then
+    err "Failed to install nginx config: $conf"
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! "${PREFIX[@]}" ln -sfn "$conf" "$enabled"; then
+    err "Failed to enable nginx site symlink: $enabled"
+    rm -f "$tmp"
+    return 1
+  fi
   rm -f "$tmp"
 
   if [[ ! -L "$enabled" ]]; then
     err "Nginx site enablement failed: ${enabled} symlink missing"
-    exit 1
+    return 1
   fi
 
-  "${PREFIX[@]}" nginx -t
-  "${PREFIX[@]}" systemctl enable --now nginx
-  "${PREFIX[@]}" systemctl reload nginx
+  if ! "${PREFIX[@]}" nginx -t; then
+    err "nginx configuration test failed."
+    return 1
+  fi
+  if ! "${PREFIX[@]}" systemctl enable --now nginx; then
+    err "Failed to enable/start nginx."
+    return 1
+  fi
+  if ! "${PREFIX[@]}" systemctl reload nginx; then
+    err "Failed to reload nginx."
+    return 1
+  fi
+  return 0
 }
 
 setup_apache_proxy() {
@@ -838,26 +923,52 @@ setup_apache_proxy() {
   local tmp
   if ! have_cmd apache2ctl || ! have_cmd a2enmod || ! have_cmd a2ensite; then
     err "apache2 tooling missing (apache2ctl/a2enmod/a2ensite) but apache2 proxy setup was requested."
-    exit 1
+    return 1
   fi
-  tmp="$(mktemp)"
+  if ! tmp="$(mktemp)"; then
+    err "Failed to create temporary file for apache2 config."
+    return 1
+  fi
   render_apache_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" >"$tmp"
 
-  "${PREFIX[@]}" install -m 0644 "$tmp" "$conf"
+  if ! "${PREFIX[@]}" install -m 0644 "$tmp" "$conf"; then
+    err "Failed to install apache2 config: $conf"
+    rm -f "$tmp"
+    return 1
+  fi
   rm -f "$tmp"
 
-  "${PREFIX[@]}" a2enmod proxy proxy_http headers >/dev/null
-  if [[ "$tls_enabled" == "1" ]]; then
-    "${PREFIX[@]}" a2enmod ssl >/dev/null
+  if ! "${PREFIX[@]}" a2enmod proxy proxy_http headers >/dev/null; then
+    err "Failed enabling apache2 modules: proxy proxy_http headers"
+    return 1
   fi
-  "${PREFIX[@]}" a2ensite mailclient.conf >/dev/null
+  if [[ "$tls_enabled" == "1" ]]; then
+    if ! "${PREFIX[@]}" a2enmod ssl >/dev/null; then
+      err "Failed enabling apache2 ssl module."
+      return 1
+    fi
+  fi
+  if ! "${PREFIX[@]}" a2ensite mailclient.conf >/dev/null; then
+    err "Failed enabling apache2 site: mailclient.conf"
+    return 1
+  fi
   if [[ ! -L /etc/apache2/sites-enabled/mailclient.conf && ! -f /etc/apache2/sites-enabled/mailclient.conf ]]; then
     err "Apache2 site enablement failed: /etc/apache2/sites-enabled/mailclient.conf missing"
-    exit 1
+    return 1
   fi
-  "${PREFIX[@]}" apache2ctl configtest
-  "${PREFIX[@]}" systemctl enable --now apache2
-  "${PREFIX[@]}" systemctl reload apache2
+  if ! "${PREFIX[@]}" apache2ctl configtest; then
+    err "apache2 configuration test failed."
+    return 1
+  fi
+  if ! "${PREFIX[@]}" systemctl enable --now apache2; then
+    err "Failed to enable/start apache2."
+    return 1
+  fi
+  if ! "${PREFIX[@]}" systemctl reload apache2; then
+    err "Failed to reload apache2."
+    return 1
+  fi
+  return 0
 }
 
 detect_default_domain() {
@@ -1239,18 +1350,26 @@ print_cloud_firewall_checklist "$DEPLOY_MODE"
 
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
   step "Reverse proxy configuration (${PROXY_SERVER})"
-  ensure_proxy_tooling "$PROXY_SERVER" "$OS_ID"
-  APP_UPSTREAM="$LISTEN_ADDR"
-  if [[ "$PROXY_SERVER" == "nginx" ]]; then
-    setup_nginx_proxy "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY"
+  if ! ensure_proxy_tooling "$PROXY_SERVER" "$OS_ID"; then
+    warn "Proxy tooling missing at configure time."
+    fallback_to_direct_mode || true
   else
-    setup_apache_proxy "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY"
-  fi
-  log "Reverse proxy configured: ${PROXY_SERVER} (${PROXY_SERVER_NAME})"
-  if [[ "$PROXY_SERVER" == "nginx" ]]; then
-    log "Reverse proxy config path: /etc/nginx/sites-available/mailclient.conf"
-  else
-    log "Reverse proxy config path: /etc/apache2/sites-available/mailclient.conf"
+    APP_UPSTREAM="$LISTEN_ADDR"
+    if configure_selected_proxy "$PROXY_SERVER" "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY"; then
+      log "Reverse proxy configured: ${PROXY_SERVER} (${PROXY_SERVER_NAME})"
+      if [[ "$PROXY_SERVER" == "nginx" ]]; then
+        log "Reverse proxy config path: /etc/nginx/sites-available/mailclient.conf"
+      else
+        log "Reverse proxy config path: /etc/apache2/sites-available/mailclient.conf"
+      fi
+    else
+      warn "Reverse proxy configuration failed."
+      if ! fallback_to_direct_mode; then
+        err "Automatic fallback to direct mode failed."
+        err "Run: systemctl status mailclient --no-pager"
+        exit 1
+      fi
+    fi
   fi
 fi
 
@@ -1271,15 +1390,27 @@ fi
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   step "Reverse proxy health verification"
   if ! wait_for_condition "reverse proxy route health" 25 1 verify_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS"; then
-    err "Reverse proxy health check failed for ${PROXY_SERVER_NAME}."
-    err "Component likely failing: proxy routing or vhost mismatch."
-    if [[ "$PROXY_SERVER" == "nginx" ]]; then
-      err "Run: nginx -t && systemctl status nginx --no-pager"
+    warn "Reverse proxy health check failed for ${PROXY_SERVER_NAME}."
+    warn "Trying automatic fallback to direct mode."
+    if fallback_to_direct_mode; then
+      if ! wait_for_condition "local app health endpoint after fallback" 20 1 verify_direct_access "$LISTEN_ADDR"; then
+        err "Fallback succeeded but app health still failing."
+        err "Run: journalctl -u mailclient -n 100 --no-pager"
+        exit 1
+      fi
+      warn "Proxy path failed; installer completed in direct mode."
     else
-      err "Run: apache2ctl configtest && systemctl status apache2 --no-pager"
+      err "Reverse proxy health check failed and fallback to direct mode failed."
+      if [[ "$PROXY_SERVER" == "nginx" ]]; then
+        err "Run: nginx -t && systemctl status nginx --no-pager"
+      else
+        err "Run: apache2ctl configtest && systemctl status apache2 --no-pager"
+      fi
+      err "Run: systemctl status mailclient --no-pager"
+      err "Run: journalctl -u mailclient -n 100 --no-pager"
+      err "Run: bash $ROOT_DIR/scripts/diagnose_access.sh"
+      exit 1
     fi
-    err "Run: bash $ROOT_DIR/scripts/diagnose_access.sh"
-    exit 1
   fi
 fi
 
