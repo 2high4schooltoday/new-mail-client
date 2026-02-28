@@ -5,6 +5,9 @@ IFS=$'\n\t'
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 OUT_ENV="$ROOT_DIR/.env"
+DEFAULT_REPO_URL="${MAILCLIENT_REPO_URL:-https://github.com/2high4schooltoday/new-mail-client.git}"
+DEFAULT_REPO_REF="${MAILCLIENT_REPO_REF:-main}"
+APT_UPDATED=0
 
 log() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -16,6 +19,18 @@ if [[ $# -ne 0 ]]; then
 fi
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+run_as_root() {
+  if [[ "${EUID:-1}" -ne 0 ]]; then
+    if ! have_cmd sudo; then
+      err "sudo is required for this operation"
+      exit 1
+    fi
+    sudo "$@"
+    return
+  fi
+  "$@"
+}
 
 trim() {
   local s="$1"
@@ -67,6 +82,67 @@ prompt_yes_no() {
       n|no) return 1 ;;
     esac
   done
+}
+
+install_apt_packages() {
+  if ! have_cmd apt-get; then
+    return 1
+  fi
+  if [[ "$APT_UPDATED" -eq 0 ]]; then
+    run_as_root apt-get update
+    APT_UPDATED=1
+  fi
+  run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
+ensure_repo_checkout_or_bootstrap() {
+  if [[ -f "$ENV_EXAMPLE" && -f "$ROOT_DIR/go.mod" && -f "$ROOT_DIR/cmd/server/main.go" ]]; then
+    return
+  fi
+
+  warn "App source files were not found next to this script."
+  warn "Switching to standalone bootstrap mode (fetch from GitHub)."
+
+  local uname_sys repo_url repo_ref checkout_base checkout_dir target
+  uname_sys="$(lower "$(uname -s)")"
+  if [[ "$uname_sys" != "linux" ]]; then
+    err "Standalone bootstrap currently supports Linux servers only."
+    exit 1
+  fi
+
+  repo_url="$(prompt_input "GitHub repository URL" "$DEFAULT_REPO_URL")"
+  repo_ref="$(prompt_input "Git ref (branch/tag/commit)" "$DEFAULT_REPO_REF")"
+  checkout_base="$(prompt_input "Installer workspace directory" "/opt/mailclient-installer")"
+  checkout_dir="${checkout_base%/}/src"
+
+  if ! have_cmd git; then
+    if prompt_yes_no "git is missing. Install git automatically?" 1; then
+      install_apt_packages git ca-certificates curl
+    else
+      err "git is required to download source files."
+      exit 1
+    fi
+  fi
+
+  run_as_root mkdir -p "$checkout_base"
+  if [[ -d "$checkout_dir/.git" ]]; then
+    run_as_root git -C "$checkout_dir" fetch --tags --prune origin
+  else
+    run_as_root rm -rf "$checkout_dir"
+    run_as_root git clone "$repo_url" "$checkout_dir"
+  fi
+  run_as_root git -C "$checkout_dir" checkout "$repo_ref"
+  run_as_root git -C "$checkout_dir" pull --ff-only origin "$repo_ref" || true
+
+  target="$checkout_dir/scripts/auto_install.sh"
+  if [[ ! -f "$target" ]]; then
+    err "Downloaded repository does not contain scripts/auto_install.sh"
+    exit 1
+  fi
+
+  log "Re-launching installer from: $checkout_dir"
+  run_as_root env MAILCLIENT_REPO_URL="$repo_url" MAILCLIENT_REPO_REF="$repo_ref" bash "$target"
+  exit 0
 }
 
 port_open() {
@@ -328,6 +404,44 @@ detect_web_servers() {
   printf '%s\n' "${found[@]}"
 }
 
+ensure_service_dependencies() {
+  local os_id="$1"
+  local missing=()
+  local install_pkgs=()
+
+  if ! have_cmd go; then
+    missing+=("go")
+    install_pkgs+=("golang-go")
+  fi
+  if ! have_cmd gcc; then
+    missing+=("gcc")
+    install_pkgs+=("build-essential")
+  fi
+  if ! have_cmd git; then
+    missing+=("git")
+    install_pkgs+=("git")
+  fi
+  if ! have_cmd pkg-config; then
+    missing+=("pkg-config")
+    install_pkgs+=("pkg-config")
+  fi
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  warn "Missing build/runtime dependencies: ${missing[*]}"
+  if [[ "$os_id" == "ubuntu" || "$os_id" == "debian" ]]; then
+    if prompt_yes_no "Install missing dependencies automatically with apt?" 1; then
+      install_apt_packages "${install_pkgs[@]}"
+      return
+    fi
+  fi
+
+  err "Required dependencies are missing: ${missing[*]}"
+  exit 1
+}
+
 render_nginx_conf() {
   local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5"
   if [[ "$tls_enabled" == "1" ]]; then
@@ -502,6 +616,8 @@ generate_secret() {
   fi
   date +%s | sha256sum | awk '{print $1}'
 }
+
+ensure_repo_checkout_or_bootstrap
 
 if [[ ! -f "$ENV_EXAMPLE" ]]; then
   err ".env.example not found at $ENV_EXAMPLE"
@@ -742,8 +858,9 @@ NEXT
   exit 0
 fi
 
+ensure_service_dependencies "$OS_ID"
 if ! have_cmd go; then
-  err "Go toolchain is required. Install Go before running installer service mode."
+  err "Go toolchain is still unavailable after dependency checks."
   exit 1
 fi
 

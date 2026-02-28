@@ -43,6 +43,14 @@ Interactive, prompt-driven installer (no CLI arguments). Validated for Ubuntu Se
 Run:
 - `./scripts/auto_install.sh`
 
+Standalone mode (run from any Linux server path):
+- download `scripts/auto_install.sh` and run it
+- if app sources are not present next to the script, it will:
+  - prompt for GitHub repo/ref
+  - clone/pull the repository automatically
+  - install missing dependencies on Ubuntu/Debian with `apt` (interactive confirmation)
+  - continue normal interactive install flow
+
 What it auto-detects:
 - Dovecot SQL config (`dovecot-sql.conf.ext`)
 - SQL driver / connect hints / auth table + columns
