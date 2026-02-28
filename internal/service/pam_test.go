@@ -18,9 +18,13 @@ import (
 
 type pamTestMailClient struct {
 	acceptPassword string
+	failWith       error
 }
 
 func (m pamTestMailClient) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
+	if m.failWith != nil {
+		return nil, m.failWith
+	}
 	if pass != m.acceptPassword {
 		return nil, errors.New("imap auth failed")
 	}
@@ -110,5 +114,38 @@ func TestPAMModeDisablesPasswordResetOperations(t *testing.T) {
 	}
 	if err := svc.AdminResetPassword(ctx, "admin-id", "user-id", "NewPassword123!"); !errors.Is(err, ErrPAMPasswordManaged) {
 		t.Fatalf("expected AdminResetPassword to return ErrPAMPasswordManaged, got: %v", err)
+	}
+}
+
+func TestPAMSetupDetectsConnectivityErrors(t *testing.T) {
+	ctx := context.Background()
+	tmp := filepath.Join(t.TempDir(), "app.db")
+	sqdb, err := db.OpenSQLite(tmp, 2, 1, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqdb.Close() })
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "001_init.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	st := store.New(sqdb)
+	cfg := config.Config{
+		DovecotAuthMode:     "pam",
+		SessionEncryptKey:   "this_is_a_test_session_key_that_is_long_enough_123456",
+		SessionIdleMinutes:  30,
+		SessionAbsoluteHour: 24,
+		BaseDomain:          "example.com",
+	}
+	svc := New(cfg, st, pamTestMailClient{failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused")}, mail.NoopProvisioner{}, nil)
+
+	_, _, err = svc.CompleteSetup(ctx, SetupCompleteRequest{
+		BaseDomain:    "example.com",
+		AdminEmail:    "webmaster@example.com",
+		AdminPassword: "AnyPassword123!",
+		Region:        "us-east",
+	}, "127.0.0.1", "agent")
+	if !errors.Is(err, ErrPAMVerifierDown) {
+		t.Fatalf("expected ErrPAMVerifierDown, got: %v", err)
 	}
 }

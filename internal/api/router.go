@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -204,6 +205,10 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		case strings.EqualFold(strings.TrimSpace(msg), "setup already completed"):
 			status = http.StatusConflict
 			code = "setup_already_complete"
+		case errors.Is(err, service.ErrPAMVerifierDown):
+			status = http.StatusBadGateway
+			code = "pam_verifier_unavailable"
+			msg = "cannot validate PAM credentials because IMAP connectivity failed"
 		case strings.Contains(strings.ToLower(msg), "invalid domain"):
 			code = "invalid_domain"
 		case strings.Contains(strings.ToLower(msg), "invalid admin email"):
@@ -216,6 +221,14 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 			code = "pam_credentials_invalid"
 			msg = "PAM auth mode is enabled. Use an existing mailbox account email and its current password."
 		}
+		log.Printf("setup_complete_failed code=%s status=%d admin_email=%s base_domain=%s request_id=%s err=%q",
+			code,
+			status,
+			strings.ToLower(strings.TrimSpace(req.AdminEmail)),
+			strings.ToLower(strings.TrimSpace(req.BaseDomain)),
+			middleware.RequestID(r.Context()),
+			err.Error(),
+		)
 		util.WriteError(w, status, code, msg, middleware.RequestID(r.Context()))
 		return
 	}

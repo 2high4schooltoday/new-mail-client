@@ -16,6 +16,8 @@ const state = {
     submitting: false,
     adminEmailTouched: false,
     lastAutoAdminEmail: "",
+    retryUntilMs: 0,
+    retryTimer: 0,
   },
 };
 
@@ -155,9 +157,49 @@ async function api(path, opts = {}) {
     const error = new Error(payload.message || payload.code || `HTTP ${res.status}`);
     error.code = payload.code || "request_failed";
     error.retryAfterSec = Number(res.headers.get("Retry-After") || "0");
+    error.status = res.status;
+    error.requestID = payload.request_id || res.headers.get("X-Request-ID") || "";
+    if (window && window.console && typeof window.console.error === "function") {
+      console.error("API request failed", {
+        path,
+        method,
+        status: error.status,
+        code: error.code,
+        message: error.message,
+        request_id: error.requestID,
+      });
+    }
     throw error;
   }
   return payload;
+}
+
+function setupRetrySecondsRemaining() {
+  const ms = Number(state.setup.retryUntilMs || 0) - Date.now();
+  if (ms <= 0) return 0;
+  return Math.ceil(ms / 1000);
+}
+
+function setSetupCooldown(waitSec) {
+  const secs = Math.max(1, Number(waitSec || 1));
+  state.setup.retryUntilMs = Date.now() + secs * 1000;
+  if (state.setup.retryTimer) {
+    clearInterval(state.setup.retryTimer);
+    state.setup.retryTimer = 0;
+  }
+  state.setup.retryTimer = window.setInterval(() => {
+    const remaining = setupRetrySecondsRemaining();
+    if (remaining <= 0) {
+      clearInterval(state.setup.retryTimer);
+      state.setup.retryTimer = 0;
+      state.setup.retryUntilMs = 0;
+      setSetupInlineStatus("You can retry initialization now.", "info");
+      OOBEController.refreshNavState();
+      return;
+    }
+    setSetupInlineStatus(`Too many attempts. Retry in ${remaining}s.`, "error");
+    OOBEController.refreshNavState();
+  }, 250);
 }
 
 function setActiveTab(tab) {
@@ -298,6 +340,11 @@ const OOBEController = {
     }
     state.setup.adminEmailTouched = false;
     state.setup.lastAutoAdminEmail = email;
+    state.setup.retryUntilMs = 0;
+    if (state.setup.retryTimer) {
+      clearInterval(state.setup.retryTimer);
+      state.setup.retryTimer = 0;
+    }
     state.setup.modalType = "";
     state.setup.submitting = false;
     if (state.setup.autoOpenTimer) {
@@ -323,7 +370,12 @@ const OOBEController = {
     el.setupBack.disabled = isFirst || isComplete || state.setup.submitting;
     el.setupBackIcon.disabled = isFirst || isComplete || state.setup.submitting;
     el.setupNext.disabled = isComplete || state.setup.submitting;
-    el.setupNext.textContent = state.setup.submitting ? "Initializing..." : isReview ? "Initialize" : "Continue";
+    const retryRemaining = setupRetrySecondsRemaining();
+    if (retryRemaining > 0) {
+      el.setupNext.textContent = `Retry in ${retryRemaining}s`;
+    } else {
+      el.setupNext.textContent = state.setup.submitting ? "Initializing..." : isReview ? "Initialize" : "Continue";
+    }
     if (!isComplete) setSetupInlineStatus("");
     this.refreshNavState();
   },
@@ -389,6 +441,11 @@ const OOBEController = {
       el.setupNext.disabled = true;
       return;
     }
+    if (setupRetrySecondsRemaining() > 0) {
+      el.setupNext.disabled = true;
+      el.setupBack.disabled = true;
+      return;
+    }
     if (state.setup.submitting) {
       el.setupNext.disabled = true;
       el.setupBack.disabled = true;
@@ -399,6 +456,7 @@ const OOBEController = {
 
   async next() {
     if (state.setup.submitting) return;
+    if (setupRetrySecondsRemaining() > 0) return;
     this.validateStep(state.setup.step);
     if (state.setup.step < 4) {
       this.setStep(state.setup.step + 1);
@@ -420,8 +478,10 @@ const OOBEController = {
         this.refreshNavState();
         if (err.code === "rate_limited") {
           const wait = Number(err.retryAfterSec || 60);
+          setSetupCooldown(wait);
           const wrapped = new Error(`Too many setup attempts. Wait about ${wait} seconds and try again.`);
           wrapped.code = "rate_limited";
+          wrapped.requestID = err.requestID || "";
           throw wrapped;
         }
         throw err;
@@ -772,9 +832,13 @@ function bindSetupUI() {
       }
       if (err.code === "pam_credentials_invalid") {
         err.message = "PAM mode is enabled. Use an existing mailbox account and its current password.";
+      } else if (err.code === "pam_verifier_unavailable") {
+        err.message = "Cannot validate PAM credentials right now because IMAP connectivity failed. Check IMAP host/port/TLS and try again.";
       }
-      setStatus(err.message, "error");
-      setSetupInlineStatus(err.message, "error");
+      const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
+      const detail = err.code && err.code !== "request_failed" ? `${err.message} [${err.code}]${requestRef}` : `${err.message}${requestRef}`;
+      setStatus(detail, "error");
+      setSetupInlineStatus(detail, "error");
     }
   });
 
@@ -924,8 +988,8 @@ function bindUI() {
     e.preventDefault();
     const fd = new FormData(e.target);
     try {
-      const out = await api("/api/v1/password/reset/request", { method: "POST", json: { email: fd.get("email") } });
-      setStatus(`RESET TOKEN: ${out.reset_token || "(check logs/email)"}`, "ok");
+      await api("/api/v1/password/reset/request", { method: "POST", json: { email: fd.get("email") } });
+      setStatus("If the account exists, reset instructions were sent.", "ok");
     } catch (err) {
       if (err.code === "setup_required") {
         await enterSetupIfRequired();

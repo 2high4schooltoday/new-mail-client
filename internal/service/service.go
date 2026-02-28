@@ -29,6 +29,7 @@ var (
 	ErrSuspended          = errors.New("account suspended")
 	ErrForbidden          = errors.New("forbidden")
 	ErrPAMPasswordManaged = errors.New("password is managed by PAM; change it in the system account")
+	ErrPAMVerifierDown    = errors.New("cannot reach Dovecot IMAP for PAM verification")
 )
 
 var domainRx = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -446,6 +447,9 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 			return "", models.User{}, errors.New("admin password is required")
 		}
 		if err := s.verifyMailCredentials(ctx, adminEmail, req.AdminPassword); err != nil {
+			if isMailConnectivityError(err) {
+				return "", models.User{}, ErrPAMVerifierDown
+			}
 			return "", models.User{}, errors.New("admin credentials are not valid for Dovecot/PAM")
 		}
 	} else {
@@ -565,4 +569,29 @@ func (s *Service) verifyMailCredentials(ctx context.Context, email, password str
 	}
 	_, err := s.mail.ListMailboxes(ctx, email, password)
 	return err
+}
+
+func isMailConnectivityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	connectivityHints := []string{
+		"dial",
+		"connect",
+		"timeout",
+		"i/o timeout",
+		"no such host",
+		"connection refused",
+		"tls",
+		"certificate",
+		"eof",
+		"network is unreachable",
+	}
+	for _, hint := range connectivityHints {
+		if strings.Contains(m, hint) {
+			return true
+		}
+	}
+	return false
 }
