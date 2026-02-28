@@ -25,8 +25,8 @@ func (s *Store) CreateUser(ctx context.Context, email, passwordHash, role string
 	now := time.Now().UTC()
 	u := models.User{ID: uuid.NewString(), Email: email, PasswordHash: passwordHash, Role: role, Status: status, ProvisionState: "pending", CreatedAt: now}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users(id,email,password_hash,role,status,provision_state,provision_error,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		u.ID, u.Email, u.PasswordHash, u.Role, u.Status, u.ProvisionState, nil, u.CreatedAt,
+		`INSERT INTO users(id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Email, nil, u.PasswordHash, u.Role, u.Status, u.ProvisionState, nil, u.CreatedAt,
 	)
 	return u, err
 }
@@ -40,8 +40,8 @@ func (s *Store) EnsureAdmin(ctx context.Context, email, passwordHash string) err
 	if err == ErrNotFound {
 		now := time.Now().UTC()
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO users(id,email,password_hash,role,status,provision_state,provision_error,created_at,approved_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-			uuid.NewString(), email, passwordHash, "admin", models.UserActive, "ok", nil, now, now,
+			`INSERT INTO users(id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			uuid.NewString(), email, nil, passwordHash, "admin", models.UserActive, "ok", nil, now, now,
 		)
 		return err
 	}
@@ -86,11 +86,11 @@ func (s *Store) UpsertSetting(ctx context.Context, key, value string) error {
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, error) {
 	var u models.User
 	var approvedAt, lastLogin sql.NullTime
-	var approvedBy, provisionErr sql.NullString
+	var approvedBy, provisionErr, mailLogin sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE email=?`,
+		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE email=?`,
 		email,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
+	).Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
 	if err == sql.ErrNoRows {
 		return models.User{}, ErrNotFound
 	}
@@ -112,6 +112,12 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, 
 	if provisionErr.Valid {
 		v := provisionErr.String
 		u.ProvisionError = &v
+	}
+	if mailLogin.Valid {
+		v := strings.TrimSpace(mailLogin.String)
+		if v != "" {
+			u.MailLogin = &v
+		}
 	}
 	return u, nil
 }
@@ -119,11 +125,11 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, 
 func (s *Store) GetUserByID(ctx context.Context, id string) (models.User, error) {
 	var u models.User
 	var approvedAt, lastLogin sql.NullTime
-	var approvedBy, provisionErr sql.NullString
+	var approvedBy, provisionErr, mailLogin sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE id=?`,
+		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE id=?`,
 		id,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
+	).Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
 	if err == sql.ErrNoRows {
 		return models.User{}, ErrNotFound
 	}
@@ -145,6 +151,12 @@ func (s *Store) GetUserByID(ctx context.Context, id string) (models.User, error)
 	if provisionErr.Valid {
 		v := provisionErr.String
 		u.ProvisionError = &v
+	}
+	if mailLogin.Valid {
+		v := strings.TrimSpace(mailLogin.String)
+		if v != "" {
+			u.MailLogin = &v
+		}
 	}
 	return u, nil
 }
@@ -167,6 +179,16 @@ func (s *Store) UpdateUserPasswordHash(ctx context.Context, userID, passwordHash
 	return err
 }
 
+func (s *Store) UpdateUserMailLogin(ctx context.Context, userID, mailLogin string) error {
+	mailLogin = strings.TrimSpace(mailLogin)
+	if mailLogin == "" {
+		_, err := s.db.ExecContext(ctx, `UPDATE users SET mail_login=NULL WHERE id=?`, userID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET mail_login=? WHERE id=?`, mailLogin, userID)
+	return err
+}
+
 func (s *Store) TouchUserLastLogin(ctx context.Context, userID string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET last_login_at=? WHERE id=?`, at, userID)
 	return err
@@ -179,7 +201,7 @@ func (s *Store) UpdateProvisionState(ctx context.Context, userID, state string, 
 
 func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,email,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		limit, offset,
 	)
 	if err != nil {
@@ -191,8 +213,8 @@ func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User
 	for rows.Next() {
 		var u models.User
 		var approvedAt, lastLogin sql.NullTime
-		var approvedBy, provisionErr sql.NullString
-		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin); err != nil {
+		var approvedBy, provisionErr, mailLogin sql.NullString
+		if err := rows.Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin); err != nil {
 			return nil, err
 		}
 		if approvedAt.Valid {
@@ -210,6 +232,12 @@ func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User
 		if provisionErr.Valid {
 			v := provisionErr.String
 			u.ProvisionError = &v
+		}
+		if mailLogin.Valid {
+			v := strings.TrimSpace(mailLogin.String)
+			if v != "" {
+				u.MailLogin = &v
+			}
 		}
 		out = append(out, u)
 	}

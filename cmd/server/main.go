@@ -26,8 +26,13 @@ func main() {
 		log.Fatalf("open db: %v", err)
 	}
 	defer sqdb.Close()
-	if err := db.ApplyMigrationFile(sqdb, "migrations/001_init.sql"); err != nil {
-		log.Fatalf("migration: %v", err)
+	for _, migration := range []string{
+		"migrations/001_init.sql",
+		"migrations/002_users_mail_login.sql",
+	} {
+		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
+			log.Fatalf("migration %s: %v", migration, err)
+		}
 	}
 
 	st := store.New(sqdb)

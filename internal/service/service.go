@@ -45,10 +45,22 @@ type SetupStatus struct {
 }
 
 type SetupCompleteRequest struct {
-	BaseDomain    string
-	AdminEmail    string
-	AdminPassword string
-	Region        string
+	BaseDomain        string
+	AdminEmail        string
+	AdminMailboxLogin string
+	AdminPassword     string
+	Region            string
+}
+
+type PAMCredentialsInvalidError struct {
+	Attempts []string
+}
+
+func (e *PAMCredentialsInvalidError) Error() string {
+	if e == nil || len(e.Attempts) == 0 {
+		return "admin credentials are not valid for Dovecot/PAM"
+	}
+	return fmt.Sprintf("admin credentials are not valid for Dovecot/PAM (attempted logins: %s)", strings.Join(e.Attempts, ", "))
 }
 
 type Service struct {
@@ -109,8 +121,23 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 		return "", models.User{}, ErrInvalidCredentials
 	}
 	if s.usesPAMAuth() {
-		if err := s.verifyMailCredentials(ctx, u.Email, password); err != nil {
+		stored := ""
+		if u.MailLogin != nil {
+			stored = *u.MailLogin
+		}
+		acceptedLogin, err := s.verifyMailCredentials(ctx, u.Email, password, "", stored)
+		if err != nil {
 			return "", models.User{}, ErrInvalidCredentials
+		}
+		currentLogin := strings.TrimSpace(stored)
+		if strings.TrimSpace(acceptedLogin) != currentLogin {
+			if err := s.st.UpdateUserMailLogin(ctx, u.ID, acceptedLogin); err != nil {
+				return "", models.User{}, err
+			}
+			acceptedCopy := strings.TrimSpace(acceptedLogin)
+			if acceptedCopy != "" {
+				u.MailLogin = &acceptedCopy
+			}
 		}
 	} else {
 		if !auth.VerifyPassword(u.PasswordHash, password) {
@@ -186,6 +213,15 @@ func (s *Service) SessionMailPassword(sess models.Session) (string, error) {
 		return "", fmt.Errorf("missing mail credentials")
 	}
 	return util.DecryptString(s.encryptKey, sess.MailSecret)
+}
+
+func MailIdentity(u models.User) string {
+	if u.MailLogin != nil {
+		if login := strings.TrimSpace(*u.MailLogin); login != "" {
+			return login
+		}
+	}
+	return strings.TrimSpace(u.Email)
 }
 
 func (s *Service) Logout(ctx context.Context, rawToken string) error {
@@ -442,16 +478,19 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 		return "", models.User{}, fmt.Errorf("admin email must use @%s", baseDomain)
 	}
 
+	pamAcceptedLogin := ""
 	if s.usesPAMAuth() {
 		if strings.TrimSpace(req.AdminPassword) == "" {
 			return "", models.User{}, errors.New("admin password is required")
 		}
-		if err := s.verifyMailCredentials(ctx, adminEmail, req.AdminPassword); err != nil {
+		acceptedLogin, err := s.verifyMailCredentials(ctx, adminEmail, req.AdminPassword, req.AdminMailboxLogin, "")
+		if err != nil {
 			if isMailConnectivityError(err) {
 				return "", models.User{}, fmt.Errorf("%w: %v", ErrPAMVerifierDown, err)
 			}
-			return "", models.User{}, errors.New("admin credentials are not valid for Dovecot/PAM")
+			return "", models.User{}, err
 		}
+		pamAcceptedLogin = acceptedLogin
 	} else {
 		if err := s.ValidatePassword(req.AdminPassword); err != nil {
 			return "", models.User{}, err
@@ -468,6 +507,13 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 	adminUser, err := s.st.GetUserByEmail(ctx, adminEmail)
 	if err != nil {
 		return "", models.User{}, err
+	}
+	if s.usesPAMAuth() && strings.TrimSpace(pamAcceptedLogin) != "" {
+		if err := s.st.UpdateUserMailLogin(ctx, adminUser.ID, pamAcceptedLogin); err != nil {
+			return "", models.User{}, err
+		}
+		acceptedCopy := strings.TrimSpace(pamAcceptedLogin)
+		adminUser.MailLogin = &acceptedCopy
 	}
 	if err := s.st.UpsertSetting(ctx, "base_domain", baseDomain); err != nil {
 		return "", models.User{}, err
@@ -563,12 +609,48 @@ func (s *Service) usesPAMAuth() bool {
 	return strings.EqualFold(strings.TrimSpace(s.cfg.DovecotAuthMode), "pam")
 }
 
-func (s *Service) verifyMailCredentials(ctx context.Context, email, password string) error {
+func (s *Service) verifyMailCredentials(ctx context.Context, email, password, explicitLogin, storedLogin string) (string, error) {
 	if strings.TrimSpace(email) == "" || strings.TrimSpace(password) == "" {
-		return ErrInvalidCredentials
+		return "", ErrInvalidCredentials
 	}
-	_, err := s.mail.ListMailboxes(ctx, email, password)
-	return err
+	candidates := pamLoginCandidates(explicitLogin, storedLogin, email)
+	if len(candidates) == 0 {
+		return "", ErrInvalidCredentials
+	}
+	for _, candidate := range candidates {
+		if _, err := s.mail.ListMailboxes(ctx, candidate, password); err != nil {
+			if isMailConnectivityError(err) {
+				return "", err
+			}
+			continue
+		}
+		return candidate, nil
+	}
+	return "", &PAMCredentialsInvalidError{Attempts: candidates}
+}
+
+func pamLoginCandidates(explicitLogin, storedLogin, email string) []string {
+	added := map[string]struct{}{}
+	out := make([]string, 0, 4)
+	add := func(v string) {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := added[key]; ok {
+			return
+		}
+		added[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	add(explicitLogin)
+	add(storedLogin)
+	add(email)
+	if at := strings.Index(email, "@"); at > 0 {
+		add(email[:at])
+	}
+	return out
 }
 
 func isMailConnectivityError(err error) bool {

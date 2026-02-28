@@ -18,6 +18,7 @@ const state = {
     lastAutoAdminEmail: "",
     retryUntilMs: 0,
     retryTimer: 0,
+    adminMailboxLogin: "",
   },
 };
 
@@ -59,6 +60,8 @@ const el = {
   setupRegion: document.getElementById("setup-region"),
   setupDomain: document.getElementById("setup-domain"),
   setupAdminEmail: document.getElementById("setup-admin-email"),
+  setupAdminMailboxLogin: document.getElementById("setup-admin-mailbox-login"),
+  setupAdminMailboxLoginWrap: document.getElementById("setup-mailbox-login-wrap"),
   setupPassword: document.getElementById("setup-password"),
   setupPasswordConfirm: document.getElementById("setup-password-confirm"),
   setupSummaryRegion: document.getElementById("setup-summary-region"),
@@ -308,12 +311,14 @@ async function completeSetup() {
   const email = String(el.setupAdminEmail.value || "").trim().toLowerCase();
   const region = String(el.setupRegion.value || "us-east").trim();
   const password = el.setupPassword.value;
+  const mailboxLogin = String(el.setupAdminMailboxLogin?.value || "").trim();
 
   await api("/api/v1/setup/complete", {
     method: "POST",
     json: {
       base_domain: domain,
       admin_email: email,
+      admin_mailbox_login: mailboxLogin,
       admin_password: password,
       region,
     },
@@ -334,6 +339,7 @@ const OOBEController = {
     el.setupAdminEmail.value = email;
     el.setupPassword.value = "";
     el.setupPasswordConfirm.value = "";
+    if (el.setupAdminMailboxLogin) el.setupAdminMailboxLogin.value = "";
     el.setupRegion.value = el.setupRegion.value || "us-east";
     if (el.setupCompleteNote) {
       el.setupCompleteNote.textContent = "Auto opening mail in 3 seconds.";
@@ -493,8 +499,17 @@ const OOBEController = {
   updatePasswordHint() {
     if (!el.setupPasswordHint) return;
     if (state.setup.authMode === "pam") {
-      el.setupPasswordHint.textContent = "PAM mode: enter the current password for the selected mailbox account.";
+      el.setupPasswordHint.textContent = "PAM mode: enter the current mailbox password. If login differs from email, provide Mailbox Login.";
+      if (el.setupAdminMailboxLoginWrap) {
+        el.setupAdminMailboxLoginWrap.classList.remove("hidden");
+      }
       return;
+    }
+    if (el.setupAdminMailboxLoginWrap) {
+      el.setupAdminMailboxLoginWrap.classList.add("hidden");
+    }
+    if (el.setupAdminMailboxLogin) {
+      el.setupAdminMailboxLogin.value = "";
     }
     const minLen = Number(state.setup.passwordMinLength || 12);
     const classMin = Number(state.setup.passwordClassMin || 3);
@@ -831,7 +846,9 @@ function bindSetupUI() {
         }
       }
       if (err.code === "pam_credentials_invalid") {
-        err.message = "PAM mode is enabled. Use an existing mailbox account and its current password.";
+        if (!/attempted logins:/i.test(String(err.message || ""))) {
+          err.message = "PAM mode is enabled. The password or mailbox login identity is invalid. Try the optional Mailbox Login field if IMAP login differs from email.";
+        }
       } else if (err.code === "pam_verifier_unavailable") {
         err.message = "Cannot validate PAM credentials right now because IMAP connectivity failed. Check IMAP host/port/TLS and try again.";
       }

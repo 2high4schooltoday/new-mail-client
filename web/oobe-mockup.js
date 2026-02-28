@@ -22,8 +22,11 @@ const modalConfirm = document.getElementById('mk-modal-confirm');
 const region = document.getElementById('mk-region');
 const domain = document.getElementById('mk-domain');
 const email = document.getElementById('mk-email');
+const mailboxLogin = document.getElementById('mk-mailbox-login');
+const mailboxLoginWrap = document.getElementById('mk-mailbox-login-wrap');
 const pass = document.getElementById('mk-pass');
 const pass2 = document.getElementById('mk-pass2');
+const passwordHint = document.getElementById('mk-password-hint');
 const sRegion = document.getElementById('mk-summary-region');
 const sDomain = document.getElementById('mk-summary-domain');
 const sEmail = document.getElementById('mk-summary-email');
@@ -36,6 +39,7 @@ const state = {
   modalType: '',
   lastAutoEmail: 'webmaster@example.com',
   adminEmailTouched: false,
+  authMode: 'sql',
 };
 
 function setStatus(text, kind = 'info') {
@@ -109,9 +113,12 @@ function validateStep(step) {
     if (!e.endsWith(`@${d}`)) throw new Error(`Admin email must use @${d}.`);
   }
   if (step === 3) {
-    if ((pass.value || '').length < 12) throw new Error('Password must be at least 12 characters.');
-    if (passwordClassCount(pass.value || '') < 3) throw new Error('Password must include lower/upper/number/symbol classes.');
+    if ((pass.value || '').length === 0) throw new Error('Admin password is required.');
     if (pass.value !== pass2.value) throw new Error('Password and verify password must match.');
+    if (state.authMode !== 'pam') {
+      if ((pass.value || '').length < 12) throw new Error('Password must be at least 12 characters.');
+      if (passwordClassCount(pass.value || '') < 3) throw new Error('Password must include lower/upper/number/symbol classes.');
+    }
   }
 }
 
@@ -170,6 +177,7 @@ function closeConfirm() {
 function resetFlow() {
   domain.value = 'example.com';
   email.value = 'webmaster@example.com';
+  mailboxLogin.value = '';
   pass.value = '';
   pass2.value = '';
   region.value = 'us-east';
@@ -183,6 +191,18 @@ function resetFlow() {
   setStep(0);
   setStatus('MOCKUP MODE - NO BACKEND CALLS');
   setInlineStatus('');
+}
+
+function applyAuthMode() {
+  const query = new URLSearchParams(window.location.search).get('auth_mode');
+  state.authMode = String(query || 'sql').toLowerCase() === 'pam' ? 'pam' : 'sql';
+  if (state.authMode === 'pam') {
+    mailboxLoginWrap.classList.remove('hidden');
+    passwordHint.textContent = 'PAM mode: enter current mailbox password. Set Mailbox Login if IMAP login differs from email.';
+    return;
+  }
+  mailboxLoginWrap.classList.add('hidden');
+  passwordHint.textContent = 'Use at least 12 characters and 3 character classes.';
 }
 
 function confirmModal() {
@@ -331,5 +351,6 @@ function bind() {
 }
 
 initTheme();
+applyAuthMode();
 resetFlow();
 bind();

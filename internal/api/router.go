@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -182,32 +183,40 @@ func (h *Handlers) SetupStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BaseDomain    string `json:"base_domain"`
-		AdminEmail    string `json:"admin_email"`
-		AdminPassword string `json:"admin_password"`
-		Region        string `json:"region"`
+		BaseDomain        string `json:"base_domain"`
+		AdminEmail        string `json:"admin_email"`
+		AdminMailboxLogin string `json:"admin_mailbox_login"`
+		AdminPassword     string `json:"admin_password"`
+		Region            string `json:"region"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
 	token, user, err := h.svc.CompleteSetup(r.Context(), service.SetupCompleteRequest{
-		BaseDomain:    req.BaseDomain,
-		AdminEmail:    req.AdminEmail,
-		AdminPassword: req.AdminPassword,
-		Region:        req.Region,
+		BaseDomain:        req.BaseDomain,
+		AdminEmail:        req.AdminEmail,
+		AdminMailboxLogin: req.AdminMailboxLogin,
+		AdminPassword:     req.AdminPassword,
+		Region:            req.Region,
 	}, r.RemoteAddr, r.UserAgent())
 	if err != nil {
 		msg := err.Error()
 		status := http.StatusBadRequest
 		code := "setup_failed"
+		failureClass := "setup_failed"
+		pamAttempts := ""
+		pamAttemptCount := 0
+		var pamCredErr *service.PAMCredentialsInvalidError
 		switch {
 		case strings.EqualFold(strings.TrimSpace(msg), "setup already completed"):
 			status = http.StatusConflict
 			code = "setup_already_complete"
+			failureClass = "setup_already_complete"
 		case errors.Is(err, service.ErrPAMVerifierDown):
 			status = http.StatusBadGateway
 			code = "pam_verifier_unavailable"
+			failureClass = "verifier_unavailable"
 			msg = "cannot validate PAM credentials because IMAP connectivity failed; check IMAP_HOST/IMAP_PORT/IMAP_TLS/IMAP_STARTTLS"
 			lowerErr := strings.ToLower(err.Error())
 			if strings.Contains(lowerErr, "x509") || strings.Contains(lowerErr, "certificate") || strings.Contains(lowerErr, "tls") {
@@ -221,16 +230,29 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 			code = "admin_email_domain_mismatch"
 		case strings.Contains(strings.ToLower(msg), "password"):
 			code = "invalid_password"
+		case errors.As(err, &pamCredErr):
+			code = "pam_credentials_invalid"
+			failureClass = "invalid_identity_or_password"
+			msg = "PAM auth mode is enabled. The password or mailbox login identity is invalid."
+			if pamCredErr != nil && len(pamCredErr.Attempts) > 0 {
+				pamAttemptCount = len(pamCredErr.Attempts)
+				pamAttempts = strings.Join(pamCredErr.Attempts, ",")
+				msg = fmt.Sprintf("%s Attempted logins: %s.", msg, strings.Join(pamCredErr.Attempts, ", "))
+			}
 		case strings.Contains(strings.ToLower(msg), "dovecot/pam"):
 			code = "pam_credentials_invalid"
-			msg = "PAM auth mode is enabled. Use an existing mailbox account email and its current password."
+			failureClass = "invalid_identity_or_password"
+			msg = "PAM auth mode is enabled. The password or mailbox login identity is invalid."
 		}
-		log.Printf("setup_complete_failed code=%s status=%d admin_email=%s base_domain=%s request_id=%s err=%q",
+		log.Printf("setup_complete_failed code=%s class=%s status=%d admin_email=%s base_domain=%s request_id=%s pam_attempt_count=%d pam_attempts=%q err=%q",
 			code,
+			failureClass,
 			status,
 			strings.ToLower(strings.TrimSpace(req.AdminEmail)),
 			strings.ToLower(strings.TrimSpace(req.BaseDomain)),
 			middleware.RequestID(r.Context()),
+			pamAttemptCount,
+			pamAttempts,
 			err.Error(),
 		)
 		util.WriteError(w, status, code, msg, middleware.RequestID(r.Context()))
@@ -387,7 +409,8 @@ func (h *Handlers) ListMailboxes(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	items, err := h.svc.Mail().ListMailboxes(r.Context(), u.Email, pass)
+	mailLogin := service.MailIdentity(u)
+	items, err := h.svc.Mail().ListMailboxes(r.Context(), mailLogin, pass)
 	if err != nil {
 		util.WriteError(w, 502, "imap_error", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -407,7 +430,8 @@ func (h *Handlers) ListMessages(w http.ResponseWriter, r *http.Request) {
 		mbox = "INBOX"
 	}
 	page, pageSize := parsePagination(r)
-	items, err := h.svc.Mail().ListMessages(r.Context(), u.Email, pass, mbox, page, pageSize)
+	mailLogin := service.MailIdentity(u)
+	items, err := h.svc.Mail().ListMessages(r.Context(), mailLogin, pass, mbox, page, pageSize)
 	if err != nil {
 		util.WriteError(w, 502, "imap_error", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -423,7 +447,8 @@ func (h *Handlers) GetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	msg, err := h.svc.Mail().GetMessage(r.Context(), u.Email, pass, id)
+	mailLogin := service.MailIdentity(u)
+	msg, err := h.svc.Mail().GetMessage(r.Context(), mailLogin, pass, id)
 	if err != nil {
 		util.WriteError(w, 404, "not_found", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -457,7 +482,8 @@ func (h *Handlers) handleSend(w http.ResponseWriter, r *http.Request, inReply st
 	}
 	req.From = u.Email
 	req.InReplyToID = inReply
-	if err := h.svc.Mail().Send(r.Context(), u.Email, pass, req); err != nil {
+	mailLogin := service.MailIdentity(u)
+	if err := h.svc.Mail().Send(r.Context(), mailLogin, pass, req); err != nil {
 		util.WriteError(w, 502, "smtp_error", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
@@ -479,7 +505,8 @@ func (h *Handlers) SetMessageFlags(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
-	if err := h.svc.Mail().SetFlags(r.Context(), u.Email, pass, id, req.Flags); err != nil {
+	mailLogin := service.MailIdentity(u)
+	if err := h.svc.Mail().SetFlags(r.Context(), mailLogin, pass, id, req.Flags); err != nil {
 		util.WriteError(w, 502, "imap_error", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
@@ -501,7 +528,8 @@ func (h *Handlers) MoveMessage(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
-	if err := h.svc.Mail().Move(r.Context(), u.Email, pass, id, req.Mailbox); err != nil {
+	mailLogin := service.MailIdentity(u)
+	if err := h.svc.Mail().Move(r.Context(), mailLogin, pass, id, req.Mailbox); err != nil {
 		util.WriteError(w, 502, "imap_error", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
@@ -521,7 +549,8 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 		mailbox = "INBOX"
 	}
 	page, pageSize := parsePagination(r)
-	items, err := h.svc.Mail().Search(r.Context(), u.Email, pass, mailbox, q, page, pageSize)
+	mailLogin := service.MailIdentity(u)
+	items, err := h.svc.Mail().Search(r.Context(), mailLogin, pass, mailbox, q, page, pageSize)
 	if err != nil {
 		util.WriteError(w, 502, "imap_error", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -537,7 +566,8 @@ func (h *Handlers) GetAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	meta, stream, err := h.svc.Mail().GetAttachmentStream(r.Context(), u.Email, pass, id)
+	mailLogin := service.MailIdentity(u)
+	meta, stream, err := h.svc.Mail().GetAttachmentStream(r.Context(), mailLogin, pass, id)
 	if err != nil {
 		util.WriteError(w, 404, "not_found", err.Error(), middleware.RequestID(r.Context()))
 		return

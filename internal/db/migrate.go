@@ -12,7 +12,7 @@ func ApplyMigrationFile(db *sql.DB, path string) error {
 	if err != nil {
 		return fmt.Errorf("read migration: %w", err)
 	}
-	if _, err := db.Exec(string(b)); err != nil {
+	if _, err := db.Exec(string(b)); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("apply migration: %w", err)
 	}
 
@@ -21,6 +21,7 @@ func ApplyMigrationFile(db *sql.DB, path string) error {
 		`ALTER TABLE sessions ADD COLUMN mail_secret TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN provision_state TEXT NOT NULL DEFAULT 'pending'`,
 		`ALTER TABLE users ADD COLUMN provision_error TEXT`,
+		`ALTER TABLE users ADD COLUMN mail_login TEXT`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("apply compatibility migration %q: %w", stmt, err)

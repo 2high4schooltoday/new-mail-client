@@ -18,6 +18,7 @@ import (
 
 type pamTestMailClient struct {
 	acceptPassword string
+	acceptedUsers  map[string]bool
 	failWith       error
 }
 
@@ -26,6 +27,9 @@ func (m pamTestMailClient) ListMailboxes(ctx context.Context, user, pass string)
 		return nil, m.failWith
 	}
 	if pass != m.acceptPassword {
+		return nil, errors.New("imap auth failed")
+	}
+	if len(m.acceptedUsers) > 0 && !m.acceptedUsers[user] {
 		return nil, errors.New("imap auth failed")
 	}
 	return []mail.Mailbox{{Name: "INBOX", Messages: 1}}, nil
@@ -55,7 +59,7 @@ func (m pamTestMailClient) GetAttachmentStream(ctx context.Context, user, pass, 
 	return mail.AttachmentMeta{}, nil, errors.New("not implemented")
 }
 
-func newPAMTestService(t *testing.T, acceptedPass string) (*Service, *store.Store) {
+func newPAMTestService(t *testing.T, acceptedPass string, acceptedUsers ...string) (*Service, *store.Store) {
 	t.Helper()
 	tmp := filepath.Join(t.TempDir(), "app.db")
 	sqdb, err := db.OpenSQLite(tmp, 2, 1, 5*time.Minute)
@@ -66,6 +70,9 @@ func newPAMTestService(t *testing.T, acceptedPass string) (*Service, *store.Stor
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "001_init.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "002_users_mail_login.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 
 	st := store.New(sqdb)
 	cfg := config.Config{
@@ -74,7 +81,11 @@ func newPAMTestService(t *testing.T, acceptedPass string) (*Service, *store.Stor
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 	}
-	svc := New(cfg, st, pamTestMailClient{acceptPassword: acceptedPass}, mail.NoopProvisioner{}, nil)
+	accepted := map[string]bool{}
+	for _, v := range acceptedUsers {
+		accepted[v] = true
+	}
+	svc := New(cfg, st, pamTestMailClient{acceptPassword: acceptedPass, acceptedUsers: accepted}, mail.NoopProvisioner{}, nil)
 	return svc, st
 }
 
@@ -128,6 +139,9 @@ func TestPAMSetupDetectsConnectivityErrors(t *testing.T) {
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "001_init.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "002_users_mail_login.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 
 	st := store.New(sqdb)
 	cfg := config.Config{
@@ -147,5 +161,93 @@ func TestPAMSetupDetectsConnectivityErrors(t *testing.T) {
 	}, "127.0.0.1", "agent")
 	if !errors.Is(err, ErrPAMVerifierDown) {
 		t.Fatalf("expected ErrPAMVerifierDown, got: %v", err)
+	}
+}
+
+func TestPAMSetupFallsBackToLocalPartAndPersistsLogin(t *testing.T) {
+	ctx := context.Background()
+	svc, st := newPAMTestService(t, "PamPass123!", "webmaster")
+
+	_, user, err := svc.CompleteSetup(ctx, SetupCompleteRequest{
+		BaseDomain:    "example.com",
+		AdminEmail:    "webmaster@example.com",
+		AdminPassword: "PamPass123!",
+		Region:        "us-east",
+	}, "127.0.0.1", "agent")
+	if err != nil {
+		t.Fatalf("expected setup success with localpart fallback, got: %v", err)
+	}
+	if user.MailLogin == nil || *user.MailLogin != "webmaster" {
+		t.Fatalf("expected mail_login to be webmaster, got: %#v", user.MailLogin)
+	}
+
+	dbUser, err := st.GetUserByEmail(ctx, "webmaster@example.com")
+	if err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if dbUser.MailLogin == nil || *dbUser.MailLogin != "webmaster" {
+		t.Fatalf("expected persisted mail_login webmaster, got: %#v", dbUser.MailLogin)
+	}
+}
+
+func TestPAMSetupAcceptsExplicitMailboxLoginOverride(t *testing.T) {
+	ctx := context.Background()
+	svc, st := newPAMTestService(t, "PamPass123!", "custom_login")
+
+	_, user, err := svc.CompleteSetup(ctx, SetupCompleteRequest{
+		BaseDomain:        "example.com",
+		AdminEmail:        "webmaster@example.com",
+		AdminMailboxLogin: "custom_login",
+		AdminPassword:     "PamPass123!",
+		Region:            "us-east",
+	}, "127.0.0.1", "agent")
+	if err != nil {
+		t.Fatalf("expected setup success with explicit login override, got: %v", err)
+	}
+	if user.MailLogin == nil || *user.MailLogin != "custom_login" {
+		t.Fatalf("expected mail_login custom_login, got: %#v", user.MailLogin)
+	}
+
+	dbUser, err := st.GetUserByEmail(ctx, "webmaster@example.com")
+	if err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if dbUser.MailLogin == nil || *dbUser.MailLogin != "custom_login" {
+		t.Fatalf("expected persisted custom mail_login, got: %#v", dbUser.MailLogin)
+	}
+}
+
+func TestPAMSetupReturnsIdentityErrorWhenNoCandidateAuthenticates(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newPAMTestService(t, "PamPass123!", "other_login")
+
+	_, _, err := svc.CompleteSetup(ctx, SetupCompleteRequest{
+		BaseDomain:    "example.com",
+		AdminEmail:    "webmaster@example.com",
+		AdminPassword: "PamPass123!",
+		Region:        "us-east",
+	}, "127.0.0.1", "agent")
+	if err == nil {
+		t.Fatalf("expected PAM identity error, got nil")
+	}
+	var pamErr *PAMCredentialsInvalidError
+	if !errors.As(err, &pamErr) {
+		t.Fatalf("expected PAMCredentialsInvalidError, got: %T %v", err, err)
+	}
+	if len(pamErr.Attempts) != 2 || pamErr.Attempts[0] != "webmaster@example.com" || pamErr.Attempts[1] != "webmaster" {
+		t.Fatalf("unexpected attempts list: %#v", pamErr.Attempts)
+	}
+}
+
+func TestMailIdentityPrefersStoredMailLogin(t *testing.T) {
+	u := models.User{Email: "webmaster@example.com"}
+	if got := MailIdentity(u); got != "webmaster@example.com" {
+		t.Fatalf("expected fallback email identity, got %q", got)
+	}
+
+	stored := "webmaster"
+	u.MailLogin = &stored
+	if got := MailIdentity(u); got != "webmaster" {
+		t.Fatalf("expected stored mail_login identity, got %q", got)
 	}
 }
