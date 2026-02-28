@@ -514,14 +514,16 @@ class MailclientTUI:
         self._addn(y + 1, x + 2, msg, w - 4, self._color(5))
 
     def _box(self, y: int, x: int, h: int, w: int, title: str = "") -> None:
-        self.stdscr.hline(y, x + 1, curses.ACS_HLINE, w - 2)
-        self.stdscr.hline(y + h - 1, x + 1, curses.ACS_HLINE, w - 2)
-        self.stdscr.vline(y + 1, x, curses.ACS_VLINE, h - 2)
-        self.stdscr.vline(y + 1, x + w - 1, curses.ACS_VLINE, h - 2)
-        self.stdscr.addch(y, x, curses.ACS_ULCORNER)
-        self.stdscr.addch(y, x + w - 1, curses.ACS_URCORNER)
-        self.stdscr.addch(y + h - 1, x, curses.ACS_LLCORNER)
-        self.stdscr.addch(y + h - 1, x + w - 1, curses.ACS_LRCORNER)
+        if h < 2 or w < 2:
+            return
+        self._hline_safe(y, x + 1, curses.ACS_HLINE, w - 2)
+        self._hline_safe(y + h - 1, x + 1, curses.ACS_HLINE, w - 2)
+        self._vline_safe(y + 1, x, curses.ACS_VLINE, h - 2)
+        self._vline_safe(y + 1, x + w - 1, curses.ACS_VLINE, h - 2)
+        self._addch_safe(y, x, curses.ACS_ULCORNER)
+        self._addch_safe(y, x + w - 1, curses.ACS_URCORNER)
+        self._addch_safe(y + h - 1, x, curses.ACS_LLCORNER)
+        self._addch_safe(y + h - 1, x + w - 1, curses.ACS_LRCORNER)
         if title:
             self._addn(y, x + 2, title, max(0, w - 4), self._color(3))
 
@@ -530,6 +532,28 @@ class MailclientTUI:
             return
         try:
             self.stdscr.addnstr(y, x, text, width, attr)
+        except curses.error:
+            pass
+
+    def _addch_safe(self, y: int, x: int, ch: int) -> None:
+        try:
+            self.stdscr.addch(y, x, ch)
+        except curses.error:
+            pass
+
+    def _hline_safe(self, y: int, x: int, ch: int, n: int) -> None:
+        if n <= 0:
+            return
+        try:
+            self.stdscr.hline(y, x, ch, n)
+        except curses.error:
+            pass
+
+    def _vline_safe(self, y: int, x: int, ch: int, n: int) -> None:
+        if n <= 0:
+            return
+        try:
+            self.stdscr.vline(y, x, ch, n)
         except curses.error:
             pass
 
