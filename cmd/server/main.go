@@ -21,6 +21,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	if cfg.CookiePolicyWarning != "" {
+		log.Printf("config_warning: %s", cfg.CookiePolicyWarning)
+	}
 	sqdb, err := db.OpenSQLite(cfg.DBPath, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLifetime)
 	if err != nil {
 		log.Fatalf("open db: %v", err)

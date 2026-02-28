@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,8 @@ type Config struct {
 	SessionEncryptKey   string
 	CSRFCookieName      string
 	CookieSecure        bool
+	CookieSecureMode    string
+	CookiePolicyWarning string
 	TrustProxy          bool
 	CORSAllowedOrigins  []string
 
@@ -70,6 +73,19 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	cookieSecureLegacy, cookieSecureLegacySet := envBoolWithSet("COOKIE_SECURE", false)
+	cookieSecureMode := strings.ToLower(strings.TrimSpace(os.Getenv("COOKIE_SECURE_MODE")))
+	if cookieSecureMode == "" {
+		if cookieSecureLegacySet {
+			if cookieSecureLegacy {
+				cookieSecureMode = "always"
+			} else {
+				cookieSecureMode = "never"
+			}
+		} else {
+			cookieSecureMode = "auto"
+		}
+	}
 	cfg := Config{
 		ListenAddr:               env("LISTEN_ADDR", ":8080"),
 		BaseDomain:               env("BASE_DOMAIN", "example.com"),
@@ -82,7 +98,8 @@ func Load() (Config, error) {
 		SessionAbsoluteHour:      envInt("SESSION_ABSOLUTE_HOURS", 24),
 		SessionEncryptKey:        env("SESSION_ENCRYPT_KEY", "CHANGE_ME_PRODUCTION_SESSION_KEY"),
 		CSRFCookieName:           env("CSRF_COOKIE_NAME", "mailclient_csrf"),
-		CookieSecure:             envBool("COOKIE_SECURE", false),
+		CookieSecure:             cookieSecureLegacy,
+		CookieSecureMode:         cookieSecureMode,
 		TrustProxy:               envBool("TRUST_PROXY", false),
 		CORSAllowedOrigins:       envCSV("CORS_ALLOWED_ORIGINS"),
 		CaptchaEnabled:           envBool("CAPTCHA_ENABLED", false),
@@ -149,8 +166,14 @@ func Load() (Config, error) {
 		len(cfg.SessionEncryptKey) < 24 {
 		return Config{}, fmt.Errorf("SESSION_ENCRYPT_KEY must be set to a strong non-default value (>=24 chars)")
 	}
-	if !cfg.CookieSecure && !isLocalListen(cfg.ListenAddr) {
-		return Config{}, fmt.Errorf("COOKIE_SECURE=false is allowed only for local listen addresses")
+	switch cfg.CookieSecureMode {
+	case "auto", "always", "never":
+	default:
+		return Config{}, fmt.Errorf("COOKIE_SECURE_MODE must be one of: auto, always, never")
+	}
+	cfg.CookieSecure = cfg.CookieSecureMode == "always"
+	if cfg.CookieSecureMode == "never" && isPotentiallyPublicListen(cfg.ListenAddr) {
+		cfg.CookiePolicyWarning = "COOKIE_SECURE_MODE=never with a potentially public LISTEN_ADDR may expose cookies on plaintext HTTP"
 	}
 	if cfg.CaptchaEnabled {
 		if strings.TrimSpace(cfg.CaptchaSecret) == "" {
@@ -198,15 +221,23 @@ func envInt(k string, d int) int {
 }
 
 func envBool(k string, d bool) bool {
-	v := os.Getenv(k)
-	if v == "" {
-		return d
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
+	b, set := envBoolWithSet(k, d)
+	if !set {
 		return d
 	}
 	return b
+}
+
+func envBoolWithSet(k string, d bool) (bool, bool) {
+	v := os.Getenv(k)
+	if v == "" {
+		return d, false
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return d, true
+	}
+	return b, true
 }
 
 func envCSV(k string) []string {
@@ -225,7 +256,58 @@ func envCSV(k string) []string {
 	return out
 }
 
-func isLocalListen(addr string) bool {
+func isLoopbackListen(addr string) bool {
 	a := strings.ToLower(strings.TrimSpace(addr))
-	return strings.Contains(a, "127.0.0.1") || strings.Contains(a, "localhost") || strings.Contains(a, "[::1]") || strings.HasPrefix(a, ":")
+	return strings.Contains(a, "127.0.0.1") || strings.Contains(a, "localhost") || strings.Contains(a, "[::1]")
+}
+
+func isPotentiallyPublicListen(addr string) bool {
+	a := strings.ToLower(strings.TrimSpace(addr))
+	if a == "" {
+		return false
+	}
+	if strings.HasPrefix(a, ":") || strings.Contains(a, "0.0.0.0") {
+		return true
+	}
+	if strings.Contains(a, "[::]") || a == "::" {
+		return true
+	}
+	return !isLoopbackListen(a)
+}
+
+func (c Config) ResolveCookieSecure(r *http.Request) bool {
+	switch c.CookieSecureMode {
+	case "always":
+		return true
+	case "never":
+		return false
+	case "auto":
+		if r == nil {
+			return false
+		}
+		if r.TLS != nil {
+			return true
+		}
+		if c.TrustProxy {
+			proto := forwardedProto(r.Header.Get("X-Forwarded-Proto"))
+			return proto == "https"
+		}
+		return false
+	default:
+		return c.CookieSecure
+	}
+}
+
+func forwardedProto(v string) string {
+	p := strings.TrimSpace(strings.ToLower(v))
+	if p == "" {
+		return ""
+	}
+	if strings.Contains(p, ",") {
+		p = strings.TrimSpace(strings.Split(p, ",")[0])
+	}
+	if strings.Contains(p, ";") {
+		p = strings.TrimSpace(strings.Split(p, ";")[0])
+	}
+	return p
 }

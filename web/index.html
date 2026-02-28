@@ -107,7 +107,7 @@
                 <h2>Region And Time Profile</h2>
                 <p>Set your default region for timestamps and policy localization.</p>
                 <label>Region
-                  <select id="setup-region">
+                  <select id="setup-region" name="region" autocomplete="off">
                     <option value="us-east">United States - East</option>
                     <option value="us-central">United States - Central</option>
                     <option value="us-west">United States - West</option>
@@ -123,13 +123,13 @@
                 <h2>Domain And Admin Identity</h2>
                 <p>This controls registration domain policy and default webmaster address.</p>
                 <label>Mail Domain
-                  <input id="setup-domain" type="text" placeholder="example.com" autocomplete="off">
+                  <input id="setup-domain" name="base_domain" type="text" placeholder="example.com" autocomplete="off">
                 </label>
                 <label>Admin Email
-                  <input id="setup-admin-email" type="email" autocomplete="email">
+                  <input id="setup-admin-email" name="admin_email" type="email" autocomplete="email">
                 </label>
                 <label id="setup-mailbox-login-wrap" class="hidden">Mailbox Login (optional)
-                  <input id="setup-admin-mailbox-login" type="text" autocomplete="username" placeholder="e.g. webmaster or system user">
+                  <input id="setup-admin-mailbox-login" name="admin_mailbox_login" type="text" autocomplete="username" placeholder="e.g. webmaster or system user">
                 </label>
                 <p class="hint">Default is <code>webmaster@{domain}</code>; you can override it.</p>
               </div>
@@ -139,10 +139,10 @@
                 <h2>Create Webmaster Credentials</h2>
                 <p>Choose a strong password for the first administrator account.</p>
                 <label>Password
-                  <input id="setup-password" type="password" autocomplete="new-password">
+                  <input id="setup-password" name="admin_password" type="password" autocomplete="new-password">
                 </label>
                 <label>Verify Password
-                  <input id="setup-password-confirm" type="password" autocomplete="new-password">
+                  <input id="setup-password-confirm" name="admin_password_confirm" type="password" autocomplete="new-password">
                 </label>
                 <p id="setup-password-hint" class="hint">Use at least 12 characters and 3 character classes.</p>
               </div>
@@ -226,9 +226,9 @@
       <section id="view-compose" class="panel hidden">
         <h2>Compose</h2>
         <form id="form-compose" class="stack">
-          <label>To (comma separated)<input name="to" type="text" required></label>
-          <label>Subject<input name="subject" type="text" required></label>
-          <label>Body<textarea name="body" rows="10" required></textarea></label>
+          <label>To (comma separated)<input name="to" type="text" required autocomplete="email"></label>
+          <label>Subject<input name="subject" type="text" required autocomplete="off"></label>
+          <label>Body<textarea name="body" rows="10" required autocomplete="off"></textarea></label>
           <label>Attachments<input name="attachments" type="file" multiple></label>
           <button class="cmd-btn cmd-btn--primary" type="submit">Send</button>
         </form>

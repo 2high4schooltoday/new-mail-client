@@ -4,6 +4,10 @@ const state = {
   messages: [],
   selectedMessage: null,
   theme: "paper-light",
+  auth: {
+    lastUnauthorizedAtMs: 0,
+    lastUnauthorizedCode: "",
+  },
   setup: {
     required: false,
     step: 0,
@@ -47,6 +51,7 @@ const el = {
   btnFlag: document.getElementById("btn-flag"),
   btnSeen: document.getElementById("btn-mark-seen"),
   btnTrash: document.getElementById("btn-trash"),
+  composeForm: document.getElementById("form-compose"),
   adminRegs: document.getElementById("admin-registrations"),
   adminUsers: document.getElementById("admin-users"),
   adminAudit: document.getElementById("admin-audit"),
@@ -133,6 +138,75 @@ function getCookie(name) {
   return m ? decodeURIComponent(m[2]) : "";
 }
 
+function isProtectedAPIPath(path) {
+  return path.startsWith("/api/v1/me")
+    || path.startsWith("/api/v1/mailboxes")
+    || path.startsWith("/api/v1/messages")
+    || path.startsWith("/api/v1/search")
+    || path.startsWith("/api/v1/attachments")
+    || path.startsWith("/api/v1/admin/");
+}
+
+function isSessionErrorCode(code) {
+  return code === "session_missing" || code === "session_invalid" || code === "unauthorized";
+}
+
+function reauthMessageForCode(code) {
+  if (code === "session_missing") {
+    return "Session cookie is missing. Check HTTP/HTTPS cookie policy, then sign in again.";
+  }
+  return "Session is invalid or expired. Sign in again.";
+}
+
+function routeToAuthWithMessage(message, code = "") {
+  const now = Date.now();
+  const shouldAnnounce = now - state.auth.lastUnauthorizedAtMs > 1800 || state.auth.lastUnauthorizedCode !== code;
+  state.auth.lastUnauthorizedAtMs = now;
+  state.auth.lastUnauthorizedCode = code;
+  state.user = null;
+  applyNavVisibility();
+  if (!state.setup.required) {
+    setActiveTab(el.tabAuth);
+    showView("auth");
+  }
+  if (shouldAnnounce) {
+    setStatus(message, "error");
+  }
+}
+
+function composeDraftKey() {
+  return "despatch.compose.draft.v1";
+}
+
+function saveComposeDraft(form) {
+  if (!form) return;
+  const fd = new FormData(form);
+  const payload = {
+    to: String(fd.get("to") || ""),
+    subject: String(fd.get("subject") || ""),
+    body: String(fd.get("body") || ""),
+  };
+  localStorage.setItem(composeDraftKey(), JSON.stringify(payload));
+}
+
+function clearComposeDraft() {
+  localStorage.removeItem(composeDraftKey());
+}
+
+function restoreComposeDraft(form) {
+  if (!form) return;
+  const raw = localStorage.getItem(composeDraftKey());
+  if (!raw) return;
+  try {
+    const draft = JSON.parse(raw);
+    if (typeof draft.to === "string") form.elements.to.value = draft.to;
+    if (typeof draft.subject === "string") form.elements.subject.value = draft.subject;
+    if (typeof draft.body === "string") form.elements.body.value = draft.body;
+  } catch {
+    localStorage.removeItem(composeDraftKey());
+  }
+}
+
 async function api(path, opts = {}) {
   const method = opts.method || "GET";
   const headers = Object.assign({}, opts.headers || {});
@@ -171,6 +245,15 @@ async function api(path, opts = {}) {
         message: error.message,
         request_id: error.requestID,
       });
+    }
+    const shouldHandleUnauthorized = error.status === 401
+      && isSessionErrorCode(error.code)
+      && isProtectedAPIPath(path)
+      && !opts.skipUnauthorizedHandling
+      && !state.setup.required
+      && !!state.user;
+    if (shouldHandleUnauthorized) {
+      routeToAuthWithMessage(reauthMessageForCode(error.code), error.code);
     }
     throw error;
   }
@@ -324,9 +407,12 @@ async function completeSetup() {
     },
   });
 
+  const session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true });
+  if (!session.ok) {
+    throw new Error("Setup completed, but browser session was not established. Check HTTP/HTTPS cookie policy and sign in.");
+  }
   state.setup.required = false;
   applyNavVisibility();
-  await refreshSession();
   showView("setup");
   setStatus("SETUP COMPLETE. SIGNED IN AS WEBMASTER.", "ok");
 }
@@ -547,6 +633,10 @@ const OOBEController = {
     }
     setActiveTab(el.tabMail);
     showView("mail");
+    if (!state.user) {
+      routeToAuthWithMessage("Sign in required before opening mailbox.", "session_missing");
+      return;
+    }
     await loadMailboxes();
     await loadMessages();
   },
@@ -615,21 +705,25 @@ async function enterSetupIfRequired() {
   return true;
 }
 
-async function refreshSession() {
+async function refreshSession(opts = {}) {
   try {
-    const me = await api("/api/v1/me");
+    const me = await api("/api/v1/me", { skipUnauthorizedHandling: !!opts.skipUnauthorizedHandling });
     state.user = me;
     setStatus(`SIGNED IN AS ${me.email.toUpperCase()}`, "ok");
     applyNavVisibility();
-    return true;
-  } catch {
+    return { ok: true, user: me };
+  } catch (err) {
     state.user = null;
     applyNavVisibility();
-    return false;
+    if (opts.throwOnFail) throw err;
+    return { ok: false, error: err };
   }
 }
 
 async function loadMailboxes() {
+  if (!state.user) {
+    throw new Error("Sign in required");
+  }
   const data = await api("/api/v1/mailboxes");
   el.mailboxes.innerHTML = "";
   for (const mb of data) {
@@ -661,12 +755,18 @@ function renderMessages(items) {
 }
 
 async function loadMessages() {
+  if (!state.user) {
+    throw new Error("Sign in required");
+  }
   const data = await api(`/api/v1/messages?mailbox=${encodeURIComponent(state.mailbox)}&page=1&page_size=40`);
   renderMessages(data.items || []);
   setStatus(`MAILBOX ${state.mailbox} LOADED`, "ok");
 }
 
 async function openMessage(id) {
+  if (!state.user) {
+    throw new Error("Sign in required");
+  }
   const m = await api(`/api/v1/messages/${encodeURIComponent(id)}`);
   state.selectedMessage = m;
   el.meta.innerHTML = `<div><b>From:</b> ${escapeHtml(m.from || "")}</div>
@@ -687,6 +787,9 @@ async function openMessage(id) {
 }
 
 async function searchMessages() {
+  if (!state.user) {
+    throw new Error("Sign in required");
+  }
   const q = el.searchInput.value.trim();
   const data = await api(`/api/v1/search?mailbox=${encodeURIComponent(state.mailbox)}&q=${encodeURIComponent(q)}&page=1&page_size=40`);
   renderMessages(data.items || []);
@@ -694,6 +797,10 @@ async function searchMessages() {
 }
 
 async function sendCompose(form) {
+  if (!state.user) {
+    throw new Error("Sign in required");
+  }
+  saveComposeDraft(form);
   const fd = new FormData(form);
   const files = form.querySelector("input[name='attachments']").files;
 
@@ -714,9 +821,13 @@ async function sendCompose(form) {
       },
     });
   }
+  clearComposeDraft();
 }
 
 async function loadAdmin() {
+  if (!state.user) {
+    throw new Error("Sign in required");
+  }
   const [regs, users, audit] = await Promise.all([
     api("/api/v1/admin/registrations?status=pending&page=1&page_size=50"),
     api("/api/v1/admin/users?page=1&page_size=100"),
@@ -851,6 +962,8 @@ function bindSetupUI() {
         }
       } else if (err.code === "pam_verifier_unavailable") {
         err.message = "Cannot validate PAM credentials right now because IMAP connectivity failed. Check IMAP host/port/TLS and try again.";
+      } else if (isSessionErrorCode(err.code)) {
+        err.message = "Setup was accepted, but browser session cookie was not established. Check HTTP/HTTPS cookie policy and then sign in from Login.";
       }
       const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
       const detail = err.code && err.code !== "request_failed" ? `${err.message} [${err.code}]${requestRef}` : `${err.message}${requestRef}`;
@@ -968,7 +1081,15 @@ function bindUI() {
     const fd = new FormData(e.target);
     try {
       await api("/api/v1/login", { method: "POST", json: { email: fd.get("email"), password: fd.get("password") } });
-      await refreshSession();
+      try {
+        await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true });
+      } catch (err) {
+        if (isSessionErrorCode(err.code)) {
+          routeToAuthWithMessage("Login accepted but browser session cookie was not established. Check HTTP/HTTPS cookie policy.", err.code);
+          return;
+        }
+        throw err;
+      }
       await loadMailboxes();
       await loadMessages();
       setActiveTab(el.tabMail);
@@ -1038,11 +1159,19 @@ function bindUI() {
       await sendCompose(e.target);
       setStatus("MESSAGE SENT", "ok");
       e.target.reset();
+      clearComposeDraft();
       await loadMessages();
     } catch (err) {
       setStatus(err.message, "error");
     }
   });
+
+  if (el.composeForm) {
+    restoreComposeDraft(el.composeForm);
+    const persistDraft = () => saveComposeDraft(el.composeForm);
+    el.composeForm.addEventListener("input", persistDraft);
+    el.composeForm.addEventListener("change", persistDraft);
+  }
 
   el.tabSetup.onclick = () => {
     if (!state.setup.required) return;
@@ -1072,6 +1201,7 @@ function bindUI() {
     if (!state.user || state.setup.required) return;
     setActiveTab(el.tabCompose);
     showView("compose");
+    restoreComposeDraft(el.composeForm);
   };
 
   el.tabAdmin.onclick = async () => {
@@ -1156,8 +1286,8 @@ async function bootstrap() {
     return;
   }
 
-  const ok = await refreshSession();
-  if (!ok) {
+  const session = await refreshSession({ skipUnauthorizedHandling: true });
+  if (!session.ok) {
     setActiveTab(el.tabAuth);
     showView("auth");
     setStatus("AUTH REQUIRED");

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"crypto/subtle"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -25,17 +26,27 @@ func RequestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func Authn(svc *service.Service, cookieName string) func(http.Handler) http.Handler {
+func Authn(svc *service.Service, cookieName string, trustProxy bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c, err := r.Cookie(cookieName)
 			if err != nil || c.Value == "" {
-				util.WriteError(w, http.StatusUnauthorized, "unauthorized", "authentication required", RequestID(r.Context()))
+				log.Printf("auth_failed class=missing_cookie path=%s request_id=%s remote_ip=%s",
+					r.URL.Path, RequestID(r.Context()), ClientIP(r, trustProxy))
+				util.WriteError(w, http.StatusUnauthorized, "session_missing", "authentication required", RequestID(r.Context()))
 				return
 			}
 			u, sess, err := svc.ValidateSession(r.Context(), c.Value)
 			if err != nil {
-				util.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid session", RequestID(r.Context()))
+				if errors.Is(err, service.ErrForbidden) {
+					log.Printf("auth_failed class=forbidden_status path=%s request_id=%s remote_ip=%s",
+						r.URL.Path, RequestID(r.Context()), ClientIP(r, trustProxy))
+					util.WriteError(w, http.StatusForbidden, "forbidden", "account is not active", RequestID(r.Context()))
+					return
+				}
+				log.Printf("auth_failed class=invalid_session path=%s request_id=%s remote_ip=%s",
+					r.URL.Path, RequestID(r.Context()), ClientIP(r, trustProxy))
+				util.WriteError(w, http.StatusUnauthorized, "session_invalid", "invalid session", RequestID(r.Context()))
 				return
 			}
 			r = r.WithContext(WithUser(r.Context(), u))

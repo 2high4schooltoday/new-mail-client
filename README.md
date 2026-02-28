@@ -7,6 +7,7 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 - Registration with manual admin approval workflow.
 - Unified auth model with Argon2id password hashing.
 - Session cookies + CSRF protection for mutating routes.
+- Request-aware cookie security policy (`COOKIE_SECURE_MODE=auto|always|never`) for direct/proxy deployment compatibility.
 - Startup safety checks for session key strength, cookie security, and CAPTCHA config.
 - Admin user lifecycle controls: approve/reject/suspend/unsuspend/reset password.
 - Password reset token flow.
@@ -173,3 +174,4 @@ Base: `/api/v1`
 - Password reset request endpoint no longer returns raw reset tokens.
 - CAPTCHA (when enabled) is server-verified.
 - CORS now uses explicit allowlist via `CORS_ALLOWED_ORIGINS`.
+- Cookie policy now supports `COOKIE_SECURE_MODE` (preferred) with legacy `COOKIE_SECURE` compatibility.

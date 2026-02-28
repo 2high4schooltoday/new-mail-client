@@ -805,6 +805,30 @@ verify_direct_access() {
   return 1
 }
 
+local_base_url_from_listen() {
+  local listen_addr="$1"
+  local host="" port=""
+  if [[ "$listen_addr" == :* ]]; then
+    host="127.0.0.1"
+    port="${listen_addr#:}"
+  elif [[ "$listen_addr" == *:* ]]; then
+    host="${listen_addr%:*}"
+    port="${listen_addr##*:}"
+    host="${host#[}"
+    host="${host%]}"
+  else
+    host="127.0.0.1"
+    port="8080"
+  fi
+  if [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+    port="8080"
+  fi
+  if [[ -z "$host" || "$host" == "0.0.0.0" || "$host" == "::" ]]; then
+    host="127.0.0.1"
+  fi
+  printf 'http://%s:%s' "$host" "$port"
+}
+
 verify_proxy_access() {
   local server="$1" tls_enabled="$2"
   if [[ "$tls_enabled" == "1" ]]; then
@@ -812,6 +836,41 @@ verify_proxy_access() {
     return
   fi
   curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/health/live" >/dev/null
+}
+
+derive_cookie_secure_mode() {
+  local mode="$1" proxy_tls="$2"
+  if [[ "$mode" == "proxy" && "$proxy_tls" == "1" ]]; then
+    printf 'always'
+    return
+  fi
+  printf 'never'
+}
+
+cookie_secure_legacy_value() {
+  local mode="$1"
+  if [[ "$mode" == "always" ]]; then
+    printf 'true'
+    return
+  fi
+  printf 'false'
+}
+
+validate_cookie_policy_tuple() {
+  local mode="$1" proxy_tls="$2" cookie_mode="$3" listen_addr="$4"
+  if [[ "$mode" == "direct" && "$cookie_mode" == "always" ]]; then
+    err "Invalid cookie/deploy config: direct mode on ${listen_addr} cannot use secure-only cookies."
+    return 1
+  fi
+  if [[ "$mode" == "proxy" && "$proxy_tls" == "1" && "$cookie_mode" != "always" ]]; then
+    err "Invalid cookie/deploy config: HTTPS proxy mode requires COOKIE_SECURE_MODE=always."
+    return 1
+  fi
+  if [[ "$mode" == "proxy" && "$proxy_tls" != "1" && "$cookie_mode" == "always" ]]; then
+    err "Invalid cookie/deploy config: HTTP-only proxy mode cannot use secure-only cookies."
+    return 1
+  fi
+  return 0
 }
 
 apply_ufw_rules() {
@@ -877,10 +936,17 @@ fallback_to_direct_mode() {
   PROXY_CERT=""
   PROXY_KEY=""
   LISTEN_ADDR=":8080"
+  COOKIE_SECURE_MODE="never"
+  COOKIE_SECURE_LEGACY="false"
 
   set_env_var "$OUT_ENV" "DEPLOY_MODE" "$DEPLOY_MODE"
   set_env_var "$OUT_ENV" "LISTEN_ADDR" "$LISTEN_ADDR"
   set_env_var "$OUT_ENV" "TRUST_PROXY" "false"
+  set_env_var "$OUT_ENV" "COOKIE_SECURE_MODE" "never"
+  set_env_var "$OUT_ENV" "COOKIE_SECURE" "false"
+  set_env_var "$OUT_ENV" "PROXY_SERVER" ""
+  set_env_var "$OUT_ENV" "PROXY_SERVER_NAME" ""
+  set_env_var "$OUT_ENV" "PROXY_TLS" "0"
 
   "${PREFIX[@]}" install -m 0644 "$OUT_ENV" /opt/mailclient/.env || return 1
   "${PREFIX[@]}" chown mailclient:mailclient /opt/mailclient/.env || return 1
@@ -1449,13 +1515,19 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
 fi
 
 cp "$ENV_EXAMPLE" "$OUT_ENV"
+COOKIE_SECURE_MODE="$(derive_cookie_secure_mode "$DEPLOY_MODE" "$PROXY_TLS")"
+COOKIE_SECURE_LEGACY="$(cookie_secure_legacy_value "$COOKIE_SECURE_MODE")"
 set_env_var "$OUT_ENV" "BASE_DOMAIN" "$BASE_DOMAIN"
 set_env_var "$OUT_ENV" "LISTEN_ADDR" "$LISTEN_ADDR"
 set_env_var "$OUT_ENV" "APP_DB_PATH" "$APP_DB_PATH"
 set_env_var "$OUT_ENV" "SESSION_ENCRYPT_KEY" "$SESSION_KEY"
-set_env_var "$OUT_ENV" "COOKIE_SECURE" "true"
+set_env_var "$OUT_ENV" "COOKIE_SECURE_MODE" "$COOKIE_SECURE_MODE"
+set_env_var "$OUT_ENV" "COOKIE_SECURE" "$COOKIE_SECURE_LEGACY"
 set_env_var "$OUT_ENV" "DEPLOY_MODE" "$DEPLOY_MODE"
 set_env_var "$OUT_ENV" "DOVECOT_AUTH_MODE" "$DOVECOT_AUTH_MODE"
+set_env_var "$OUT_ENV" "PROXY_SERVER" "$PROXY_SERVER"
+set_env_var "$OUT_ENV" "PROXY_SERVER_NAME" "$PROXY_SERVER_NAME"
+set_env_var "$OUT_ENV" "PROXY_TLS" "$PROXY_TLS"
 if [[ "$PROXY_SETUP" -eq 1 ]]; then
   set_env_var "$OUT_ENV" "TRUST_PROXY" "true"
 fi
@@ -1492,6 +1564,10 @@ if [[ "$IMAP_INSECURE_SKIP_VERIFY" == "true" || "$SMTP_INSECURE_SKIP_VERIFY" == 
   warn "Loopback TLS verification bypass enabled for IMAP/SMTP to avoid certificate hostname mismatch (127.0.0.1)."
 fi
 log "Deployment mode: $DEPLOY_MODE"
+log "Cookie secure mode: $COOKIE_SECURE_MODE"
+if [[ "$DEPLOY_MODE" == "proxy" && "$PROXY_TLS" != "1" ]]; then
+  warn "Reverse proxy TLS is disabled; cookies are configured for HTTP transport (COOKIE_SECURE_MODE=never)."
+fi
 log "Dovecot auth mode: $DOVECOT_AUTH_MODE"
 if [[ -n "$SQL_CONF" ]]; then
   log "Detected Dovecot SQL file: $SQL_CONF"
@@ -1609,6 +1685,12 @@ fi
 finish_stage_ok
 
 begin_stage "post_checks" "Post-install Checks" "5"
+step "Deployment and cookie policy consistency"
+if ! validate_cookie_policy_tuple "$DEPLOY_MODE" "$PROXY_TLS" "$COOKIE_SECURE_MODE" "$LISTEN_ADDR"; then
+  err "Generated deployment tuple is inconsistent."
+  err "Run: grep -E '^(DEPLOY_MODE|LISTEN_ADDR|COOKIE_SECURE_MODE|COOKIE_SECURE)=' /opt/mailclient/.env"
+  exit 1
+fi
 if ! wait_for_condition "mailclient service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
   err "mailclient service is not active after install."
   err "Run: systemctl status mailclient --no-pager"
@@ -1619,6 +1701,14 @@ step "Local service health verification"
 if ! wait_for_condition "local app health endpoint" 20 1 verify_direct_access "$LISTEN_ADDR"; then
   err "Local app health check failed on ${LISTEN_ADDR}."
   err "Run: /opt/mailclient/mailclient (or check /opt/mailclient/.env and service logs)"
+  err "Run: journalctl -u mailclient -n 100 --no-pager"
+  exit 1
+fi
+
+step "Auth path sanity verification"
+LOCAL_BASE_URL="$(local_base_url_from_listen "$LISTEN_ADDR")"
+if ! curl -fsS --max-time 8 "${LOCAL_BASE_URL}/api/v1/setup/status" >/dev/null; then
+  err "Auth/setup API sanity check failed on local endpoint."
   err "Run: journalctl -u mailclient -n 100 --no-pager"
   exit 1
 fi
@@ -1678,6 +1768,8 @@ First-run OOBE is web-only and will ask for:
   - domain (pre-filled: ${BASE_DOMAIN})
   - admin email (default: webmaster@${BASE_DOMAIN})
   - admin password
+Cookie policy:
+  - COOKIE_SECURE_MODE=${COOKIE_SECURE_MODE}
 DONE
 
 if prompt_yes_no "Run Internet accessibility diagnostics now?" 1; then

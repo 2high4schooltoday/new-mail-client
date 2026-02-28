@@ -15,6 +15,19 @@ trim() {
   printf '%s' "$s"
 }
 
+lower() {
+  echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+truthy() {
+  local v
+  v="$(lower "$(trim "${1:-}")")"
+  case "$v" in
+    1|y|yes|true|on) return 0 ;;
+  esac
+  return 1
+}
+
 get_env() {
   local key="$1" default="${2:-}" line
   if [[ -f "$ENV_FILE" ]]; then
@@ -43,6 +56,16 @@ record_ok() {
 DEPLOY_MODE="$(trim "$(get_env DEPLOY_MODE "")")"
 LISTEN_ADDR="$(trim "$(get_env LISTEN_ADDR ":8080")")"
 BASE_DOMAIN="$(trim "$(get_env BASE_DOMAIN "")")"
+PROXY_TLS="$(trim "$(get_env PROXY_TLS "")")"
+COOKIE_SECURE_MODE="$(lower "$(trim "$(get_env COOKIE_SECURE_MODE "")")")"
+COOKIE_SECURE_LEGACY="$(trim "$(get_env COOKIE_SECURE "")")"
+if [[ -z "$COOKIE_SECURE_MODE" ]]; then
+  if truthy "$COOKIE_SECURE_LEGACY"; then
+    COOKIE_SECURE_MODE="always"
+  else
+    COOKIE_SECURE_MODE="never"
+  fi
+fi
 if [[ -z "$DEPLOY_MODE" ]]; then
   if [[ "$LISTEN_ADDR" == 127.0.0.1:* ]]; then
     DEPLOY_MODE="proxy"
@@ -57,6 +80,20 @@ if [[ -f /etc/nginx/sites-available/mailclient.conf || -L /etc/nginx/sites-enabl
 elif [[ -f /etc/apache2/sites-available/mailclient.conf || -L /etc/apache2/sites-enabled/mailclient.conf ]]; then
   PROXY_SERVER="apache2"
 fi
+if [[ -z "$PROXY_TLS" ]]; then
+  if [[ "$PROXY_SERVER" == "nginx" ]]; then
+    if grep -Eq 'listen[[:space:]]+443' /etc/nginx/sites-available/mailclient.conf 2>/dev/null; then
+      PROXY_TLS="1"
+    fi
+  elif [[ "$PROXY_SERVER" == "apache2" ]]; then
+    if grep -Eq 'SSLEngine[[:space:]]+on|VirtualHost[[:space:]]+\*:443' /etc/apache2/sites-available/mailclient.conf 2>/dev/null; then
+      PROXY_TLS="1"
+    fi
+  fi
+fi
+if [[ -z "$PROXY_TLS" ]]; then
+  PROXY_TLS="0"
+fi
 
 printf '=== Despatch Internet Access Diagnosis ===\n'
 printf 'env_file=%s\n' "$ENV_FILE"
@@ -65,8 +102,10 @@ printf 'listen_addr=%s\n' "$LISTEN_ADDR"
 if [[ -n "$BASE_DOMAIN" ]]; then
   printf 'base_domain=%s\n' "$BASE_DOMAIN"
 fi
+printf 'cookie_secure_mode=%s\n' "$COOKIE_SECURE_MODE"
 if [[ -n "$PROXY_SERVER" ]]; then
   printf 'proxy_server=%s\n' "$PROXY_SERVER"
+  printf 'proxy_tls=%s\n' "$PROXY_TLS"
 fi
 printf '\n'
 
@@ -138,6 +177,31 @@ if [[ "$DEPLOY_MODE" == "proxy" ]]; then
     fi
   else
     printf '[WARN] curl or BASE_DOMAIN missing; proxy route check skipped.\n'
+  fi
+fi
+
+printf '\n--- Cookie policy ---\n'
+if [[ "$DEPLOY_MODE" == "direct" ]]; then
+  if [[ "$COOKIE_SECURE_MODE" == "always" ]]; then
+    record_fail 50 "COOKIE_POLICY_MISMATCH: direct HTTP mode cannot use secure-only cookies"
+    printf '       Fix: set COOKIE_SECURE_MODE=never in %s and restart mailclient.\n' "$ENV_FILE"
+    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=never/\" %s && sudo systemctl restart mailclient\n' "$ENV_FILE"
+  else
+    record_ok "direct-mode cookie policy is compatible"
+  fi
+fi
+
+if [[ "$DEPLOY_MODE" == "proxy" ]]; then
+  if [[ "$PROXY_TLS" != "1" && "$COOKIE_SECURE_MODE" == "always" ]]; then
+    record_fail 50 "COOKIE_POLICY_MISMATCH: HTTP-only proxy mode cannot use secure-only cookies"
+    printf '       Fix: enable TLS proxy or set COOKIE_SECURE_MODE=never in %s, then restart mailclient.\n' "$ENV_FILE"
+    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=never/\" %s && sudo systemctl restart mailclient\n' "$ENV_FILE"
+  elif [[ "$PROXY_TLS" == "1" && "$COOKIE_SECURE_MODE" != "always" ]]; then
+    record_fail 50 "COOKIE_POLICY_MISMATCH: HTTPS proxy mode should use COOKIE_SECURE_MODE=always"
+    printf '       Fix: set COOKIE_SECURE_MODE=always in %s and restart mailclient.\n' "$ENV_FILE"
+    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=always/\" %s && sudo systemctl restart mailclient\n' "$ENV_FILE"
+  else
+    record_ok "proxy-mode cookie policy is compatible"
   fi
 fi
 
@@ -219,5 +283,6 @@ case "$code" in
   21) printf 'Next: verify proxy server_name/vhost routes to 127.0.0.1:8080.\n' ;;
   30) printf 'Next: open required firewall ports (ufw/security groups).\n' ;;
   40) printf 'Next: update DNS A record to this server public IP.\n' ;;
+  50) printf 'Next: align COOKIE_SECURE_MODE with deploy mode and restart mailclient.\n' ;;
 esac
 exit "$code"

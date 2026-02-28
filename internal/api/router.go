@@ -113,7 +113,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 		r.Post("/password/reset/confirm", h.PasswordResetConfirm)
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName))
+			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName, h.cfg.TrustProxy))
 			r.Get("/me", h.Me)
 			r.Get("/mailboxes", h.ListMailboxes)
 			r.Get("/messages", h.ListMessages)
@@ -259,8 +259,7 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrfToken := randomToken()
-	http.SetCookie(w, &http.Cookie{Name: h.cfg.SessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: h.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(h.cfg.SessionAbsoluteDuration().Seconds())})
-	http.SetCookie(w, &http.Cookie{Name: h.cfg.CSRFCookieName, Value: csrfToken, Path: "/", HttpOnly: false, Secure: h.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(h.cfg.SessionAbsoluteDuration().Seconds())})
+	h.setAuthCookies(w, r, token, csrfToken)
 	util.WriteJSON(w, 200, map[string]string{"status": "ok", "user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken})
 }
 
@@ -337,8 +336,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	_ = h.svc.Store().DeleteRateEvents(r.Context(), ip+"|"+normalizedEmail, "login_failed")
 
 	csrfToken := randomToken()
-	http.SetCookie(w, &http.Cookie{Name: h.cfg.SessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: h.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(h.cfg.SessionAbsoluteDuration().Seconds())})
-	http.SetCookie(w, &http.Cookie{Name: h.cfg.CSRFCookieName, Value: csrfToken, Path: "/", HttpOnly: false, Secure: h.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(h.cfg.SessionAbsoluteDuration().Seconds())})
+	h.setAuthCookies(w, r, token, csrfToken)
 	util.WriteJSON(w, 200, map[string]string{"user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken})
 }
 
@@ -347,8 +345,7 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 	if c != nil && c.Value != "" {
 		_ = h.svc.Logout(r.Context(), c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: h.cfg.SessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-	http.SetCookie(w, &http.Cookie{Name: h.cfg.CSRFCookieName, Value: "", Path: "/", MaxAge: -1})
+	h.clearAuthCookies(w, r)
 	util.WriteJSON(w, 200, map[string]string{"status": "ok"})
 }
 
@@ -766,6 +763,54 @@ func randomToken() string {
 	buf := make([]byte, 32)
 	_, _ = rand.Read(buf)
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+func (h *Handlers) setAuthCookies(w http.ResponseWriter, r *http.Request, sessionToken, csrfToken string) {
+	secure := h.cfg.ResolveCookieSecure(r)
+	maxAge := int(h.cfg.SessionAbsoluteDuration().Seconds())
+	http.SetCookie(w, &http.Cookie{
+		Name:     h.cfg.SessionCookieName,
+		Value:    sessionToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     h.cfg.CSRFCookieName,
+		Value:    csrfToken,
+		Path:     "/",
+		HttpOnly: false,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	})
+}
+
+func (h *Handlers) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
+	secure := h.cfg.ResolveCookieSecure(r)
+	expiredAt := time.Unix(1, 0).UTC()
+	http.SetCookie(w, &http.Cookie{
+		Name:     h.cfg.SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  expiredAt,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     h.cfg.CSRFCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: false,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  expiredAt,
+	})
 }
 
 func decodeSendRequest(r *http.Request) (mail.SendRequest, error) {
