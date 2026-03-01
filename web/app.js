@@ -1167,6 +1167,11 @@ function bindUI() {
       clearComposeDraft();
       await loadMessages();
     } catch (err) {
+      if (err.code === "smtp_sender_rejected") {
+        const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
+        setStatus(`SMTP sender policy rejected this message. On Ubuntu, check Postfix sender-login policy and users.mail_login mapping.${requestRef}`, "error");
+        return;
+      }
       setStatus(err.message, "error");
     }
   });

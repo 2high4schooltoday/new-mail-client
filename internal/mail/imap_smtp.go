@@ -262,16 +262,46 @@ func (c *IMAPSMTPClient) Send(ctx context.Context, user, pass string, req SendRe
 	if req.From == "" {
 		req.From = user
 	}
-	if !strings.EqualFold(req.From, user) {
-		return fmt.Errorf("sender must match authenticated user")
-	}
 
 	msg, err := buildRFC822(req)
 	if err != nil {
 		return err
 	}
 
-	return c.sendSMTP(ctx, user, pass, req.From, req.To, msg)
+	return c.sendWithSenderFallback(ctx, user, pass, req, msg, c.sendSMTP)
+}
+
+func (c *IMAPSMTPClient) sendWithSenderFallback(
+	ctx context.Context,
+	user,
+	pass string,
+	req SendRequest,
+	raw []byte,
+	sendFunc func(context.Context, string, string, string, []string, []byte) error,
+) error {
+	envelopeFrom := strings.TrimSpace(req.From)
+	if envelopeFrom == "" {
+		envelopeFrom = strings.TrimSpace(user)
+	}
+	err := sendFunc(ctx, user, pass, envelopeFrom, req.To, raw)
+	if err == nil {
+		return nil
+	}
+	if !IsSMTPSenderPolicyError(err) {
+		return err
+	}
+	authIdentity := strings.TrimSpace(user)
+	if authIdentity != "" && !strings.EqualFold(envelopeFrom, authIdentity) {
+		retryErr := sendFunc(ctx, user, pass, authIdentity, req.To, raw)
+		if retryErr == nil {
+			return nil
+		}
+		if IsSMTPSenderPolicyError(retryErr) {
+			return WrapSMTPSenderRejected(retryErr)
+		}
+		return retryErr
+	}
+	return WrapSMTPSenderRejected(err)
 }
 
 func (c *IMAPSMTPClient) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {

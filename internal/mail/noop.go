@@ -31,9 +31,6 @@ func (NoopClient) Search(ctx context.Context, user, pass, mailbox, query string,
 }
 
 func (NoopClient) Send(ctx context.Context, user, pass string, req SendRequest) error {
-	if req.From != user {
-		return fmt.Errorf("sender must match authenticated user")
-	}
 	return nil
 }
 

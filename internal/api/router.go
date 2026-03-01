@@ -492,10 +492,15 @@ func (h *Handlers) handleSend(w http.ResponseWriter, r *http.Request, inReply st
 		util.WriteError(w, 400, "bad_request", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
+	// Sender is server-owned to prevent client-side From spoofing.
 	req.From = u.Email
 	req.InReplyToID = inReply
 	mailLogin := service.MailIdentity(u)
 	if err := h.svc.Mail().Send(r.Context(), mailLogin, pass, req); err != nil {
+		if errors.Is(err, mail.ErrSMTPSenderRejected) {
+			util.WriteError(w, 422, "smtp_sender_rejected", err.Error(), middleware.RequestID(r.Context()))
+			return
+		}
 		util.WriteError(w, 502, "smtp_error", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}

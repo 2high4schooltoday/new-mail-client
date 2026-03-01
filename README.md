@@ -118,6 +118,29 @@ It checks:
 - `ufw` rules
 - DNS vs server public IP (when tools are available)
 
+## SMTP sender diagnostics (Ubuntu)
+If sending fails with `smtp_sender_rejected` or `smtp_error` related to sender identity, run:
+
+```bash
+sudo grep -E '^(DOVECOT_AUTH_MODE|APP_DB_PATH)=' /opt/mailclient/.env
+DB_PATH="$(sudo awk -F= '/^APP_DB_PATH=/{print $2}' /opt/mailclient/.env)"
+if [[ "$DB_PATH" != /* ]]; then DB_PATH="/opt/mailclient/${DB_PATH#./}"; fi
+sudo sqlite3 "$DB_PATH" "SELECT email, COALESCE(mail_login,'') AS mail_login FROM users ORDER BY created_at DESC LIMIT 20;"
+```
+
+Quick local send smoke test through API:
+
+```bash
+curl -sS -c /tmp/mailclient.cookies -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"YOUR_PASSWORD"}' \
+  http://127.0.0.1:8080/api/v1/login >/dev/null
+CSRF="$(awk '$6=="mailclient_csrf"{print $7}' /tmp/mailclient.cookies)"
+curl -i -b /tmp/mailclient.cookies -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"to":["postmaster@example.com"],"subject":"probe","body":"probe"}' \
+  http://127.0.0.1:8080/api/v1/messages/send
+sudo journalctl -u mailclient -n 200 --no-pager | grep -E 'messages/send|smtp_sender_rejected|smtp_error' || true
+```
+
 ## Dovecot provisioning notes
 Set `DOVECOT_AUTH_DB_DRIVER` and `DOVECOT_AUTH_DB_DSN` to enable automatic writes to your Dovecot auth DB.
 
