@@ -400,7 +400,7 @@ function loadCapWidgetScript(paths) {
         state.captcha.scriptLoaded = true;
         resolve();
       }, { once: true });
-      existing.addEventListener("error", () => reject(new Error("failed to load cap widget script")), { once: true });
+      existing.addEventListener("error", () => reject(new Error(`failed to load cap widget script: ${paths.scriptURL}`)), { once: true });
       return;
     }
     const script = document.createElement("script");
@@ -412,7 +412,7 @@ function loadCapWidgetScript(paths) {
       resolve();
     };
     script.onerror = () => {
-      reject(new Error("failed to load cap widget script"));
+      reject(new Error(`failed to load cap widget script: ${paths.scriptURL}`));
     };
     document.head.appendChild(script);
   }).finally(() => {
@@ -497,15 +497,19 @@ async function initCaptchaUI() {
 
   showCaptchaManualInput(false);
   setCaptchaNote("Complete the challenge to continue registration.", "info");
+  let paths = null;
   try {
-    const paths = capWidgetPaths(cfg);
+    paths = capWidgetPaths(cfg);
     await loadCapWidgetScript(paths);
     mountCapWidget(paths);
   } catch (err) {
     state.captcha.widgetBlocked = true;
     setCaptchaToken("");
-    setCaptchaError("Captcha widget failed to load.");
-    setCaptchaNote(`Captcha unavailable: ${err.message}`, "error");
+    const assetHint = paths
+      ? `Check self-hosted CAP assets: ${paths.scriptURL} and ${paths.wasmURL}.`
+      : "Check CAPTCHA_WIDGET_API_URL and CAP standalone route.";
+    setCaptchaError("Captcha widget failed to load from self-hosted CAP assets.");
+    setCaptchaNote(`CAP asset server unavailable. ${assetHint} (${err.message})`, "error");
   }
   syncRegisterSubmitState();
 }
@@ -531,7 +535,7 @@ async function resetCaptchaChallenge() {
   } catch {
     state.captcha.widgetBlocked = true;
     setCaptchaToken("");
-    setCaptchaError("Captcha widget failed to reset.");
+    setCaptchaError("Captcha widget failed to reset from self-hosted CAP assets.");
   }
   syncRegisterSubmitState();
 }

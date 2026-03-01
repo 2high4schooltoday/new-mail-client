@@ -206,6 +206,9 @@ env_key_for_input_prompt() {
     "CAP site key") echo "DESPATCH_CAPTCHA_SITE_KEY" ;;
     "CAP verification secret") echo "DESPATCH_CAPTCHA_SECRET" ;;
     "CAP upstream host:port for reverse proxy /cap/ route") echo "DESPATCH_CAPTCHA_CAP_UPSTREAM" ;;
+    "CAP ENABLE_ASSETS_SERVER value (true/false)") echo "DESPATCH_CAPTCHA_CAP_ENABLE_ASSETS_SERVER" ;;
+    "CAP WIDGET_VERSION (pin, avoid latest)") echo "DESPATCH_CAPTCHA_CAP_WIDGET_VERSION" ;;
+    "CAP WASM_VERSION (pin, avoid latest)") echo "DESPATCH_CAPTCHA_CAP_WASM_VERSION" ;;
     "Dovecot auth backend mode (pam or sql)") echo "DESPATCH_DOVECOT_AUTH_MODE" ;;
     "Dovecot auth DB driver (mysql or pgx)") echo "DESPATCH_DOVECOT_AUTH_DB_DRIVER" ;;
     "Dovecot auth DB DSN") echo "DESPATCH_DOVECOT_AUTH_DB_DSN" ;;
@@ -842,6 +845,52 @@ verify_proxy_access() {
   curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/health/live" >/dev/null
 }
 
+verify_cap_siteverify_success_key() {
+  local response="$1"
+  [[ "$response" == *"\"success\":"* ]]
+}
+
+verify_cap_upstream_access() {
+  local upstream="$1" site_key="$2" secret="$3"
+  local payload response
+  curl -fsS --max-time 8 "http://${upstream}/assets/widget.js" >/dev/null || return 1
+  curl -fsS --max-time 8 "http://${upstream}/assets/cap_wasm.js" >/dev/null || return 1
+  curl -fsS --max-time 8 "http://${upstream}/assets/cap_wasm_bg.wasm" >/dev/null || return 1
+  payload="$(printf '{"secret":"%s","response":"installer-smoke-invalid-token"}' "$secret")"
+  response="$(curl -fsS --max-time 8 -H "Content-Type: application/json" -d "$payload" "http://${upstream}/${site_key}/siteverify" || true)"
+  verify_cap_siteverify_success_key "$response"
+}
+
+verify_cap_proxy_access() {
+  local server="$1" tls_enabled="$2" site_key="$3" secret="$4"
+  local payload response
+  payload="$(printf '{"secret":"%s","response":"installer-smoke-invalid-token"}' "$secret")"
+  if [[ "$tls_enabled" == "1" ]]; then
+    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/widget.js" >/dev/null || return 1
+    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/cap_wasm.js" >/dev/null || return 1
+    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/cap_wasm_bg.wasm" >/dev/null || return 1
+    response="$(curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" -H "Content-Type: application/json" -d "$payload" "https://${server}/cap/${site_key}/siteverify" || true)"
+    verify_cap_siteverify_success_key "$response"
+    return
+  fi
+  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/widget.js" >/dev/null || return 1
+  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/cap_wasm.js" >/dev/null || return 1
+  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/cap_wasm_bg.wasm" >/dev/null || return 1
+  response="$(curl -fsS --max-time 8 -H "Host: ${server}" -H "Content-Type: application/json" -d "$payload" "http://127.0.0.1/cap/${site_key}/siteverify" || true)"
+  verify_cap_siteverify_success_key "$response"
+}
+
+verify_cap_public_config() {
+  local base_url="$1" site_key="$2"
+  local body
+  body="$(curl -fsS --max-time 8 "${base_url}/api/v1/public/captcha/config" || true)"
+  [[ "$body" == *"\"enabled\":true"* ]] || return 1
+  [[ "$body" == *"\"provider\":\"cap\""* ]] || return 1
+  [[ "$body" == *"\"site_key\":\"${site_key}\""* ]] || return 1
+  [[ "$body" == *"\"widget_api_url\":"* ]] || return 1
+  [[ "$body" == *"/cap/${site_key}/"* ]] || return 1
+}
+
 derive_cookie_secure_mode() {
   local mode="$1" proxy_tls="$2"
   if [[ "$mode" == "proxy" && "$proxy_tls" == "1" ]]; then
@@ -1361,6 +1410,9 @@ CAPTCHA_WIDGET_API_URL=""
 CAPTCHA_VERIFY_URL=""
 CAPTCHA_SECRET=""
 CAPTCHA_CAP_PROXY_UPSTREAM=""
+CAPTCHA_CAP_ENABLE_ASSETS_SERVER="true"
+CAPTCHA_CAP_WIDGET_VERSION=""
+CAPTCHA_CAP_WASM_VERSION=""
 
 BASE_DOMAIN="$(prompt_input "Primary mail domain (used by first-run web setup)" "$BASE_DOMAIN_DEFAULT")"
 LISTEN_ADDR="$(prompt_input "HTTP listen address" "$LISTEN_ADDR_DEFAULT")"
@@ -1440,8 +1492,20 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
     CAPTCHA_SITE_KEY="$(prompt_input "CAP site key" "cap-site-key")"
     CAPTCHA_SECRET="$(prompt_input "CAP verification secret" "$(generate_secret)")"
     CAPTCHA_CAP_PROXY_UPSTREAM="$(prompt_input "CAP upstream host:port for reverse proxy /cap/ route" "127.0.0.1:8077")"
+    CAPTCHA_CAP_ENABLE_ASSETS_SERVER="$(lower "$(prompt_input "CAP ENABLE_ASSETS_SERVER value (true/false)" "true")")"
+    CAPTCHA_CAP_WIDGET_VERSION="$(trim "$(prompt_input "CAP WIDGET_VERSION (pin, avoid latest)" "")")"
+    CAPTCHA_CAP_WASM_VERSION="$(trim "$(prompt_input "CAP WASM_VERSION (pin, avoid latest)" "")")"
     CAPTCHA_WIDGET_API_URL="/cap/${CAPTCHA_SITE_KEY}/"
     CAPTCHA_VERIFY_URL="http://${CAPTCHA_CAP_PROXY_UPSTREAM}/${CAPTCHA_SITE_KEY}/siteverify"
+    if [[ "$CAPTCHA_CAP_ENABLE_ASSETS_SERVER" != "true" ]]; then
+      warn "ENABLE_ASSETS_SERVER is not set to true; CAP widget assets may fail with 500/ENOENT."
+    fi
+    if [[ -z "$CAPTCHA_CAP_WIDGET_VERSION" || "$CAPTCHA_CAP_WIDGET_VERSION" == "latest" ]]; then
+      warn "CAP WIDGET_VERSION is not pinned. Set a concrete version in CAP standalone to avoid drift."
+    fi
+    if [[ -z "$CAPTCHA_CAP_WASM_VERSION" || "$CAPTCHA_CAP_WASM_VERSION" == "latest" ]]; then
+      warn "CAP WASM_VERSION is not pinned. Set a concrete version in CAP standalone to avoid drift."
+    fi
   fi
 fi
 
@@ -1636,6 +1700,7 @@ if [[ "$DEPLOY_MODE" == "proxy" && "$PROXY_TLS" != "1" ]]; then
 fi
 if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
   log "CAPTCHA provider: cap (widget=${CAPTCHA_WIDGET_API_URL}, verify=${CAPTCHA_VERIFY_URL})"
+  log "Expected CAP standalone env: ENABLE_ASSETS_SERVER=${CAPTCHA_CAP_ENABLE_ASSETS_SERVER}, WIDGET_VERSION=${CAPTCHA_CAP_WIDGET_VERSION:-<pin-required>}, WASM_VERSION=${CAPTCHA_CAP_WASM_VERSION:-<pin-required>}"
 fi
 log "Dovecot auth mode: $DOVECOT_AUTH_MODE"
 if [[ -n "$SQL_CONF" ]]; then
@@ -1796,6 +1861,37 @@ if ! curl -fsS --max-time 8 "${LOCAL_BASE_URL}/api/v1/setup/status" >/dev/null; 
   exit 1
 fi
 
+if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
+  if [[ "$DEPLOY_MODE" != "proxy" ]]; then
+    err "CAPTCHA_PROVIDER=cap requires reverse proxy mode with /cap/ routing."
+    err "Current deploy mode is ${DEPLOY_MODE}. Reconfigure proxy or disable CAP provider."
+    exit 1
+  fi
+  if [[ -z "$CAPTCHA_CAP_PROXY_UPSTREAM" ]]; then
+    err "CAP upstream host:port is required for CAP smoke checks."
+    err "Expected non-empty CAPTCHA_CAP_PROXY_UPSTREAM."
+    exit 1
+  fi
+
+  step "CAP public captcha config verification"
+  if ! wait_for_condition "CAP public config endpoint" 20 1 verify_cap_public_config "$LOCAL_BASE_URL" "$CAPTCHA_SITE_KEY"; then
+    err "Public captcha config endpoint does not report expected CAP settings."
+    err "Run: curl -s ${LOCAL_BASE_URL}/api/v1/public/captcha/config"
+    err "Check /opt/mailclient/.env CAPTCHA_* values and restart mailclient."
+    exit 1
+  fi
+
+  step "CAP upstream assets and siteverify verification"
+  if ! wait_for_condition "CAP upstream assets + siteverify" 25 1 verify_cap_upstream_access "$CAPTCHA_CAP_PROXY_UPSTREAM" "$CAPTCHA_SITE_KEY" "$CAPTCHA_SECRET"; then
+    err "CAP upstream smoke check failed."
+    err "Ensure CAP standalone serves /assets/widget.js, /assets/cap_wasm.js, /assets/cap_wasm_bg.wasm."
+    err "Ensure CAP standalone ENABLE_ASSETS_SERVER=true and pinned WIDGET_VERSION/WASM_VERSION are valid."
+    err "Run: curl -i http://${CAPTCHA_CAP_PROXY_UPSTREAM}/assets/widget.js"
+    err "Run: curl -i http://${CAPTCHA_CAP_PROXY_UPSTREAM}/${CAPTCHA_SITE_KEY}/siteverify -H 'Content-Type: application/json' -d '{\"secret\":\"***\",\"response\":\"probe\"}'"
+    exit 1
+  fi
+fi
+
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   step "Reverse proxy health verification"
   if ! wait_for_condition "reverse proxy route health" 25 1 verify_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS"; then
@@ -1818,6 +1914,16 @@ if [[ "$DEPLOY_MODE" == "proxy" ]]; then
       err "Run: systemctl status mailclient --no-pager"
       err "Run: journalctl -u mailclient -n 100 --no-pager"
       err "Run: bash $ROOT_DIR/scripts/diagnose_access.sh"
+      exit 1
+    fi
+  fi
+  if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
+    step "CAP reverse proxy route verification"
+    if ! wait_for_condition "CAP proxied assets + siteverify" 25 1 verify_cap_proxy_access "$PROXY_SERVER_NAME" "$PROXY_TLS" "$CAPTCHA_SITE_KEY" "$CAPTCHA_SECRET"; then
+      err "CAP proxy route smoke check failed."
+      err "Verify reverse proxy keeps /cap/ mapped to ${CAPTCHA_CAP_PROXY_UPSTREAM} and does not rewrite CAP asset paths."
+      err "Run: curl -i -H 'Host: ${PROXY_SERVER_NAME}' http://127.0.0.1/cap/assets/widget.js"
+      err "Run: curl -i -H 'Host: ${PROXY_SERVER_NAME}' http://127.0.0.1/cap/${CAPTCHA_SITE_KEY}/siteverify -H 'Content-Type: application/json' -d '{\"secret\":\"***\",\"response\":\"probe\"}'"
       exit 1
     fi
   fi

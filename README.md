@@ -165,6 +165,40 @@ Recommended Ubuntu self-host setup:
    - `CAPTCHA_WIDGET_API_URL=/cap/<your-site-key>/`
    - `CAPTCHA_VERIFY_URL=http://127.0.0.1:8077/<your-site-key>/siteverify`
    - `CAPTCHA_SECRET=<your-secret>`
+4. Configure CAP standalone runtime env (required):
+   - `ENABLE_ASSETS_SERVER=true`
+   - `WIDGET_VERSION=<pinned-version>` (avoid `latest` in production)
+   - `WASM_VERSION=<pinned-version>` (avoid `latest` in production)
+   - `CACHE_HOST` optional (set only if outbound fetch is restricted)
+
+CAP runtime health checks (required):
+- Do **not** use `GET /<site_key>/` as primary health signal.
+- Use these checks instead:
+  - `GET /assets/widget.js` -> `200`
+  - `GET /assets/cap_wasm.js` -> `200`
+  - `GET /assets/cap_wasm_bg.wasm` -> `200`
+  - `POST /<site_key>/siteverify` -> JSON response containing `success`
+
+Example checks:
+```bash
+curl -i http://127.0.0.1:8077/assets/widget.js
+curl -i http://127.0.0.1:8077/assets/cap_wasm.js
+curl -i http://127.0.0.1:8077/assets/cap_wasm_bg.wasm
+curl -i -H 'Content-Type: application/json' \
+  -d '{"secret":"<site-secret>","response":"probe-invalid-token"}' \
+  http://127.0.0.1:8077/<site_key>/siteverify
+```
+
+Volume drift / key mismatch runbook (`cap-data` vs `cap_cap-data`):
+```bash
+sudo docker volume ls | grep cap
+sudo docker inspect cap --format '{{json .Mounts}}' | jq
+sudo docker run --rm -v cap-data:/a -v cap_cap-data:/b alpine sh -lc 'ls -la /a; ls -la /b'
+```
+- Keep one canonical CAP data volume (recommended: `cap-data`).
+- If keys exist in a different volume than the running container mount, migrate once and remove stale volume references.
+- Ensure `CAPTCHA_SITE_KEY` in `/opt/mailclient/.env` matches the key in CAP dashboard on the mounted volume.
+- Ensure `CAPTCHA_SECRET` is the per-site verification secret (not CAP admin key).
 
 Failure policy is fail-closed for registration:
 - Missing/invalid challenge: `captcha_required` (`400`)
