@@ -1487,6 +1487,26 @@ async function loadMessages() {
   setStatus(`Mailbox ${state.mailbox} loaded.`, "ok");
 }
 
+function renderMessageMeta(rows) {
+  el.meta.innerHTML = "";
+  for (const [label, rawValue] of rows) {
+    const row = document.createElement("div");
+    const labelNode = document.createElement("span");
+    labelNode.className = "meta-label";
+    labelNode.textContent = String(label || "-");
+
+    const valueNode = document.createElement("span");
+    valueNode.className = "meta-value";
+    const valueText = String(rawValue || "-");
+    valueNode.textContent = valueText;
+    valueNode.title = valueText;
+
+    row.appendChild(labelNode);
+    row.appendChild(valueNode);
+    el.meta.appendChild(row);
+  }
+}
+
 async function openMessage(id) {
   if (!state.user) {
     throw new Error("Sign in required");
@@ -1494,12 +1514,12 @@ async function openMessage(id) {
   const m = await api(`/api/v1/messages/${encodeURIComponent(id)}`);
   state.selectedMessage = m;
   const metaRows = [
-    ["From", escapeHtml(m.from || "-")],
-    ["To", escapeHtml((m.to || []).join(", ") || "-")],
-    ["Subject", escapeHtml(m.subject || "-")],
-    ["Date", escapeHtml(formatDate(m.date) || "-")],
+    ["From", m.from || "-"],
+    ["To", (m.to || []).join(", ") || "-"],
+    ["Subject", m.subject || "-"],
+    ["Date", formatDate(m.date) || "-"],
   ];
-  el.meta.innerHTML = metaRows.map(([label, value]) => `<div><span class="meta-label">${label}</span><span class="meta-value">${value}</span></div>`).join("");
+  renderMessageMeta(metaRows);
   el.body.textContent = m.body || "(empty)";
 
   el.attachments.innerHTML = "";

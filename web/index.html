@@ -303,8 +303,8 @@
                 </div>
               </header>
               <div class="bulk-bar">
-                <button id="btn-reg-select-all" class="cmd-btn cmd-btn--dense" type="button">Select all</button>
-                <button id="btn-reg-clear" class="cmd-btn cmd-btn--dense" type="button">Clear</button>
+                <button id="btn-reg-select-all" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Select all</button>
+                <button id="btn-reg-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear</button>
                 <button id="btn-reg-approve" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Approve selected</button>
                 <button id="btn-reg-reject" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Reject selected</button>
               </div>
@@ -351,8 +351,8 @@
                 </div>
               </header>
               <div class="bulk-bar">
-                <button id="btn-user-select-all" class="cmd-btn cmd-btn--dense" type="button">Select all</button>
-                <button id="btn-user-clear" class="cmd-btn cmd-btn--dense" type="button">Clear</button>
+                <button id="btn-user-select-all" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Select all</button>
+                <button id="btn-user-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear</button>
                 <button id="btn-user-suspend" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Suspend selected</button>
                 <button id="btn-user-unsuspend" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Unsuspend selected</button>
               </div>
@@ -414,7 +414,7 @@
         <label>To (comma separated)<input name="to" type="text" required autocomplete="email"></label>
         <label>Subject<input name="subject" type="text" required autocomplete="off"></label>
         <label>Body<textarea name="body" rows="10" required autocomplete="off"></textarea></label>
-        <label>Attachments<input name="attachments" type="file" multiple></label>
+        <label class="file-field">Attachments<input name="attachments" type="file" multiple></label>
         <div class="actions compose-actions">
           <button class="cmd-btn" id="btn-compose-cancel" type="button">Cancel</button>
           <button class="cmd-btn cmd-btn--primary" type="submit">Send</button>
