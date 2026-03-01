@@ -147,8 +147,10 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
 					r.Post("/registrations/{id}/approve", h.AdminApproveRegistration)
 					r.Post("/registrations/{id}/reject", h.AdminRejectRegistration)
+					r.Post("/registrations/bulk/decision", h.AdminBulkRegistrationDecision)
 					r.Post("/users/{id}/suspend", h.AdminSuspendUser)
 					r.Post("/users/{id}/unsuspend", h.AdminUnsuspendUser)
+					r.Post("/users/bulk/action", h.AdminBulkUserAction)
 					r.Post("/users/{id}/reset-password", h.AdminResetPassword)
 					r.Post("/users/{id}/retry-provision", h.AdminRetryProvisionUser)
 					r.With(middleware.RateLimit(h.limiter, "update_check", 20, time.Minute, h.cfg.TrustProxy)).Post("/system/update/check", h.AdminUpdateCheck)
@@ -462,7 +464,7 @@ func (h *Handlers) ListMailboxes(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	mailLogin := service.MailIdentity(u)
@@ -478,7 +480,7 @@ func (h *Handlers) ListMessages(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	mbox := r.URL.Query().Get("mailbox")
@@ -499,7 +501,7 @@ func (h *Handlers) GetMessage(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -528,7 +530,7 @@ func (h *Handlers) handleSend(w http.ResponseWriter, r *http.Request, inReply st
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	req, err := decodeSendRequest(r)
@@ -555,7 +557,7 @@ func (h *Handlers) SetMessageFlags(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -578,7 +580,7 @@ func (h *Handlers) MoveMessage(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -601,7 +603,7 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	q := r.URL.Query().Get("q")
@@ -623,7 +625,7 @@ func (h *Handlers) GetAttachment(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	pass, err := h.sessionMailPassword(r)
 	if err != nil {
-		util.WriteError(w, 401, "mail_auth_missing", err.Error(), middleware.RequestID(r.Context()))
+		h.writeMailAuthError(w, r, err)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -649,7 +651,14 @@ func (h *Handlers) AdminListRegistrations(w http.ResponseWriter, r *http.Request
 		status = "pending"
 	}
 	page, pageSize := parsePagination(r)
-	items, err := h.svc.ListRegistrations(r.Context(), status, pageSize, (page-1)*pageSize)
+	items, total, err := h.svc.ListRegistrations(r.Context(), models.RegistrationQuery{
+		Status: status,
+		Q:      strings.TrimSpace(r.URL.Query().Get("q")),
+		Sort:   strings.TrimSpace(r.URL.Query().Get("sort")),
+		Order:  strings.TrimSpace(r.URL.Query().Get("order")),
+		Limit:  pageSize,
+		Offset: (page - 1) * pageSize,
+	})
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -675,7 +684,7 @@ func (h *Handlers) AdminListRegistrations(w http.ResponseWriter, r *http.Request
 			Reason:    it.Reason,
 		})
 	}
-	util.WriteJSON(w, 200, map[string]any{"items": out, "page": page, "page_size": pageSize})
+	util.WriteJSON(w, 200, map[string]any{"items": out, "page": page, "page_size": pageSize, "total": total})
 }
 
 func (h *Handlers) AdminApproveRegistration(w http.ResponseWriter, r *http.Request) {
@@ -713,9 +722,61 @@ func (h *Handlers) AdminRejectRegistration(w http.ResponseWriter, r *http.Reques
 	util.WriteJSON(w, 200, map[string]string{"status": "rejected"})
 }
 
+func (h *Handlers) AdminBulkRegistrationDecision(w http.ResponseWriter, r *http.Request) {
+	admin, _ := middleware.User(r.Context())
+	var req struct {
+		IDs      []string `json:"ids"`
+		Decision string   `json:"decision"`
+		Reason   string   `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	decision := strings.TrimSpace(strings.ToLower(req.Decision))
+	if decision != "approve" && decision != "reject" {
+		util.WriteError(w, 400, "bad_request", "decision must be approve or reject", middleware.RequestID(r.Context()))
+		return
+	}
+	applied := make([]string, 0, len(req.IDs))
+	failed := make([]map[string]string, 0, len(req.IDs))
+	for _, rawID := range req.IDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		var err error
+		switch decision {
+		case "approve":
+			err = h.svc.ApproveRegistration(r.Context(), admin.ID, id)
+		default:
+			err = h.svc.RejectRegistration(r.Context(), admin.ID, id, req.Reason)
+		}
+		if err == nil {
+			applied = append(applied, id)
+			continue
+		}
+		code := "action_failed"
+		if errors.Is(err, store.ErrConflict) {
+			code = "already_decided"
+		}
+		failed = append(failed, map[string]string{"id": id, "code": code, "message": err.Error()})
+	}
+	util.WriteJSON(w, 200, map[string]any{"status": "ok", "applied": applied, "failed": failed})
+}
+
 func (h *Handlers) AdminListUsers(w http.ResponseWriter, r *http.Request) {
 	page, pageSize := parsePagination(r)
-	users, err := h.svc.ListUsers(r.Context(), pageSize, (page-1)*pageSize)
+	users, total, err := h.svc.ListUsers(r.Context(), models.UserQuery{
+		Q:              strings.TrimSpace(r.URL.Query().Get("q")),
+		Status:         strings.TrimSpace(r.URL.Query().Get("status")),
+		Role:           strings.TrimSpace(r.URL.Query().Get("role")),
+		ProvisionState: strings.TrimSpace(r.URL.Query().Get("provision_state")),
+		Sort:           strings.TrimSpace(r.URL.Query().Get("sort")),
+		Order:          strings.TrimSpace(r.URL.Query().Get("order")),
+		Limit:          pageSize,
+		Offset:         (page - 1) * pageSize,
+	})
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -739,7 +800,7 @@ func (h *Handlers) AdminListUsers(w http.ResponseWriter, r *http.Request) {
 			ProvisionError: u.ProvisionError,
 		})
 	}
-	util.WriteJSON(w, 200, map[string]any{"items": out, "page": page, "page_size": pageSize})
+	util.WriteJSON(w, 200, map[string]any{"items": out, "page": page, "page_size": pageSize, "total": total})
 }
 
 func (h *Handlers) AdminSuspendUser(w http.ResponseWriter, r *http.Request) {
@@ -760,6 +821,44 @@ func (h *Handlers) AdminUnsuspendUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	util.WriteJSON(w, 200, map[string]string{"status": "active"})
+}
+
+func (h *Handlers) AdminBulkUserAction(w http.ResponseWriter, r *http.Request) {
+	admin, _ := middleware.User(r.Context())
+	var req struct {
+		IDs    []string `json:"ids"`
+		Action string   `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	action := strings.TrimSpace(strings.ToLower(req.Action))
+	if action != "suspend" && action != "unsuspend" {
+		util.WriteError(w, 400, "bad_request", "action must be suspend or unsuspend", middleware.RequestID(r.Context()))
+		return
+	}
+	applied := make([]string, 0, len(req.IDs))
+	failed := make([]map[string]string, 0, len(req.IDs))
+	for _, rawID := range req.IDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		var err error
+		switch action {
+		case "suspend":
+			err = h.svc.SuspendUser(r.Context(), admin.ID, id)
+		default:
+			err = h.svc.UnsuspendUser(r.Context(), admin.ID, id)
+		}
+		if err == nil {
+			applied = append(applied, id)
+			continue
+		}
+		failed = append(failed, map[string]string{"id": id, "code": "action_failed", "message": err.Error()})
+	}
+	util.WriteJSON(w, 200, map[string]any{"status": "ok", "applied": applied, "failed": failed})
 }
 
 func (h *Handlers) AdminResetPassword(w http.ResponseWriter, r *http.Request) {
@@ -799,12 +898,33 @@ func (h *Handlers) AdminRetryProvisionUser(w http.ResponseWriter, r *http.Reques
 
 func (h *Handlers) AdminAuditLog(w http.ResponseWriter, r *http.Request) {
 	page, pageSize := parsePagination(r)
-	items, err := h.svc.ListAudit(r.Context(), pageSize, (page-1)*pageSize)
+	from, err := parseDateParam(r.URL.Query().Get("from"), false)
+	if err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid from date", middleware.RequestID(r.Context()))
+		return
+	}
+	to, err := parseDateParam(r.URL.Query().Get("to"), true)
+	if err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid to date", middleware.RequestID(r.Context()))
+		return
+	}
+	items, total, err := h.svc.ListAudit(r.Context(), models.AuditQuery{
+		Q:      strings.TrimSpace(r.URL.Query().Get("q")),
+		Action: strings.TrimSpace(r.URL.Query().Get("action")),
+		Actor:  strings.TrimSpace(r.URL.Query().Get("actor")),
+		Target: strings.TrimSpace(r.URL.Query().Get("target")),
+		From:   from,
+		To:     to,
+		Sort:   strings.TrimSpace(r.URL.Query().Get("sort")),
+		Order:  strings.TrimSpace(r.URL.Query().Get("order")),
+		Limit:  pageSize,
+		Offset: (page - 1) * pageSize,
+	})
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	util.WriteJSON(w, 200, map[string]any{"items": items, "page": page, "page_size": pageSize})
+	util.WriteJSON(w, 200, map[string]any{"items": items, "page": page, "page_size": pageSize, "total": total})
 }
 
 func (h *Handlers) AdminMailHealth(w http.ResponseWriter, r *http.Request) {
@@ -904,6 +1024,24 @@ func parsePagination(r *http.Request) (int, int) {
 		}
 	}
 	return page, pageSize
+}
+
+func parseDateParam(raw string, endOfDay bool) (time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.UTC(), nil
+	}
+	t, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if endOfDay {
+		t = t.Add(24*time.Hour - time.Nanosecond)
+	}
+	return t.UTC(), nil
 }
 
 func randomToken() string {
@@ -1031,6 +1169,15 @@ func (h *Handlers) sessionMailPassword(r *http.Request) (string, error) {
 		return "", service.ErrInvalidCredentials
 	}
 	return h.svc.SessionMailPassword(sess)
+}
+
+func (h *Handlers) writeMailAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, service.ErrInvalidCredentials) {
+		h.clearAuthCookies(w, r)
+		util.WriteError(w, 401, "session_invalid", "session is invalid or expired; sign in again", middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteError(w, 401, "mail_auth_missing", "mail authentication unavailable; sign in again", middleware.RequestID(r.Context()))
 }
 
 func (h *Handlers) ensureSetupComplete(w http.ResponseWriter, r *http.Request) bool {

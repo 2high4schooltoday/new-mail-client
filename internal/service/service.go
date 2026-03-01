@@ -215,7 +215,13 @@ func (s *Service) SessionMailPassword(sess models.Session) (string, error) {
 	if strings.TrimSpace(sess.MailSecret) == "" {
 		return "", fmt.Errorf("missing mail credentials")
 	}
-	return util.DecryptString(s.encryptKey, sess.MailSecret)
+	pass, err := util.DecryptString(s.encryptKey, sess.MailSecret)
+	if err != nil {
+		// Session exists but encrypted mail secret is no longer decryptable
+		// (typically key rotation/mismatch). Treat as invalid session.
+		return "", ErrInvalidCredentials
+	}
+	return pass, nil
 }
 
 func MailIdentity(u models.User) string {
@@ -237,8 +243,8 @@ func (s *Service) Logout(ctx context.Context, rawToken string) error {
 	return s.st.RevokeSession(ctx, sess.ID)
 }
 
-func (s *Service) ListRegistrations(ctx context.Context, status string, limit, offset int) ([]models.Registration, error) {
-	return s.st.ListRegistrations(ctx, status, limit, offset)
+func (s *Service) ListRegistrations(ctx context.Context, query models.RegistrationQuery) ([]models.Registration, int, error) {
+	return s.st.ListRegistrations(ctx, query)
 }
 
 func (s *Service) ApproveRegistration(ctx context.Context, adminID, regID string) error {
@@ -312,12 +318,93 @@ func (s *Service) UnsuspendUser(ctx context.Context, adminID, userID string) err
 	return s.st.InsertAudit(ctx, adminID, "user.unsuspend", userID, `{}`)
 }
 
-func (s *Service) ListUsers(ctx context.Context, limit, offset int) ([]models.User, error) {
-	return s.st.ListUsers(ctx, limit, offset)
+func (s *Service) ListUsers(ctx context.Context, query models.UserQuery) ([]models.User, int, error) {
+	return s.st.ListUsers(ctx, query)
 }
 
-func (s *Service) ListAudit(ctx context.Context, limit, offset int) ([]models.AuditEntry, error) {
-	return s.st.ListAudit(ctx, limit, offset)
+func (s *Service) ListAudit(ctx context.Context, query models.AuditQuery) ([]models.AuditEntry, int, error) {
+	items, total, err := s.st.ListAudit(ctx, query)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		code, text, severity, targetLabel := buildAuditSummary(items[i])
+		items[i].SummaryCode = code
+		items[i].SummaryText = text
+		items[i].SummaryVersion = 1
+		items[i].Severity = severity
+		items[i].TargetLabel = targetLabel
+	}
+	return items, total, nil
+}
+
+func buildAuditSummary(entry models.AuditEntry) (string, string, string, string) {
+	meta := parseAuditMetadata(entry.MetadataJSON)
+	targetLabel := strings.TrimSpace(entry.Target)
+	if targetLabel == "" {
+		if v := strings.TrimSpace(meta["email"]); v != "" {
+			targetLabel = v
+		} else if v := strings.TrimSpace(meta["user_id"]); v != "" {
+			targetLabel = v
+		} else if v := strings.TrimSpace(meta["registration_id"]); v != "" {
+			targetLabel = v
+		} else {
+			targetLabel = "(n/a)"
+		}
+	}
+
+	switch strings.TrimSpace(entry.Action) {
+	case "registration.approve":
+		return "registration.approved", fmt.Sprintf("Registration approved for %s.", targetLabel), "ok", targetLabel
+	case "registration.reject":
+		reason := strings.TrimSpace(meta["reason"])
+		if reason != "" {
+			return "registration.rejected", fmt.Sprintf("Registration rejected for %s (%s).", targetLabel, reason), "warning", targetLabel
+		}
+		return "registration.rejected", fmt.Sprintf("Registration rejected for %s.", targetLabel), "warning", targetLabel
+	case "user.suspend":
+		return "user.suspended", fmt.Sprintf("User suspended: %s.", targetLabel), "warning", targetLabel
+	case "user.unsuspend":
+		return "user.unsuspended", fmt.Sprintf("User unsuspended: %s.", targetLabel), "ok", targetLabel
+	case "user.reset_password":
+		return "user.password_reset", fmt.Sprintf("Password reset by admin for %s.", targetLabel), "info", targetLabel
+	case "user.retry_provision":
+		return "user.provision_retried", fmt.Sprintf("Provision retry requested for %s.", targetLabel), "info", targetLabel
+	default:
+		if action := strings.TrimSpace(entry.Action); action != "" {
+			return "audit.event", fmt.Sprintf("Audit event %s on %s.", action, targetLabel), "info", targetLabel
+		}
+		return "audit.event", fmt.Sprintf("Audit event on %s.", targetLabel), "info", targetLabel
+	}
+}
+
+func parseAuditMetadata(raw string) map[string]string {
+	out := map[string]string{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return out
+	}
+	for key, value := range decoded {
+		switch typed := value.(type) {
+		case string:
+			out[key] = typed
+		case float64:
+			out[key] = fmt.Sprintf("%.0f", typed)
+		case bool:
+			if typed {
+				out[key] = "true"
+			} else {
+				out[key] = "false"
+			}
+		default:
+			out[key] = fmt.Sprintf("%v", typed)
+		}
+	}
+	return out
 }
 
 func (s *Service) RetryProvisionUser(ctx context.Context, adminID, userID string) error {

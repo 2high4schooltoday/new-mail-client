@@ -79,6 +79,9 @@ func newPAMTestService(t *testing.T, acceptedPass string, acceptedUsers ...strin
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 
 	st := store.New(sqdb)
 	cfg := config.Config{
@@ -137,6 +140,9 @@ func TestPAMModeLoginDetectsConnectivityErrors(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
@@ -199,6 +205,9 @@ func TestPAMSetupDetectsConnectivityErrors(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 

@@ -63,10 +63,49 @@ type PasswordResetToken struct {
 }
 
 type AuditEntry struct {
-	ID           string    `json:"id"`
-	ActorUserID  string    `json:"actor_user_id"`
-	Action       string    `json:"action"`
-	Target       string    `json:"target"`
-	MetadataJSON string    `json:"metadata_json"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	ActorUserID    string    `json:"actor_user_id"`
+	ActorEmail     string    `json:"actor_email,omitempty"`
+	Action         string    `json:"action"`
+	Target         string    `json:"target"`
+	TargetLabel    string    `json:"target_label,omitempty"`
+	MetadataJSON   string    `json:"metadata_json"`
+	SummaryCode    string    `json:"summary_code,omitempty"`
+	SummaryText    string    `json:"summary_text,omitempty"`
+	SummaryVersion int       `json:"summary_version,omitempty"`
+	Severity       string    `json:"severity,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type RegistrationQuery struct {
+	Status string
+	Q      string
+	Sort   string
+	Order  string
+	Limit  int
+	Offset int
+}
+
+type UserQuery struct {
+	Q              string
+	Status         string
+	Role           string
+	ProvisionState string
+	Sort           string
+	Order          string
+	Limit          int
+	Offset         int
+}
+
+type AuditQuery struct {
+	Q      string
+	Action string
+	Actor  string
+	Target string
+	From   time.Time
+	To     time.Time
+	Sort   string
+	Order  string
+	Limit  int
+	Offset int
 }

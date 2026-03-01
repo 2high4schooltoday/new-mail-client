@@ -14,32 +14,26 @@
 <body>
   <div class="app-shell page-office" id="app-shell">
     <header class="topbar">
-      <div class="brand">
-        <h1>Despatch</h1>
-        <div class="pal-and-theme">
-          <div class="palette" aria-hidden="true">
-            <span class="c-red"></span><span class="c-green"></span><span class="c-navy"></span><span class="c-cyan"></span>
-            <span class="c-yellow"></span><span class="c-magenta"></span><span class="c-black"></span>
-            <span class="c-g1"></span><span class="c-g2"></span><span class="c-g3"></span><span class="c-g4"></span>
-            <span class="c-g5"></span><span class="c-g6"></span><span class="c-g7"></span><span class="c-olive"></span>
-            <span class="c-teal"></span><span class="c-blue"></span><span class="c-purple"></span><span class="c-violet"></span>
-            <span class="c-crimson"></span><span class="c-rust"></span><span class="c-gold"></span>
-          </div>
-          <button id="btn-theme" class="cmd-btn theme-toggle" type="button" aria-label="Toggle theme">Theme: Paper</button>
+      <div class="topbar-row">
+        <div class="brand">
+          <h1>Despatch</h1>
+          <p class="hint">Mail operations console</p>
+        </div>
+        <div class="topbar-tools">
+          <button id="btn-theme" class="cmd-btn cmd-btn--dense theme-toggle" type="button" aria-label="Toggle theme">Theme: Paper</button>
+          <button id="btn-logout" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Sign Out</button>
         </div>
       </div>
-      <nav class="tabs">
+      <nav class="tabs" aria-label="Primary">
         <button id="tab-setup" class="tab" type="button">Setup</button>
         <button id="tab-auth" class="tab active" type="button">Auth</button>
         <button id="tab-mail" class="tab" type="button">Mail</button>
         <button id="tab-admin" class="tab" type="button">Admin</button>
-        <button id="btn-logout" class="tab" type="button">Logout</button>
       </nav>
     </header>
 
     <main>
-      <section id="status-line" class="status-line" aria-live="polite">READY</section>
-      <div class="rule-dot" aria-hidden="true"></div>
+      <section id="status-line" class="status-line" aria-live="polite">Ready</section>
 
       <section id="view-auth" class="auth-shell">
         <article class="panel auth-panel" aria-labelledby="auth-title">
@@ -210,84 +204,192 @@
       <section id="view-mail" class="mail-workspace hidden">
         <article class="panel workspace-header">
           <div>
-            <h2>Mailbox Workspace</h2>
-            <p class="hint">Read, search, and manage messages in one continuous flow.</p>
+            <h2>Mailbox</h2>
+            <p class="hint">Keyboard: Tab pane, j/k row, Enter open, / search, c compose, f flag, s seen, Delete trash.</p>
           </div>
-          <button id="btn-compose-open" class="cmd-btn cmd-btn--primary" type="button">New Message</button>
-        </article>
-
-        <article class="panel">
-          <h3>Mailboxes</h3>
-          <ul id="mailboxes" class="list"></ul>
-        </article>
-
-        <article class="panel">
-          <h3>Messages</h3>
-          <div class="searchbar">
-            <input id="search-input" type="text" placeholder="Search subject, body, sender">
-            <button id="btn-search" class="cmd-btn" type="button">Search</button>
-          </div>
-          <table class="table data-table">
-            <thead>
-              <tr><th class="kcol">From</th><th class="vcol">Subject</th><th class="num">Date</th></tr>
-            </thead>
-            <tbody id="messages"></tbody>
-          </table>
-        </article>
-
-        <article class="panel">
-          <h3>Viewer</h3>
-          <div id="message-meta" class="meta"></div>
-          <pre id="message-body" class="message-body">Select a message.</pre>
-          <div id="attachment-list" class="attachments"></div>
           <div class="actions">
-            <button id="btn-flag" class="cmd-btn" type="button">Flag</button>
-            <button id="btn-mark-seen" class="cmd-btn" type="button">Mark Seen</button>
-            <button id="btn-trash" class="cmd-btn" type="button">Move To Trash</button>
+            <button id="mail-mobile-back" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
+            <button id="btn-compose-open" class="cmd-btn cmd-btn--primary" type="button">Compose</button>
           </div>
         </article>
+
+        <div class="mail-layout">
+          <aside id="mail-pane-mailboxes" class="panel mail-pane mail-pane--mailboxes" tabindex="-1">
+            <div class="pane-head">
+              <h3>Mailboxes</h3>
+            </div>
+            <ul id="mailboxes" class="list mailbox-list"></ul>
+          </aside>
+
+          <section id="mail-pane-messages" class="panel mail-pane mail-pane--messages" tabindex="-1">
+            <div class="pane-head">
+              <h3>Messages</h3>
+              <button id="mail-back-to-mailboxes" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
+            </div>
+            <div class="searchbar">
+              <input id="search-input" type="text" placeholder="Search subject, body, sender">
+              <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
+            </div>
+            <ul id="messages" class="message-list" role="listbox" aria-label="Messages"></ul>
+          </section>
+
+          <section id="mail-pane-reader" class="panel mail-pane mail-pane--reader" tabindex="-1">
+            <div class="pane-head">
+              <h3>Reader</h3>
+              <button id="mail-back-to-messages" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
+            </div>
+            <div id="message-meta" class="meta"></div>
+            <pre id="message-body" class="message-body">Select a message.</pre>
+            <div id="attachment-list" class="attachments"></div>
+            <div class="actions">
+              <button id="btn-flag" class="cmd-btn cmd-btn--dense" type="button">Flag</button>
+              <button id="btn-mark-seen" class="cmd-btn cmd-btn--dense" type="button">Mark Seen</button>
+              <button id="btn-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Move To Trash</button>
+            </div>
+          </section>
+        </div>
       </section>
 
-      <section id="view-admin" class="panel hidden">
-        <h2>Admin Console</h2>
-        <div class="admin-grid">
-          <section>
-            <h3>Software Update</h3>
-            <div class="machine-grid">
-              <div class="metric-label">Current Version</div><div id="update-current-version" class="metric-value">-</div>
-              <div class="metric-label">Current Commit</div><div id="update-current-commit" class="metric-value">-</div>
-              <div class="metric-label">Latest Release</div><div id="update-latest-version" class="metric-value">-</div>
-              <div class="metric-label">Available</div><div id="update-available" class="metric-value">-</div>
-              <div class="metric-label">Last Checked</div><div id="update-last-checked" class="metric-value">-</div>
-              <div class="metric-label">Apply State</div><div id="update-apply-state" class="metric-value">idle</div>
-            </div>
-            <p id="update-note" class="hint">Updates check GitHub Releases and require updater units on Ubuntu.</p>
-            <div class="actions">
-              <button id="btn-update-check" class="cmd-btn" type="button">Check Now</button>
-              <button id="btn-update-apply" class="cmd-btn cmd-btn--primary" type="button">Update Now</button>
-            </div>
-          </section>
-          <section>
-            <h3>Pending Registrations</h3>
-            <table class="table data-table">
-              <thead><tr><th>Email</th><th class="num">Created</th><th>Status</th><th>Action</th></tr></thead>
-              <tbody id="admin-registrations"></tbody>
-            </table>
-          </section>
-          <section>
-            <h3>Users</h3>
-            <table class="table data-table">
-              <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Action</th></tr></thead>
-              <tbody id="admin-users"></tbody>
-            </table>
-          </section>
-          <section>
-            <h3>Audit Log</h3>
-            <table class="table data-table">
-              <thead><tr><th class="num">When</th><th>Action</th><th>Target</th></tr></thead>
-              <tbody id="admin-audit"></tbody>
-            </table>
-          </section>
+      <section id="view-admin" class="admin-shell hidden">
+        <div class="admin-layout">
+          <aside class="panel admin-nav">
+            <h2>Admin</h2>
+            <button id="admin-nav-update" class="admin-nav-btn is-active" type="button">System</button>
+            <button id="admin-nav-registrations" class="admin-nav-btn" type="button">Registrations</button>
+            <button id="admin-nav-users" class="admin-nav-btn" type="button">Users</button>
+            <button id="admin-nav-audit" class="admin-nav-btn" type="button">Audit Log</button>
+          </aside>
+
+          <div class="admin-main">
+            <section id="admin-section-update" class="panel admin-section">
+              <h3>Software Update</h3>
+              <div class="machine-grid">
+                <div class="metric-label">Current Version</div><div id="update-current-version" class="metric-value">-</div>
+                <div class="metric-label">Current Commit</div><div id="update-current-commit" class="metric-value">-</div>
+                <div class="metric-label">Latest Release</div><div id="update-latest-version" class="metric-value">-</div>
+                <div class="metric-label">Available</div><div id="update-available" class="metric-value">-</div>
+                <div class="metric-label">Last Checked</div><div id="update-last-checked" class="metric-value">-</div>
+                <div class="metric-label">Apply State</div><div id="update-apply-state" class="metric-value">idle</div>
+              </div>
+              <p id="update-note" class="hint">Updates check GitHub Releases and require updater units on Ubuntu.</p>
+              <div class="actions">
+                <button id="btn-update-check" class="cmd-btn cmd-btn--dense" type="button">Check Now</button>
+                <button id="btn-update-apply" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Update</button>
+              </div>
+            </section>
+
+            <section id="admin-section-registrations" class="panel admin-section hidden">
+              <header class="section-head">
+                <h3>Registrations</h3>
+                <div class="section-tools">
+                  <input id="admin-reg-q" type="text" placeholder="Search email or reason">
+                  <select id="admin-reg-status">
+                    <option value="pending">Pending</option>
+                    <option value="approved">Approved</option>
+                    <option value="rejected">Rejected</option>
+                    <option value="all">All</option>
+                  </select>
+                  <select id="admin-reg-sort">
+                    <option value="created_at">Created</option>
+                    <option value="email">Email</option>
+                    <option value="status">Status</option>
+                    <option value="decided_at">Decided</option>
+                  </select>
+                  <select id="admin-reg-order">
+                    <option value="desc">Desc</option>
+                    <option value="asc">Asc</option>
+                  </select>
+                  <button id="btn-admin-reg-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
+                </div>
+              </header>
+              <div class="bulk-bar">
+                <button id="btn-reg-select-all" class="cmd-btn cmd-btn--dense" type="button">Select all</button>
+                <button id="btn-reg-clear" class="cmd-btn cmd-btn--dense" type="button">Clear</button>
+                <button id="btn-reg-approve" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Approve selected</button>
+                <button id="btn-reg-reject" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Reject selected</button>
+              </div>
+              <table class="table data-table">
+                <thead><tr><th class="num"><input id="admin-reg-check-all" type="checkbox" aria-label="Select all registrations"></th><th>Email</th><th>Status</th><th class="num">Created</th><th>Action</th></tr></thead>
+                <tbody id="admin-registrations"></tbody>
+              </table>
+            </section>
+
+            <section id="admin-section-users" class="panel admin-section hidden">
+              <header class="section-head">
+                <h3>Users</h3>
+                <div class="section-tools">
+                  <input id="admin-user-q" type="text" placeholder="Search users">
+                  <select id="admin-user-status">
+                    <option value="all">All status</option>
+                    <option value="active">Active</option>
+                    <option value="pending">Pending</option>
+                    <option value="suspended">Suspended</option>
+                  </select>
+                  <select id="admin-user-role">
+                    <option value="all">All roles</option>
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <select id="admin-user-provision">
+                    <option value="all">All provision</option>
+                    <option value="ok">Provisioned</option>
+                    <option value="pending">Pending</option>
+                    <option value="error">Error</option>
+                  </select>
+                  <select id="admin-user-sort">
+                    <option value="created_at">Created</option>
+                    <option value="email">Email</option>
+                    <option value="role">Role</option>
+                    <option value="status">Status</option>
+                    <option value="last_login_at">Last Login</option>
+                  </select>
+                  <select id="admin-user-order">
+                    <option value="desc">Desc</option>
+                    <option value="asc">Asc</option>
+                  </select>
+                  <button id="btn-admin-user-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
+                </div>
+              </header>
+              <div class="bulk-bar">
+                <button id="btn-user-select-all" class="cmd-btn cmd-btn--dense" type="button">Select all</button>
+                <button id="btn-user-clear" class="cmd-btn cmd-btn--dense" type="button">Clear</button>
+                <button id="btn-user-suspend" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Suspend selected</button>
+                <button id="btn-user-unsuspend" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Unsuspend selected</button>
+              </div>
+              <table class="table data-table">
+                <thead><tr><th class="num"><input id="admin-user-check-all" type="checkbox" aria-label="Select all users"></th><th>Email</th><th>Role</th><th>Status</th><th>Provision</th><th>Action</th></tr></thead>
+                <tbody id="admin-users"></tbody>
+              </table>
+            </section>
+
+            <section id="admin-section-audit" class="panel admin-section hidden">
+              <header class="section-head">
+                <h3>Audit Log</h3>
+                <div class="section-tools">
+                  <input id="admin-audit-q" type="text" placeholder="Search action, target, metadata">
+                  <input id="admin-audit-actor" type="text" placeholder="Actor email">
+                  <input id="admin-audit-target" type="text" placeholder="Target">
+                  <input id="admin-audit-from" type="date">
+                  <input id="admin-audit-to" type="date">
+                  <select id="admin-audit-sort">
+                    <option value="created_at">Created</option>
+                    <option value="action">Action</option>
+                    <option value="actor">Actor</option>
+                    <option value="target">Target</option>
+                  </select>
+                  <select id="admin-audit-order">
+                    <option value="desc">Desc</option>
+                    <option value="asc">Asc</option>
+                  </select>
+                  <button id="btn-admin-audit-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
+                </div>
+              </header>
+              <table class="table data-table">
+                <thead><tr><th class="num">When</th><th>Severity</th><th>Summary</th><th>Actor</th><th>Target</th></tr></thead>
+                <tbody id="admin-audit"></tbody>
+              </table>
+            </section>
+          </div>
         </div>
       </section>
     </main>

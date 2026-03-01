@@ -44,6 +44,36 @@ const state = {
     activeAuthPane: "login",
     composeOpen: false,
     composeLastTrigger: null,
+    activeMailPane: "mailboxes",
+    activeKeyboardPane: "mailboxes",
+    activeAdminSection: "update",
+  },
+  admin: {
+    registrations: {
+      q: "",
+      status: "pending",
+      sort: "created_at",
+      order: "desc",
+      selected: new Set(),
+    },
+    users: {
+      q: "",
+      status: "all",
+      role: "all",
+      provision: "all",
+      sort: "created_at",
+      order: "desc",
+      selected: new Set(),
+    },
+    audit: {
+      q: "",
+      actor: "",
+      target: "",
+      from: "",
+      to: "",
+      sort: "created_at",
+      order: "desc",
+    },
   },
 };
 
@@ -60,6 +90,12 @@ const el = {
   viewAuth: document.getElementById("view-auth"),
   viewMail: document.getElementById("view-mail"),
   viewAdmin: document.getElementById("view-admin"),
+  mailPaneMailboxes: document.getElementById("mail-pane-mailboxes"),
+  mailPaneMessages: document.getElementById("mail-pane-messages"),
+  mailPaneReader: document.getElementById("mail-pane-reader"),
+  mailMobileBack: document.getElementById("mail-mobile-back"),
+  mailBackToMailboxes: document.getElementById("mail-back-to-mailboxes"),
+  mailBackToMessages: document.getElementById("mail-back-to-messages"),
   authModeLogin: document.getElementById("auth-mode-login"),
   authModeRegister: document.getElementById("auth-mode-register"),
   authModeReset: document.getElementById("auth-mode-reset"),
@@ -94,6 +130,44 @@ const el = {
   adminRegs: document.getElementById("admin-registrations"),
   adminUsers: document.getElementById("admin-users"),
   adminAudit: document.getElementById("admin-audit"),
+  adminNavUpdate: document.getElementById("admin-nav-update"),
+  adminNavRegistrations: document.getElementById("admin-nav-registrations"),
+  adminNavUsers: document.getElementById("admin-nav-users"),
+  adminNavAudit: document.getElementById("admin-nav-audit"),
+  adminSectionUpdate: document.getElementById("admin-section-update"),
+  adminSectionRegistrations: document.getElementById("admin-section-registrations"),
+  adminSectionUsers: document.getElementById("admin-section-users"),
+  adminSectionAudit: document.getElementById("admin-section-audit"),
+  adminRegQ: document.getElementById("admin-reg-q"),
+  adminRegStatus: document.getElementById("admin-reg-status"),
+  adminRegSort: document.getElementById("admin-reg-sort"),
+  adminRegOrder: document.getElementById("admin-reg-order"),
+  btnAdminRegApply: document.getElementById("btn-admin-reg-apply"),
+  btnRegSelectAll: document.getElementById("btn-reg-select-all"),
+  btnRegClear: document.getElementById("btn-reg-clear"),
+  btnRegApprove: document.getElementById("btn-reg-approve"),
+  btnRegReject: document.getElementById("btn-reg-reject"),
+  adminRegCheckAll: document.getElementById("admin-reg-check-all"),
+  adminUserQ: document.getElementById("admin-user-q"),
+  adminUserStatus: document.getElementById("admin-user-status"),
+  adminUserRole: document.getElementById("admin-user-role"),
+  adminUserProvision: document.getElementById("admin-user-provision"),
+  adminUserSort: document.getElementById("admin-user-sort"),
+  adminUserOrder: document.getElementById("admin-user-order"),
+  btnAdminUserApply: document.getElementById("btn-admin-user-apply"),
+  btnUserSelectAll: document.getElementById("btn-user-select-all"),
+  btnUserClear: document.getElementById("btn-user-clear"),
+  btnUserSuspend: document.getElementById("btn-user-suspend"),
+  btnUserUnsuspend: document.getElementById("btn-user-unsuspend"),
+  adminUserCheckAll: document.getElementById("admin-user-check-all"),
+  adminAuditQ: document.getElementById("admin-audit-q"),
+  adminAuditActor: document.getElementById("admin-audit-actor"),
+  adminAuditTarget: document.getElementById("admin-audit-target"),
+  adminAuditFrom: document.getElementById("admin-audit-from"),
+  adminAuditTo: document.getElementById("admin-audit-to"),
+  adminAuditSort: document.getElementById("admin-audit-sort"),
+  adminAuditOrder: document.getElementById("admin-audit-order"),
+  btnAdminAuditApply: document.getElementById("btn-admin-audit-apply"),
   updateCurrentVersion: document.getElementById("update-current-version"),
   updateCurrentCommit: document.getElementById("update-current-commit"),
   updateLatestVersion: document.getElementById("update-latest-version"),
@@ -795,6 +869,80 @@ function showView(name) {
   el.appShell.classList.add("page-office");
 }
 
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 980px)").matches;
+}
+
+function paneElement(name) {
+  if (name === "mailboxes") return el.mailPaneMailboxes;
+  if (name === "messages") return el.mailPaneMessages;
+  return el.mailPaneReader;
+}
+
+function focusMailPane(name) {
+  const next = ["mailboxes", "messages", "reader"].includes(String(name || "")) ? String(name) : "mailboxes";
+  state.ui.activeKeyboardPane = next;
+  [el.mailPaneMailboxes, el.mailPaneMessages, el.mailPaneReader]
+    .filter(Boolean)
+    .forEach((node) => node.classList.remove("is-keyboard-pane"));
+  const target = paneElement(next);
+  if (target) {
+    target.classList.add("is-keyboard-pane");
+    target.focus({ preventScroll: true });
+  }
+}
+
+function setActiveMailPane(name, opts = {}) {
+  if (!el.viewMail) return;
+  const next = ["mailboxes", "messages", "reader"].includes(String(name || "")) ? String(name) : "mailboxes";
+  state.ui.activeMailPane = next;
+  el.viewMail.dataset.mobilePane = next;
+  if (el.mailMobileBack) {
+    el.mailMobileBack.classList.toggle("hidden", !isMobileLayout() || next === "mailboxes");
+  }
+  if (el.mailBackToMailboxes) {
+    el.mailBackToMailboxes.classList.toggle("hidden", !isMobileLayout() || next !== "messages");
+  }
+  if (el.mailBackToMessages) {
+    el.mailBackToMessages.classList.toggle("hidden", !isMobileLayout() || next !== "reader");
+  }
+  if (opts.focus !== false) {
+    focusMailPane(next);
+  }
+}
+
+function cycleMailPane(delta = 1) {
+  const panes = ["mailboxes", "messages", "reader"];
+  const current = panes.indexOf(state.ui.activeKeyboardPane || "mailboxes");
+  const nextIndex = (current + delta + panes.length) % panes.length;
+  focusMailPane(panes[nextIndex]);
+}
+
+function setActiveAdminSection(name) {
+  const next = ["update", "registrations", "users", "audit"].includes(String(name || "")) ? String(name) : "update";
+  state.ui.activeAdminSection = next;
+  const sections = {
+    update: el.adminSectionUpdate,
+    registrations: el.adminSectionRegistrations,
+    users: el.adminSectionUsers,
+    audit: el.adminSectionAudit,
+  };
+  const nav = {
+    update: el.adminNavUpdate,
+    registrations: el.adminNavRegistrations,
+    users: el.adminNavUsers,
+    audit: el.adminNavAudit,
+  };
+  Object.entries(sections).forEach(([key, node]) => {
+    if (!node) return;
+    node.classList.toggle("hidden", key !== next);
+  });
+  Object.entries(nav).forEach(([key, node]) => {
+    if (!node) return;
+    node.classList.toggle("is-active", key === next);
+  });
+}
+
 function applyNavVisibility() {
   if (state.setup.required) {
     el.tabSetup.style.display = "inline-block";
@@ -1106,6 +1254,7 @@ const OOBEController = {
     }
     setActiveTab(el.tabMail);
     showView("mail");
+    setActiveMailPane("messages");
     if (!state.user) {
       routeToAuthWithMessage("Sign in required before opening mailbox.", "session_missing");
       return;
@@ -1125,6 +1274,7 @@ const OOBEController = {
     }
     setActiveTab(el.tabAdmin);
     showView("admin");
+    setActiveAdminSection(state.ui.activeAdminSection || "update");
     await loadAdmin();
   },
 
@@ -1185,7 +1335,7 @@ async function refreshSession(opts = {}) {
       logErrors: !opts.skipUnauthorizedHandling,
     });
     state.user = me;
-    setStatus(`SIGNED IN AS ${me.email.toUpperCase()}`, "ok");
+    setStatus(`Signed in as ${me.email}.`, "ok");
     applyNavVisibility();
     return { ok: true, user: me };
   } catch (err) {
@@ -1205,13 +1355,19 @@ async function loadMailboxes() {
   for (const mb of data) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
-    btn.textContent = `${mb.name} (${mb.unread || 0}/${mb.messages || 0})`;
+    btn.innerHTML = `<span class="mailbox-name">${escapeHtml(mb.name)}</span><span class="mailbox-count">${Number(mb.unread || 0)}/${Number(mb.messages || 0)}</span>`;
     btn.className = mb.name === state.mailbox ? "active" : "";
+    btn.dataset.mailboxName = mb.name;
+    btn.type = "button";
     btn.onclick = async () => {
       state.mailbox = mb.name;
       state.selectedMessage = null;
+      el.body.textContent = "Select a message.";
+      el.meta.textContent = "";
+      el.attachments.textContent = "";
       await loadMessages();
       await loadMailboxes();
+      setActiveMailPane("messages");
     };
     li.appendChild(btn);
     el.mailboxes.appendChild(li);
@@ -1221,12 +1377,31 @@ async function loadMailboxes() {
 function renderMessages(items) {
   el.messages.innerHTML = "";
   state.messages = items;
+  if (!Array.isArray(items) || items.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "message-empty";
+    empty.textContent = "No messages to display.";
+    el.messages.appendChild(empty);
+    return;
+  }
   for (const m of items) {
-    const tr = document.createElement("tr");
-    if (state.selectedMessage && state.selectedMessage.id === m.id) tr.classList.add("active");
-    tr.innerHTML = `<td>${escapeHtml(m.from || "")}</td><td>${escapeHtml(m.subject || "")}</td><td>${formatDate(m.date)}</td>`;
-    tr.onclick = () => openMessage(m.id);
-    el.messages.appendChild(tr);
+    const li = document.createElement("li");
+    const isActive = state.selectedMessage && state.selectedMessage.id === m.id;
+    li.className = "message-row";
+    if (isActive) li.classList.add("active");
+    if (!m.seen) li.classList.add("is-unread");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "message-row-btn";
+    btn.dataset.messageId = m.id;
+    btn.setAttribute("role", "option");
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    btn.innerHTML = `<span class="message-from">${escapeHtml(m.from || "(unknown sender)")}</span>
+      <span class="message-subject">${escapeHtml(m.subject || "(no subject)")}</span>
+      <span class="message-date">${escapeHtml(formatDate(m.date))}</span>`;
+    btn.onclick = () => openMessage(m.id);
+    li.appendChild(btn);
+    el.messages.appendChild(li);
   }
 }
 
@@ -1236,7 +1411,7 @@ async function loadMessages() {
   }
   const data = await api(`/api/v1/messages?mailbox=${encodeURIComponent(state.mailbox)}&page=1&page_size=40`);
   renderMessages(data.items || []);
-  setStatus(`MAILBOX ${state.mailbox} LOADED`, "ok");
+  setStatus(`Mailbox ${state.mailbox} loaded.`, "ok");
 }
 
 async function openMessage(id) {
@@ -1260,6 +1435,7 @@ async function openMessage(id) {
     el.attachments.appendChild(link);
   }
   renderMessages(state.messages);
+  setActiveMailPane("reader");
 }
 
 async function searchMessages() {
@@ -1269,7 +1445,8 @@ async function searchMessages() {
   const q = el.searchInput.value.trim();
   const data = await api(`/api/v1/search?mailbox=${encodeURIComponent(state.mailbox)}&q=${encodeURIComponent(q)}&page=1&page_size=40`);
   renderMessages(data.items || []);
-  setStatus(`SEARCH COMPLETE (${(data.items || []).length} RESULTS)`, "ok");
+  setStatus(`Search complete (${(data.items || []).length} results).`, "ok");
+  setActiveMailPane("messages");
 }
 
 async function sendCompose(form) {
@@ -1433,28 +1610,90 @@ async function loadAdmin() {
   if (!state.user) {
     throw new Error("Sign in required");
   }
-  const [regs, users, audit] = await Promise.all([
-    api("/api/v1/admin/registrations?status=pending&page=1&page_size=50"),
-    api("/api/v1/admin/users?page=1&page_size=100"),
-    api("/api/v1/admin/audit-log?page=1&page_size=100"),
-  ]);
   try {
     await loadUpdateStatus(false);
   } catch (err) {
     renderUpdateStatus(null);
     setUpdateNote(`Unable to load updater status: ${err.message}`, "error");
   }
+  await loadActiveAdminSection();
+}
 
+async function loadActiveAdminSection() {
+  if (state.ui.activeAdminSection === "registrations") {
+    await loadAdminRegistrations();
+    return;
+  }
+  if (state.ui.activeAdminSection === "users") {
+    await loadAdminUsers();
+    return;
+  }
+  if (state.ui.activeAdminSection === "audit") {
+    await loadAdminAudit();
+  }
+}
+
+function adminQuery(params) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    const v = String(value ?? "").trim();
+    if (!v) return;
+    query.set(key, v);
+  });
+  return query.toString();
+}
+
+function syncAdminCheckAll() {
+  if (el.adminRegCheckAll) {
+    const boxes = Array.from(document.querySelectorAll(".admin-reg-check"));
+    el.adminRegCheckAll.checked = boxes.length > 0 && boxes.every((node) => node.checked);
+  }
+  if (el.adminUserCheckAll) {
+    const boxes = Array.from(document.querySelectorAll(".admin-user-check"));
+    el.adminUserCheckAll.checked = boxes.length > 0 && boxes.every((node) => node.checked);
+  }
+}
+
+async function loadAdminRegistrations() {
+  const f = state.admin.registrations;
+  const query = adminQuery({
+    status: f.status,
+    q: f.q,
+    sort: f.sort,
+    order: f.order,
+    page: 1,
+    page_size: 100,
+  });
+  const regs = await api(`/api/v1/admin/registrations?${query}`);
   el.adminRegs.innerHTML = "";
   for (const r of regs.items || []) {
     const regID = String(r.id || r.ID || "").trim();
     const regEmail = String(r.email || r.Email || "").trim();
     const regCreatedAt = r.created_at || r.CreatedAt || "";
+    const checked = state.admin.registrations.selected.has(regID);
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(regEmail)}</td><td>${formatDate(regCreatedAt)}</td><td><span class="status-chip">pending</span></td><td></td>`;
-    const td = tr.children[3];
+    tr.dataset.regId = regID;
+    tr.innerHTML = `<td class="num"><input class="admin-reg-check" data-id="${escapeHtml(regID)}" type="checkbox" ${checked ? "checked" : ""} aria-label="Select ${escapeHtml(regEmail)}"></td>
+      <td>${escapeHtml(regEmail)}</td>
+      <td><span class="status-chip status-chip--${escapeHtml(String(r.status || "pending").toLowerCase())}">${escapeHtml(r.status || "pending")}</span></td>
+      <td class="num">${formatDate(regCreatedAt)}</td>
+      <td></td>`;
+    const td = tr.children[4];
+    const check = tr.querySelector(".admin-reg-check");
+    if (check) {
+      check.addEventListener("change", () => {
+        if (check.checked) state.admin.registrations.selected.add(regID);
+        else state.admin.registrations.selected.delete(regID);
+        syncAdminCheckAll();
+      });
+    }
+    const menu = document.createElement("details");
+    menu.className = "row-menu";
+    menu.innerHTML = `<summary>Actions</summary>`;
+    const menuBody = document.createElement("div");
+    menuBody.className = "row-menu-body";
     const approve = document.createElement("button");
-    approve.className = "cmd-btn cmd-btn--primary";
+    approve.className = "cmd-btn cmd-btn--dense cmd-btn--primary";
     approve.textContent = "Approve";
     approve.onclick = async () => {
       try {
@@ -1462,14 +1701,15 @@ async function loadAdmin() {
           throw new Error("registration id missing from API response");
         }
         await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/approve`, { method: "POST", json: {} });
-        await loadAdmin();
-        setStatus(`APPROVED ${regEmail.toUpperCase()}`, "ok");
+        state.admin.registrations.selected.delete(regID);
+        await loadAdminRegistrations();
+        setStatus(`Approved ${regEmail}.`, "ok");
       } catch (err) {
         presentAPIError(err, "Failed to approve registration");
       }
     };
     const reject = document.createElement("button");
-    reject.className = "cmd-btn";
+    reject.className = "cmd-btn cmd-btn--dense cmd-btn--danger";
     reject.textContent = "Reject";
     reject.onclick = async () => {
       try {
@@ -1478,8 +1718,9 @@ async function loadAdmin() {
         }
         const reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
         await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/reject`, { method: "POST", json: { reason } });
-        await loadAdmin();
-        setStatus(`REJECTED ${regEmail.toUpperCase()}`, "ok");
+        state.admin.registrations.selected.delete(regID);
+        await loadAdminRegistrations();
+        setStatus(`Rejected ${regEmail}.`, "ok");
       } catch (err) {
         presentAPIError(err, "Failed to reject registration");
       }
@@ -1490,71 +1731,330 @@ async function loadAdmin() {
       approve.title = "Registration ID missing in API response";
       reject.title = "Registration ID missing in API response";
     }
-    td.appendChild(approve);
-    td.appendChild(reject);
+    menuBody.appendChild(approve);
+    menuBody.appendChild(reject);
+    menu.appendChild(menuBody);
+    td.appendChild(menu);
     el.adminRegs.appendChild(tr);
   }
+  if ((regs.items || []).length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="5">No registrations match the current filters.</td>`;
+    el.adminRegs.appendChild(tr);
+  }
+  syncAdminCheckAll();
+}
 
+async function loadAdminUsers() {
+  const f = state.admin.users;
+  const query = adminQuery({
+    q: f.q,
+    status: f.status,
+    role: f.role,
+    provision_state: f.provision,
+    sort: f.sort,
+    order: f.order,
+    page: 1,
+    page_size: 100,
+  });
+  const users = await api(`/api/v1/admin/users?${query}`);
   el.adminUsers.innerHTML = "";
   const visibleUsers = (users.items || []).filter((u) => String(u.status || "").trim().toLowerCase() !== "rejected");
   for (const u of visibleUsers) {
+    const userID = String(u.id || "").trim();
+    const checked = state.admin.users.selected.has(userID);
     const userStatus = String(u.status || "").trim().toLowerCase();
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(u.email)}</td><td>${escapeHtml(u.role)}</td><td><span class="status-chip">${escapeHtml(u.status)}</span></td><td></td>`;
-    const td = tr.children[3];
+    tr.dataset.userId = userID;
+    tr.innerHTML = `<td class="num"><input class="admin-user-check" data-id="${escapeHtml(userID)}" type="checkbox" ${checked ? "checked" : ""} aria-label="Select ${escapeHtml(String(u.email || ""))}"></td>
+      <td>${escapeHtml(u.email)}</td>
+      <td>${escapeHtml(u.role)}</td>
+      <td><span class="status-chip status-chip--${escapeHtml(userStatus)}">${escapeHtml(u.status)}</span></td>
+      <td><span class="status-chip">${escapeHtml(u.provision_state || "-")}</span></td>
+      <td></td>`;
+    const td = tr.children[5];
+    const check = tr.querySelector(".admin-user-check");
+    if (check) {
+      check.addEventListener("change", () => {
+        if (check.checked) state.admin.users.selected.add(userID);
+        else state.admin.users.selected.delete(userID);
+        syncAdminCheckAll();
+      });
+    }
+    const menu = document.createElement("details");
+    menu.className = "row-menu";
+    menu.innerHTML = `<summary>Actions</summary>`;
+    const menuBody = document.createElement("div");
+    menuBody.className = "row-menu-body";
     if (userStatus === "active") {
       const btn = document.createElement("button");
-      btn.className = "cmd-btn";
+      btn.className = "cmd-btn cmd-btn--dense cmd-btn--danger";
       btn.textContent = "Suspend";
       btn.onclick = async () => {
         try {
           await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/suspend`, { method: "POST", json: {} });
-          await loadAdmin();
-          setStatus(`SUSPENDED ${u.email.toUpperCase()}`, "ok");
+          state.admin.users.selected.delete(userID);
+          await loadAdminUsers();
+          setStatus(`Suspended ${u.email}.`, "ok");
         } catch (err) {
           presentAPIError(err, "Failed to suspend user");
         }
       };
-      td.appendChild(btn);
+      menuBody.appendChild(btn);
     } else if (userStatus === "suspended") {
       const btn = document.createElement("button");
-      btn.className = "cmd-btn";
+      btn.className = "cmd-btn cmd-btn--dense cmd-btn--primary";
       btn.textContent = "Unsuspend";
       btn.onclick = async () => {
         try {
           await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/unsuspend`, { method: "POST", json: {} });
-          await loadAdmin();
-          setStatus(`UNSUSPENDED ${u.email.toUpperCase()}`, "ok");
+          state.admin.users.selected.delete(userID);
+          await loadAdminUsers();
+          setStatus(`Unsuspended ${u.email}.`, "ok");
         } catch (err) {
           presentAPIError(err, "Failed to unsuspend user");
         }
       };
-      td.appendChild(btn);
+      menuBody.appendChild(btn);
     }
 
     const reset = document.createElement("button");
-    reset.className = "cmd-btn";
+    reset.className = "cmd-btn cmd-btn--dense";
     reset.textContent = "Reset Password";
     reset.onclick = async () => {
       try {
         const pw = prompt(`New password for ${u.email}:`);
         if (!pw) return;
         await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST", json: { new_password: pw } });
-        setStatus(`PASSWORD RESET FOR ${u.email}`, "ok");
+        setStatus(`Password reset for ${u.email}.`, "ok");
       } catch (err) {
         presentAPIError(err, "Failed to reset password");
       }
     };
-    td.appendChild(reset);
+    menuBody.appendChild(reset);
 
+    menu.appendChild(menuBody);
+    td.appendChild(menu);
     el.adminUsers.appendChild(tr);
   }
+  if (visibleUsers.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="6">No users match the current filters.</td>`;
+    el.adminUsers.appendChild(tr);
+  }
+  syncAdminCheckAll();
+}
 
+async function loadAdminAudit() {
+  const f = state.admin.audit;
+  const query = adminQuery({
+    q: f.q,
+    actor: f.actor,
+    target: f.target,
+    from: f.from,
+    to: f.to,
+    sort: f.sort,
+    order: f.order,
+    page: 1,
+    page_size: 100,
+  });
+  const audit = await api(`/api/v1/admin/audit-log?${query}`);
   el.adminAudit.innerHTML = "";
   for (const a of audit.items || []) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${formatDate(a.created_at)}</td><td>${escapeHtml(a.action)}</td><td>${escapeHtml(a.target || "")}</td>`;
+    tr.innerHTML = `<td class="num">${escapeHtml(formatDate(a.created_at))}</td>
+      <td><span class="status-chip status-chip--${escapeHtml(String(a.severity || "info").toLowerCase())}">${escapeHtml(String(a.severity || "info").toUpperCase())}</span></td>
+      <td>${escapeHtml(a.summary_text || a.action || "-")}</td>
+      <td>${escapeHtml(a.actor_email || "-")}</td>
+      <td>${escapeHtml(a.target_label || a.target || "-")}</td>`;
     el.adminAudit.appendChild(tr);
+  }
+  if ((audit.items || []).length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="5">No audit entries match the current filters.</td>`;
+    el.adminAudit.appendChild(tr);
+  }
+}
+
+async function runBulkRegistrationDecision(decision) {
+  const ids = Array.from(state.admin.registrations.selected);
+  if (ids.length === 0) {
+    setStatus("Select at least one registration.", "error");
+    return;
+  }
+  let reason = "";
+  if (decision === "reject") {
+    reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
+  }
+  const payload = {
+    ids,
+    decision,
+    reason,
+  };
+  const out = await api("/api/v1/admin/registrations/bulk/decision", { method: "POST", json: payload });
+  state.admin.registrations.selected.clear();
+  await loadAdminRegistrations();
+  const appliedCount = Array.isArray(out.applied) ? out.applied.length : 0;
+  const failedCount = Array.isArray(out.failed) ? out.failed.length : 0;
+  setStatus(`${decision === "approve" ? "Approved" : "Rejected"} ${appliedCount} registration(s)${failedCount ? `, ${failedCount} failed` : ""}.`, failedCount ? "error" : "ok");
+}
+
+async function runBulkUserAction(action) {
+  const ids = Array.from(state.admin.users.selected);
+  if (ids.length === 0) {
+    setStatus("Select at least one user.", "error");
+    return;
+  }
+  const out = await api("/api/v1/admin/users/bulk/action", {
+    method: "POST",
+    json: { ids, action },
+  });
+  state.admin.users.selected.clear();
+  await loadAdminUsers();
+  const appliedCount = Array.isArray(out.applied) ? out.applied.length : 0;
+  const failedCount = Array.isArray(out.failed) ? out.failed.length : 0;
+  setStatus(`${action === "suspend" ? "Suspended" : "Unsuspended"} ${appliedCount} user(s)${failedCount ? `, ${failedCount} failed` : ""}.`, failedCount ? "error" : "ok");
+}
+
+function mailboxesButtons() {
+  return Array.from(el.mailboxes.querySelectorAll("button"));
+}
+
+function messageButtons() {
+  return Array.from(el.messages.querySelectorAll(".message-row-btn"));
+}
+
+async function moveMailboxSelection(delta) {
+  const buttons = mailboxesButtons();
+  if (buttons.length === 0) return;
+  const index = Math.max(0, buttons.findIndex((node) => String(node.dataset.mailboxName || "") === state.mailbox));
+  const next = Math.max(0, Math.min(buttons.length - 1, index + delta));
+  const nextBtn = buttons[next];
+  if (nextBtn) {
+    nextBtn.focus();
+    nextBtn.click();
+  }
+}
+
+async function moveMessageSelection(delta) {
+  const buttons = messageButtons();
+  if (buttons.length === 0) return;
+  const currentID = String(state.selectedMessage?.id || "");
+  let index = buttons.findIndex((node) => String(node.dataset.messageId || "") === currentID);
+  if (index < 0) index = 0;
+  const next = Math.max(0, Math.min(buttons.length - 1, index + delta));
+  const nextBtn = buttons[next];
+  if (nextBtn) {
+    nextBtn.focus();
+    nextBtn.click();
+  }
+}
+
+async function handleMailKeyboard(event) {
+  if (el.viewMail.classList.contains("hidden")) return;
+  if (state.ui.composeOpen) return;
+  const target = event.target;
+  const isEditable = target && (
+    target.tagName === "INPUT"
+    || target.tagName === "TEXTAREA"
+    || target.tagName === "SELECT"
+    || target.isContentEditable
+  );
+  if (isEditable && event.key !== "Escape") return;
+
+  if (event.key === "Tab") {
+    event.preventDefault();
+    cycleMailPane(event.shiftKey ? -1 : 1);
+    return;
+  }
+
+  if (event.key === "/" && !event.shiftKey) {
+    event.preventDefault();
+    el.searchInput.focus();
+    return;
+  }
+
+  if (event.key.toLowerCase() === "c") {
+    event.preventDefault();
+    openComposeOverlay(el.btnComposeOpen);
+    return;
+  }
+
+  if (event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    if (state.selectedMessage) el.btnFlag.click();
+    return;
+  }
+
+  if (event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    if (state.selectedMessage) el.btnSeen.click();
+    return;
+  }
+
+  if (event.key === "Delete") {
+    event.preventDefault();
+    if (state.selectedMessage) el.btnTrash.click();
+    return;
+  }
+
+  if (event.key === "Enter") {
+    if (state.ui.activeKeyboardPane === "mailboxes") {
+      event.preventDefault();
+      const active = document.activeElement;
+      if (active && active.closest && active.closest("#mailboxes")) {
+        active.click();
+      } else {
+        const current = mailboxesButtons().find((node) => String(node.dataset.mailboxName || "") === state.mailbox);
+        if (current) current.click();
+      }
+      return;
+    }
+    if (state.ui.activeKeyboardPane === "messages") {
+      event.preventDefault();
+      const active = document.activeElement;
+      if (active && active.closest && active.closest("#messages")) {
+        active.click();
+      } else {
+        const current = messageButtons().find((node) => String(node.dataset.messageId || "") === String(state.selectedMessage?.id || ""));
+        if (current) current.click();
+      }
+    }
+  }
+
+  if (event.key === "Escape") {
+    if (isMobileLayout() && state.ui.activeMailPane === "reader") {
+      event.preventDefault();
+      setActiveMailPane("messages");
+      return;
+    }
+    if (isMobileLayout() && state.ui.activeMailPane === "messages") {
+      event.preventDefault();
+      setActiveMailPane("mailboxes");
+    }
+    return;
+  }
+
+  const k = event.key.toLowerCase();
+  if (state.ui.activeKeyboardPane === "mailboxes" && (k === "j" || event.key === "ArrowDown")) {
+    event.preventDefault();
+    await moveMailboxSelection(1);
+    return;
+  }
+  if (state.ui.activeKeyboardPane === "mailboxes" && (k === "k" || event.key === "ArrowUp")) {
+    event.preventDefault();
+    await moveMailboxSelection(-1);
+    return;
+  }
+  if (state.ui.activeKeyboardPane === "messages" && (k === "j" || event.key === "ArrowDown")) {
+    event.preventDefault();
+    await moveMessageSelection(1);
+    return;
+  }
+  if (state.ui.activeKeyboardPane === "messages" && (k === "k" || event.key === "ArrowUp")) {
+    event.preventDefault();
+    await moveMessageSelection(-1);
+    return;
   }
 }
 
@@ -1712,6 +2212,8 @@ function bindSetupUI() {
 function bindUI() {
   bindSetupUI();
   setActiveAuthPane("login");
+  setActiveAdminSection(state.ui.activeAdminSection || "update");
+  setActiveMailPane(state.ui.activeMailPane || "mailboxes", { focus: false });
   if (el.authModeLogin) {
     el.authModeLogin.onclick = () => setActiveAuthPane("login");
   }
@@ -1763,6 +2265,205 @@ function bindUI() {
     };
   }
 
+  const loadCurrentAdminSection = async () => {
+    if (el.viewAdmin.classList.contains("hidden")) return;
+    try {
+      await loadActiveAdminSection();
+    } catch (err) {
+      presentAPIError(err, "Failed to load admin data");
+    }
+  };
+
+  if (el.adminNavUpdate) {
+    el.adminNavUpdate.onclick = async () => {
+      setActiveAdminSection("update");
+      await loadCurrentAdminSection();
+    };
+  }
+  if (el.adminNavRegistrations) {
+    el.adminNavRegistrations.onclick = async () => {
+      setActiveAdminSection("registrations");
+      await loadCurrentAdminSection();
+    };
+  }
+  if (el.adminNavUsers) {
+    el.adminNavUsers.onclick = async () => {
+      setActiveAdminSection("users");
+      await loadCurrentAdminSection();
+    };
+  }
+  if (el.adminNavAudit) {
+    el.adminNavAudit.onclick = async () => {
+      setActiveAdminSection("audit");
+      await loadCurrentAdminSection();
+    };
+  }
+
+  if (el.btnAdminRegApply) {
+    el.btnAdminRegApply.onclick = async () => {
+      state.admin.registrations.q = String(el.adminRegQ?.value || "").trim();
+      state.admin.registrations.status = String(el.adminRegStatus?.value || "pending").trim();
+      state.admin.registrations.sort = String(el.adminRegSort?.value || "created_at").trim();
+      state.admin.registrations.order = String(el.adminRegOrder?.value || "desc").trim();
+      await loadCurrentAdminSection();
+    };
+  }
+  if (el.btnAdminUserApply) {
+    el.btnAdminUserApply.onclick = async () => {
+      state.admin.users.q = String(el.adminUserQ?.value || "").trim();
+      state.admin.users.status = String(el.adminUserStatus?.value || "all").trim();
+      state.admin.users.role = String(el.adminUserRole?.value || "all").trim();
+      state.admin.users.provision = String(el.adminUserProvision?.value || "all").trim();
+      state.admin.users.sort = String(el.adminUserSort?.value || "created_at").trim();
+      state.admin.users.order = String(el.adminUserOrder?.value || "desc").trim();
+      await loadCurrentAdminSection();
+    };
+  }
+  if (el.btnAdminAuditApply) {
+    el.btnAdminAuditApply.onclick = async () => {
+      state.admin.audit.q = String(el.adminAuditQ?.value || "").trim();
+      state.admin.audit.actor = String(el.adminAuditActor?.value || "").trim();
+      state.admin.audit.target = String(el.adminAuditTarget?.value || "").trim();
+      state.admin.audit.from = String(el.adminAuditFrom?.value || "").trim();
+      state.admin.audit.to = String(el.adminAuditTo?.value || "").trim();
+      state.admin.audit.sort = String(el.adminAuditSort?.value || "created_at").trim();
+      state.admin.audit.order = String(el.adminAuditOrder?.value || "desc").trim();
+      await loadCurrentAdminSection();
+    };
+  }
+
+  if (el.btnRegSelectAll) {
+    el.btnRegSelectAll.onclick = () => {
+      Array.from(document.querySelectorAll(".admin-reg-check")).forEach((node) => {
+        node.checked = true;
+        const regID = String(node.dataset.id || "");
+        if (regID) state.admin.registrations.selected.add(regID);
+      });
+      syncAdminCheckAll();
+    };
+  }
+  if (el.btnRegClear) {
+    el.btnRegClear.onclick = () => {
+      state.admin.registrations.selected.clear();
+      Array.from(document.querySelectorAll(".admin-reg-check")).forEach((node) => {
+        node.checked = false;
+      });
+      syncAdminCheckAll();
+    };
+  }
+  if (el.btnRegApprove) {
+    el.btnRegApprove.onclick = async () => {
+      try {
+        await runBulkRegistrationDecision("approve");
+      } catch (err) {
+        presentAPIError(err, "Failed to approve selected registrations");
+      }
+    };
+  }
+  if (el.btnRegReject) {
+    el.btnRegReject.onclick = async () => {
+      try {
+        await runBulkRegistrationDecision("reject");
+      } catch (err) {
+        presentAPIError(err, "Failed to reject selected registrations");
+      }
+    };
+  }
+  if (el.adminRegCheckAll) {
+    el.adminRegCheckAll.addEventListener("change", () => {
+      const checked = el.adminRegCheckAll.checked;
+      Array.from(document.querySelectorAll(".admin-reg-check")).forEach((node) => {
+        node.checked = checked;
+        const id = String(node.dataset.id || "");
+        if (!id) return;
+        if (checked) state.admin.registrations.selected.add(id);
+        else state.admin.registrations.selected.delete(id);
+      });
+      syncAdminCheckAll();
+    });
+  }
+
+  if (el.btnUserSelectAll) {
+    el.btnUserSelectAll.onclick = () => {
+      Array.from(document.querySelectorAll(".admin-user-check")).forEach((node) => {
+        node.checked = true;
+        const id = String(node.dataset.id || "");
+        if (id) state.admin.users.selected.add(id);
+      });
+      syncAdminCheckAll();
+    };
+  }
+  if (el.btnUserClear) {
+    el.btnUserClear.onclick = () => {
+      state.admin.users.selected.clear();
+      Array.from(document.querySelectorAll(".admin-user-check")).forEach((node) => {
+        node.checked = false;
+      });
+      syncAdminCheckAll();
+    };
+  }
+  if (el.btnUserSuspend) {
+    el.btnUserSuspend.onclick = async () => {
+      try {
+        await runBulkUserAction("suspend");
+      } catch (err) {
+        presentAPIError(err, "Failed to suspend selected users");
+      }
+    };
+  }
+  if (el.btnUserUnsuspend) {
+    el.btnUserUnsuspend.onclick = async () => {
+      try {
+        await runBulkUserAction("unsuspend");
+      } catch (err) {
+        presentAPIError(err, "Failed to unsuspend selected users");
+      }
+    };
+  }
+  if (el.adminUserCheckAll) {
+    el.adminUserCheckAll.addEventListener("change", () => {
+      const checked = el.adminUserCheckAll.checked;
+      Array.from(document.querySelectorAll(".admin-user-check")).forEach((node) => {
+        node.checked = checked;
+        const id = String(node.dataset.id || "");
+        if (!id) return;
+        if (checked) state.admin.users.selected.add(id);
+        else state.admin.users.selected.delete(id);
+      });
+      syncAdminCheckAll();
+    });
+  }
+
+  if (el.mailMobileBack) {
+    el.mailMobileBack.onclick = () => {
+      if (state.ui.activeMailPane === "reader") setActiveMailPane("messages");
+      else if (state.ui.activeMailPane === "messages") setActiveMailPane("mailboxes");
+    };
+  }
+  if (el.mailBackToMailboxes) {
+    el.mailBackToMailboxes.onclick = () => setActiveMailPane("mailboxes");
+  }
+  if (el.mailBackToMessages) {
+    el.mailBackToMessages.onclick = () => setActiveMailPane("messages");
+  }
+  [el.mailPaneMailboxes, el.mailPaneMessages, el.mailPaneReader].forEach((pane) => {
+    if (!pane) return;
+    pane.addEventListener("focus", () => {
+      if (pane === el.mailPaneMailboxes) focusMailPane("mailboxes");
+      if (pane === el.mailPaneMessages) focusMailPane("messages");
+      if (pane === el.mailPaneReader) focusMailPane("reader");
+    });
+    pane.addEventListener("click", () => {
+      if (pane === el.mailPaneMailboxes) focusMailPane("mailboxes");
+      if (pane === el.mailPaneMessages) focusMailPane("messages");
+      if (pane === el.mailPaneReader) focusMailPane("reader");
+    });
+  });
+  window.addEventListener("resize", () => setActiveMailPane(state.ui.activeMailPane, { focus: false }));
+  document.addEventListener("keydown", (event) => {
+    void handleMailKeyboard(event);
+  });
+
   document.getElementById("form-login").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -1781,6 +2482,7 @@ function bindUI() {
       await loadMessages();
       setActiveTab(el.tabMail);
       showView("mail");
+      setActiveMailPane("messages");
     } catch (err) {
       if (err.code === "setup_required") {
         await enterSetupIfRequired();
@@ -1812,7 +2514,7 @@ function bindUI() {
         method: "POST",
         json: { email: fd.get("email"), password: fd.get("password"), captcha_token: captchaToken },
       });
-      setStatus("REGISTRATION SUBMITTED. WAIT FOR APPROVAL.", "ok");
+      setStatus("Registration submitted. Wait for approval.", "ok");
       e.target.reset();
       await resetCaptchaChallenge();
     } catch (err) {
@@ -1862,7 +2564,7 @@ function bindUI() {
     const fd = new FormData(e.target);
     try {
       await api("/api/v1/password/reset/confirm", { method: "POST", json: { token: fd.get("token"), new_password: fd.get("new_password") } });
-      setStatus("PASSWORD UPDATED", "ok");
+      setStatus("Password updated.", "ok");
       e.target.reset();
     } catch (err) {
       if (err.code === "setup_required") {
@@ -1877,7 +2579,7 @@ function bindUI() {
     e.preventDefault();
     try {
       await sendCompose(e.target);
-      setStatus("MESSAGE SENT", "ok");
+      setStatus("Message sent.", "ok");
       e.target.reset();
       clearComposeDraft();
       closeComposeOverlay(true);
@@ -1899,7 +2601,7 @@ function bindUI() {
       applyUpdateControls();
       try {
         await loadUpdateStatus(true);
-        setStatus("UPDATE CHECK COMPLETE", "ok");
+        setStatus("Update check complete.", "ok");
       } catch (err) {
         setUpdateNote(`Update check failed: ${err.message}`, "error");
         setStatus(err.message, "error");
@@ -1989,6 +2691,7 @@ function bindUI() {
     closeComposeOverlay(false);
     setActiveTab(el.tabMail);
     showView("mail");
+    setActiveMailPane(state.selectedMessage ? "reader" : "messages");
     try {
       await loadMailboxes();
       await loadMessages();
@@ -2002,6 +2705,7 @@ function bindUI() {
     closeComposeOverlay(false);
     setActiveTab(el.tabAdmin);
     showView("admin");
+    setActiveAdminSection(state.ui.activeAdminSection || "update");
     try {
       await loadAdmin();
     } catch (err) {
@@ -2024,7 +2728,7 @@ function bindUI() {
     showView("auth");
     setActiveAuthPane("login");
     void initCaptchaUI();
-    setStatus("SIGNED OUT", "ok");
+    setStatus("Signed out.", "ok");
   };
 
   el.btnSearch.onclick = async () => {
@@ -2040,7 +2744,7 @@ function bindUI() {
       requireSelectedMessage();
       await api(`/api/v1/messages/${encodeURIComponent(state.selectedMessage.id)}/flags`, { method: "POST", json: { flags: ["\\Flagged", "\\Seen"] } });
       await loadMessages();
-      setStatus("MESSAGE FLAGGED", "ok");
+      setStatus("Message flagged.", "ok");
     } catch (err) {
       setStatus(err.message, "error");
     }
@@ -2051,7 +2755,7 @@ function bindUI() {
       requireSelectedMessage();
       await api(`/api/v1/messages/${encodeURIComponent(state.selectedMessage.id)}/flags`, { method: "POST", json: { flags: ["\\Seen"] } });
       await loadMessages();
-      setStatus("MESSAGE MARKED SEEN", "ok");
+      setStatus("Message marked seen.", "ok");
     } catch (err) {
       setStatus(err.message, "error");
     }
@@ -2064,7 +2768,8 @@ function bindUI() {
       state.selectedMessage = null;
       el.body.textContent = "Select a message.";
       await loadMessages();
-      setStatus("MESSAGE MOVED TO TRASH", "ok");
+      setStatus("Message moved to trash.", "ok");
+      setActiveMailPane("messages");
     } catch (err) {
       setStatus(err.message, "error");
     }
@@ -2091,12 +2796,13 @@ async function bootstrap() {
     showView("auth");
     setActiveAuthPane("login");
     await initCaptchaUI();
-    setStatus("AUTH REQUIRED");
+    setStatus("Authentication required.");
     return;
   }
 
   setActiveTab(el.tabMail);
   showView("mail");
+  setActiveMailPane("messages", { focus: false });
   try {
     await loadMailboxes();
     await loadMessages();

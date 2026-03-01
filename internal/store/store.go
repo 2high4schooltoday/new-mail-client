@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -199,27 +200,67 @@ func (s *Store) UpdateProvisionState(ctx context.Context, userID, state string, 
 	return err
 }
 
-func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User, error) {
-	rows, err := s.db.QueryContext(ctx,
+func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models.User, int, error) {
+	where := []string{"lower(trim(coalesce(status, ''))) <> 'rejected'"}
+	args := make([]any, 0, 12)
+
+	q := strings.TrimSpace(query.Q)
+	if q != "" {
+		needle := "%" + strings.ToLower(q) + "%"
+		where = append(where, "(lower(email) LIKE ? OR lower(role) LIKE ? OR lower(status) LIKE ? OR lower(provision_state) LIKE ?)")
+		args = append(args, needle, needle, needle, needle)
+	}
+	if status := strings.TrimSpace(strings.ToLower(query.Status)); status != "" && status != "all" {
+		where = append(where, "lower(status)=?")
+		args = append(args, status)
+	}
+	if role := strings.TrimSpace(strings.ToLower(query.Role)); role != "" && role != "all" {
+		where = append(where, "lower(role)=?")
+		args = append(args, role)
+	}
+	if ps := strings.TrimSpace(strings.ToLower(query.ProvisionState)); ps != "" && ps != "all" {
+		where = append(where, "lower(provision_state)=?")
+		args = append(args, ps)
+	}
+
+	whereSQL := strings.Join(where, " AND ")
+
+	countArgs := append([]any{}, args...)
+	countSQL := fmt.Sprintf("SELECT COUNT(1) FROM users WHERE %s", whereSQL)
+	var total int
+	if err := s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	sortExpr := sanitizeUserSort(query.Sort)
+	orderExpr := sanitizeSortOrder(query.Order)
+	limit := clampLimit(query.Limit)
+	offset := clampOffset(query.Offset)
+
+	listSQL := fmt.Sprintf(
 		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
 		 FROM users
-		 WHERE lower(trim(coalesce(status, ''))) <> 'rejected'
-		 ORDER BY created_at DESC
+		 WHERE %s
+		 ORDER BY %s %s
 		 LIMIT ? OFFSET ?`,
-		limit, offset,
+		whereSQL,
+		sortExpr,
+		orderExpr,
 	)
+	listArgs := append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, listSQL, listArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var out []models.User
+	out := make([]models.User, 0, limit)
 	for rows.Next() {
 		var u models.User
 		var approvedAt, lastLogin sql.NullTime
 		var approvedBy, provisionErr, mailLogin sql.NullString
 		if err := rows.Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if approvedAt.Valid {
 			t := approvedAt.Time
@@ -245,7 +286,7 @@ func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User
 		}
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *Store) CreateRegistration(ctx context.Context, email, ip, uaHash string, captchaOK bool) (models.Registration, error) {
@@ -297,24 +338,66 @@ func (s *Store) GetRegistrationByID(ctx context.Context, id string) (models.Regi
 	return r, nil
 }
 
-func (s *Store) ListRegistrations(ctx context.Context, status string, limit, offset int) ([]models.Registration, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,email,source_ip,user_agent_hash,captcha_ok,status,created_at,decided_at,decided_by,reason FROM registrations WHERE status=? ORDER BY created_at ASC LIMIT ? OFFSET ?`,
-		status, limit, offset,
+func (s *Store) ListRegistrations(ctx context.Context, query models.RegistrationQuery) ([]models.Registration, int, error) {
+	where := make([]string, 0, 4)
+	args := make([]any, 0, 8)
+
+	status := strings.TrimSpace(strings.ToLower(query.Status))
+	if status == "" {
+		status = "pending"
+	}
+	if status != "all" {
+		where = append(where, "lower(status)=?")
+		args = append(args, status)
+	}
+
+	q := strings.TrimSpace(query.Q)
+	if q != "" {
+		needle := "%" + strings.ToLower(q) + "%"
+		where = append(where, "(lower(email) LIKE ? OR lower(coalesce(reason,'')) LIKE ?)")
+		args = append(args, needle, needle)
+	}
+
+	whereSQL := "1=1"
+	if len(where) > 0 {
+		whereSQL = strings.Join(where, " AND ")
+	}
+
+	countSQL := fmt.Sprintf("SELECT COUNT(1) FROM registrations WHERE %s", whereSQL)
+	var total int
+	if err := s.db.QueryRowContext(ctx, countSQL, append([]any{}, args...)...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	sortExpr := sanitizeRegistrationSort(query.Sort)
+	orderExpr := sanitizeSortOrder(query.Order)
+	limit := clampLimit(query.Limit)
+	offset := clampOffset(query.Offset)
+
+	listSQL := fmt.Sprintf(
+		`SELECT id,email,source_ip,user_agent_hash,captcha_ok,status,created_at,decided_at,decided_by,reason
+		 FROM registrations
+		 WHERE %s
+		 ORDER BY %s %s
+		 LIMIT ? OFFSET ?`,
+		whereSQL,
+		sortExpr,
+		orderExpr,
 	)
+	rows, err := s.db.QueryContext(ctx, listSQL, append(args, limit, offset)...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var out []models.Registration
+	out := make([]models.Registration, 0, limit)
 	for rows.Next() {
 		var r models.Registration
 		var cap int
 		var decidedAt sql.NullTime
 		var decidedBy, reason sql.NullString
 		if err := rows.Scan(&r.ID, &r.Email, &r.SourceIP, &r.UserAgentHash, &cap, &r.Status, &r.CreatedAt, &decidedAt, &decidedBy, &reason); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		r.CaptchaOK = cap == 1
 		if decidedAt.Valid {
@@ -331,7 +414,7 @@ func (s *Store) ListRegistrations(ctx context.Context, status string, limit, off
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *Store) SetRegistrationDecision(ctx context.Context, regID, status, decidedBy, reason string) error {
@@ -479,24 +562,156 @@ func (s *Store) InsertAudit(ctx context.Context, actorID, action, target, metada
 	return err
 }
 
-func (s *Store) ListAudit(ctx context.Context, limit, offset int) ([]models.AuditEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,actor_user_id,action,target,metadata_json,created_at FROM admin_audit_log ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		limit, offset,
+func (s *Store) ListAudit(ctx context.Context, query models.AuditQuery) ([]models.AuditEntry, int, error) {
+	where := make([]string, 0, 8)
+	args := make([]any, 0, 16)
+
+	if q := strings.TrimSpace(query.Q); q != "" {
+		needle := "%" + strings.ToLower(q) + "%"
+		where = append(where, "(lower(a.action) LIKE ? OR lower(a.target) LIKE ? OR lower(a.metadata_json) LIKE ? OR lower(coalesce(u.email,'')) LIKE ?)")
+		args = append(args, needle, needle, needle, needle)
+	}
+	if action := strings.TrimSpace(strings.ToLower(query.Action)); action != "" && action != "all" {
+		where = append(where, "lower(a.action)=?")
+		args = append(args, action)
+	}
+	if actor := strings.TrimSpace(strings.ToLower(query.Actor)); actor != "" {
+		where = append(where, "lower(coalesce(u.email,'')) LIKE ?")
+		args = append(args, "%"+actor+"%")
+	}
+	if target := strings.TrimSpace(strings.ToLower(query.Target)); target != "" {
+		where = append(where, "lower(a.target) LIKE ?")
+		args = append(args, "%"+target+"%")
+	}
+	if !query.From.IsZero() {
+		where = append(where, "a.created_at >= ?")
+		args = append(args, query.From.UTC())
+	}
+	if !query.To.IsZero() {
+		where = append(where, "a.created_at <= ?")
+		args = append(args, query.To.UTC())
+	}
+
+	whereSQL := "1=1"
+	if len(where) > 0 {
+		whereSQL = strings.Join(where, " AND ")
+	}
+
+	countSQL := fmt.Sprintf(
+		`SELECT COUNT(1)
+		 FROM admin_audit_log a
+		 LEFT JOIN users u ON u.id = a.actor_user_id
+		 WHERE %s`,
+		whereSQL,
 	)
+	var total int
+	if err := s.db.QueryRowContext(ctx, countSQL, append([]any{}, args...)...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	sortExpr := sanitizeAuditSort(query.Sort)
+	orderExpr := sanitizeSortOrder(query.Order)
+	limit := clampLimit(query.Limit)
+	offset := clampOffset(query.Offset)
+	listSQL := fmt.Sprintf(
+		`SELECT a.id,a.actor_user_id,coalesce(u.email,''),a.action,a.target,a.metadata_json,a.created_at
+		 FROM admin_audit_log a
+		 LEFT JOIN users u ON u.id = a.actor_user_id
+		 WHERE %s
+		 ORDER BY %s %s
+		 LIMIT ? OFFSET ?`,
+		whereSQL,
+		sortExpr,
+		orderExpr,
+	)
+	rows, err := s.db.QueryContext(ctx, listSQL, append(args, limit, offset)...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := make([]models.AuditEntry, 0, limit)
 	for rows.Next() {
 		var e models.AuditEntry
-		if err := rows.Scan(&e.ID, &e.ActorUserID, &e.Action, &e.Target, &e.MetadataJSON, &e.CreatedAt); err != nil {
-			return nil, err
+		if err := rows.Scan(&e.ID, &e.ActorUserID, &e.ActorEmail, &e.Action, &e.Target, &e.MetadataJSON, &e.CreatedAt); err != nil {
+			return nil, 0, err
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+func clampLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return 25
+	case limit > 100:
+		return 100
+	default:
+		return limit
+	}
+}
+
+func clampOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
+func sanitizeSortOrder(order string) string {
+	if strings.EqualFold(strings.TrimSpace(order), "asc") {
+		return "ASC"
+	}
+	return "DESC"
+}
+
+func sanitizeRegistrationSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "email":
+		return "email"
+	case "status":
+		return "status"
+	case "decided_at":
+		return "decided_at"
+	case "created_at":
+		fallthrough
+	default:
+		return "created_at"
+	}
+}
+
+func sanitizeUserSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "email":
+		return "email"
+	case "role":
+		return "role"
+	case "status":
+		return "status"
+	case "provision_state":
+		return "provision_state"
+	case "last_login_at":
+		return "last_login_at"
+	case "created_at":
+		fallthrough
+	default:
+		return "created_at"
+	}
+}
+
+func sanitizeAuditSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "action":
+		return "a.action"
+	case "actor":
+		return "u.email"
+	case "target":
+		return "a.target"
+	case "created_at":
+		fallthrough
+	default:
+		return "a.created_at"
+	}
 }
 
 func (s *Store) CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) (models.PasswordResetToken, error) {

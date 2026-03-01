@@ -31,6 +31,7 @@ func newAdminRegistrationRouter(t *testing.T) (http.Handler, *store.Store) {
 		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
 		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
 		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
+		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -196,5 +197,134 @@ func TestAdminRejectRegistrationFlow(t *testing.T) {
 		if it.Email == "reject@example.com" {
 			t.Fatalf("rejected user must not appear in users list")
 		}
+	}
+}
+
+func TestAdminRegistrationsListSupportsSearchAndTotal(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	_ = addPendingRegistration(t, st, "alpha@example.com")
+	_ = addPendingRegistration(t, st, "beta@example.com")
+	sess, csrf := loginForSend(t, router)
+
+	rec := doAdminRequest(t, router, http.MethodGet, "/api/v1/admin/registrations?status=all&q=alpha&page=1&page_size=50&sort=email&order=asc", nil, sess, csrf)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			Email string `json:"email"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v body=%s", err, rec.Body.String())
+	}
+	if payload.Total < 1 {
+		t.Fatalf("expected total >= 1, got %d", payload.Total)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Email != "alpha@example.com" {
+		t.Fatalf("unexpected filtered result: %+v", payload.Items)
+	}
+}
+
+func TestAdminBulkRegistrationDecisionApprove(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	regA := addPendingRegistration(t, st, "bulk-a@example.com")
+	regB := addPendingRegistration(t, st, "bulk-b@example.com")
+	sess, csrf := loginForSend(t, router)
+
+	rec := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/registrations/bulk/decision", []byte(`{"ids":["`+regA+`","`+regB+`"],"decision":"approve"}`), sess, csrf)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	reg1, err := st.GetRegistrationByID(t.Context(), regA)
+	if err != nil {
+		t.Fatalf("load reg A: %v", err)
+	}
+	reg2, err := st.GetRegistrationByID(t.Context(), regB)
+	if err != nil {
+		t.Fatalf("load reg B: %v", err)
+	}
+	if reg1.Status != "approved" || reg2.Status != "approved" {
+		t.Fatalf("expected both approved, got %q and %q", reg1.Status, reg2.Status)
+	}
+}
+
+func TestAdminAuditIncludesStableSummaryFields(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	regID := addPendingRegistration(t, st, "audit@example.com")
+	sess, csrf := loginForSend(t, router)
+
+	approve := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/registrations/"+regID+"/approve", []byte(`{}`), sess, csrf)
+	if approve.Code != http.StatusOK {
+		t.Fatalf("approve failed: %d body=%s", approve.Code, approve.Body.String())
+	}
+
+	rec := doAdminRequest(t, router, http.MethodGet, "/api/v1/admin/audit-log?page=1&page_size=20", nil, sess, csrf)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Action         string `json:"action"`
+			SummaryCode    string `json:"summary_code"`
+			SummaryText    string `json:"summary_text"`
+			SummaryVersion int    `json:"summary_version"`
+			Severity       string `json:"severity"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v body=%s", err, rec.Body.String())
+	}
+	if payload.Total == 0 || len(payload.Items) == 0 {
+		t.Fatalf("expected audit entries")
+	}
+	first := payload.Items[0]
+	if first.Action == "" || first.SummaryCode == "" || first.SummaryText == "" || first.SummaryVersion != 1 || first.Severity == "" {
+		t.Fatalf("audit summary fields are incomplete: %+v", first)
+	}
+}
+
+func TestAdminBulkUserActionSuspendUnsuspend(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	pwHash, err := auth.HashPassword("UserPass123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	u, err := st.CreateUser(t.Context(), "bulk-user@example.com", pwHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	sess, csrf := loginForSend(t, router)
+
+	suspendBody := []byte(`{"ids":["` + u.ID + `"],"action":"suspend"}`)
+	suspendRec := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/users/bulk/action", suspendBody, sess, csrf)
+	if suspendRec.Code != http.StatusOK {
+		t.Fatalf("suspend failed: %d body=%s", suspendRec.Code, suspendRec.Body.String())
+	}
+
+	afterSuspend, err := st.GetUserByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("load suspended user: %v", err)
+	}
+	if afterSuspend.Status != models.UserSuspended {
+		t.Fatalf("expected suspended status, got %q", afterSuspend.Status)
+	}
+
+	unsuspendBody := []byte(`{"ids":["` + u.ID + `"],"action":"unsuspend"}`)
+	unsuspendRec := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/users/bulk/action", unsuspendBody, sess, csrf)
+	if unsuspendRec.Code != http.StatusOK {
+		t.Fatalf("unsuspend failed: %d body=%s", unsuspendRec.Code, unsuspendRec.Body.String())
+	}
+
+	afterUnsuspend, err := st.GetUserByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("load unsuspended user: %v", err)
+	}
+	if afterUnsuspend.Status != models.UserActive {
+		t.Fatalf("expected active status, got %q", afterUnsuspend.Status)
 	}
 }

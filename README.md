@@ -285,14 +285,16 @@ Base: `/api/v1`
   - `GET /search`
   - `GET /attachments/{id}`
 - Admin:
-  - `GET /admin/registrations`
+  - `GET /admin/registrations` (supports `q,status,sort,order,page,page_size`; includes `total`)
   - `POST /admin/registrations/{id}/approve`
   - `POST /admin/registrations/{id}/reject`
-  - `GET /admin/users`
+  - `POST /admin/registrations/bulk/decision`
+  - `GET /admin/users` (supports `q,status,role,provision_state,sort,order,page,page_size`; includes `total`)
   - `POST /admin/users/{id}/suspend`
   - `POST /admin/users/{id}/unsuspend`
+  - `POST /admin/users/bulk/action`
   - `POST /admin/users/{id}/reset-password`
-  - `GET /admin/audit-log`
+  - `GET /admin/audit-log` (supports `q,action,actor,target,from,to,sort,order,page,page_size`; includes `total` + server-generated summary fields)
   - `GET /admin/system/mail-health`
   - `POST /admin/users/{id}/retry-provision`
   - `GET /admin/system/version`

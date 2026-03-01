@@ -42,6 +42,7 @@ func main() {
 		"migrations/002_users_mail_login.sql",
 		"migrations/003_cleanup_rejected_users.sql",
 		"migrations/004_cleanup_rejected_users_casefold.sql",
+		"migrations/005_admin_query_indexes.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)
