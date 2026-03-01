@@ -80,6 +80,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 		TargetVersion: strings.TrimSpace(req.TargetVersion),
 		FromVersion:   version.Current().Version,
 	}, 0o640)
+	_ = ensureMailclientReadable(statusPath(m.cfg))
 
 	finalStatus := ApplyStatus{
 		State:         ApplyStateFailed,
@@ -93,6 +94,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 	defer func() {
 		finalStatus.FinishedAt = m.now()
 		_ = writeJSONAtomic(statusPath(m.cfg), finalStatus, 0o640)
+		_ = ensureMailclientReadable(statusPath(m.cfg))
 		_ = os.Remove(requestPath(m.cfg))
 	}()
 
@@ -634,4 +636,24 @@ func sanitizePathToken(v string) string {
 		return "unknown"
 	}
 	return out
+}
+
+func ensureMailclientReadable(path string) error {
+	u, err := user.Lookup("mailclient")
+	if err != nil {
+		return err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return err
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		return err
+	}
+	// Keep file private to service user/group while allowing web process reads.
+	return os.Chmod(path, 0o640)
 }

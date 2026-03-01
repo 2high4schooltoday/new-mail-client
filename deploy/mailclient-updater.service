@@ -9,9 +9,8 @@ WorkingDirectory=/opt/mailclient
 EnvironmentFile=/opt/mailclient/.env
 ExecStart=/opt/mailclient/mailclient update-worker
 User=root
-Group=root
+Group=mailclient
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-

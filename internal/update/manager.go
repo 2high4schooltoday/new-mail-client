@@ -76,7 +76,7 @@ func (m *Manager) Status(ctx context.Context, st *store.Store, forceCheck bool) 
 	if checkErr != nil && status.LastCheckError == "" {
 		status.LastCheckError = checkErr.Error()
 	}
-	apply, err := readApplyStatus(statusPath(m.cfg))
+	apply, err := readApplyStatusTolerant(statusPath(m.cfg))
 	if err != nil {
 		return StatusResponse{}, err
 	}
@@ -100,7 +100,7 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 	if requestID = strings.TrimSpace(requestID); requestID == "" {
 		requestID = uuid.NewString()
 	}
-	current, err := readApplyStatus(statusPath(m.cfg))
+	current, err := readApplyStatusTolerant(statusPath(m.cfg))
 	if err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
@@ -227,4 +227,16 @@ func ApplyErrorCode(err error) string {
 	default:
 		return "update_request_failed"
 	}
+}
+
+func readApplyStatusTolerant(path string) (ApplyStatus, error) {
+	st, err := readApplyStatus(path)
+	if err == nil {
+		return st, nil
+	}
+	if os.IsPermission(err) {
+		// Treat unreadable status files as unknown/idle and allow queueing a new request.
+		return ApplyStatus{State: ApplyStateIdle}, nil
+	}
+	return ApplyStatus{}, err
 }

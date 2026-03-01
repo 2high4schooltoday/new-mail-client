@@ -84,6 +84,44 @@ func TestQueueApplyValidationAndInProgress(t *testing.T) {
 	}
 }
 
+func TestQueueApplyIgnoresUnreadableStatusFile(t *testing.T) {
+	st := newUpdateTestStore(t)
+	base := t.TempDir()
+	unitDir := filepath.Join(base, "units")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "mailclient-updater.path"), []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write unit file: %v", err)
+	}
+	cfg := config.Config{
+		UpdateEnabled:          true,
+		UpdateRepoOwner:        "2high4schooltoday",
+		UpdateRepoName:         "new-mail-client",
+		UpdateCheckIntervalMin: 60,
+		UpdateHTTPTimeoutSec:   10,
+		UpdateBackupKeep:       3,
+		UpdateBaseDir:          filepath.Join(base, "update"),
+		UpdateInstallDir:       filepath.Join(base, "install"),
+		UpdateServiceName:      "mailclient",
+		UpdateSystemdUnitDir:   unitDir,
+	}
+	mgr := NewManager(cfg)
+	if err := os.MkdirAll(statusDir(cfg), 0o755); err != nil {
+		t.Fatalf("mkdir status dir: %v", err)
+	}
+	if err := os.WriteFile(statusPath(cfg), []byte(`{"state":"idle"}`), 0o000); err != nil {
+		t.Fatalf("write unreadable status file: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(statusPath(cfg), 0o644)
+	})
+
+	if _, err := mgr.QueueApply(context.Background(), st, "admin@example.com", "v1.2.3", "req-perm"); err != nil {
+		t.Fatalf("queue apply should tolerate unreadable status file: %v", err)
+	}
+}
+
 func TestGitHubLatestReleaseWithETag(t *testing.T) {
 	t.Parallel()
 	serverETag := `"abc123"`

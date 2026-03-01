@@ -131,6 +131,15 @@ Default runtime paths:
 - lock: `/var/lib/mailclient/update/lock/update.lock`
 - backups: `/var/lib/mailclient/update/backups/`
 
+If update check/apply shows `permission denied` on update status/request files, repair ownership:
+
+```bash
+sudo chown -R mailclient:mailclient /var/lib/mailclient/update/request /var/lib/mailclient/update/status
+sudo chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
+sudo find /var/lib/mailclient/update/request /var/lib/mailclient/update/status -type f -exec chmod 0660 {} \;
+sudo systemctl restart mailclient mailclient-updater.path
+```
+
 Relevant `.env` options:
 - `UPDATE_ENABLED`
 - `UPDATE_REPO_OWNER`

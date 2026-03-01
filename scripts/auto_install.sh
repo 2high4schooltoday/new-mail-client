@@ -1663,6 +1663,8 @@ fi
 "${PREFIX[@]}" chown root:root /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 "${PREFIX[@]}" chmod 0750 /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 "${PREFIX[@]}" chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
+"${PREFIX[@]}" chown -R mailclient:mailclient /var/lib/mailclient/update/request /var/lib/mailclient/update/status
+"${PREFIX[@]}" find /var/lib/mailclient/update/request /var/lib/mailclient/update/status -type f -exec chmod 0660 {} \; || true
 finish_stage_ok
 
 begin_stage "service_install_start" "Service Install and Start" "10"
