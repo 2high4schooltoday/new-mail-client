@@ -1321,24 +1321,39 @@ async function loadAdmin() {
 
   el.adminRegs.innerHTML = "";
   for (const r of regs.items || []) {
+    const regID = String(r.id || r.ID || "").trim();
+    const regEmail = String(r.email || r.Email || "").trim();
+    const regCreatedAt = r.created_at || r.CreatedAt || "";
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(r.email)}</td><td>${formatDate(r.created_at)}</td><td><span class="status-chip">pending</span></td><td></td>`;
+    tr.innerHTML = `<td>${escapeHtml(regEmail)}</td><td>${formatDate(regCreatedAt)}</td><td><span class="status-chip">pending</span></td><td></td>`;
     const td = tr.children[3];
     const approve = document.createElement("button");
     approve.className = "cmd-btn cmd-btn--primary";
     approve.textContent = "Approve";
     approve.onclick = async () => {
-      await api(`/api/v1/admin/registrations/${encodeURIComponent(r.id)}/approve`, { method: "POST", json: {} });
+      if (!regID) {
+        throw new Error("registration id missing from API response");
+      }
+      await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/approve`, { method: "POST", json: {} });
       await loadAdmin();
     };
     const reject = document.createElement("button");
     reject.className = "cmd-btn";
     reject.textContent = "Reject";
     reject.onclick = async () => {
+      if (!regID) {
+        throw new Error("registration id missing from API response");
+      }
       const reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
-      await api(`/api/v1/admin/registrations/${encodeURIComponent(r.id)}/reject`, { method: "POST", json: { reason } });
+      await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/reject`, { method: "POST", json: { reason } });
       await loadAdmin();
     };
+    if (!regID) {
+      approve.disabled = true;
+      reject.disabled = true;
+      approve.title = "Registration ID missing in API response";
+      reject.title = "Registration ID missing in API response";
+    }
     td.appendChild(approve);
     td.appendChild(reject);
     el.adminRegs.appendChild(tr);

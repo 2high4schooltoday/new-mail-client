@@ -654,7 +654,28 @@ func (h *Handlers) AdminListRegistrations(w http.ResponseWriter, r *http.Request
 		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	util.WriteJSON(w, 200, map[string]any{"items": items, "page": page, "page_size": pageSize})
+	type dto struct {
+		ID        string     `json:"id"`
+		Email     string     `json:"email"`
+		Status    string     `json:"status"`
+		CreatedAt time.Time  `json:"created_at"`
+		DecidedAt *time.Time `json:"decided_at,omitempty"`
+		DecidedBy *string    `json:"decided_by,omitempty"`
+		Reason    *string    `json:"reason,omitempty"`
+	}
+	out := make([]dto, 0, len(items))
+	for _, it := range items {
+		out = append(out, dto{
+			ID:        it.ID,
+			Email:     it.Email,
+			Status:    it.Status,
+			CreatedAt: it.CreatedAt,
+			DecidedAt: it.DecidedAt,
+			DecidedBy: it.DecidedBy,
+			Reason:    it.Reason,
+		})
+	}
+	util.WriteJSON(w, 200, map[string]any{"items": out, "page": page, "page_size": pageSize})
 }
 
 func (h *Handlers) AdminApproveRegistration(w http.ResponseWriter, r *http.Request) {
