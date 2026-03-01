@@ -30,9 +30,8 @@
       </div>
       <nav class="tabs">
         <button id="tab-setup" class="tab" type="button">Setup</button>
-        <button id="tab-auth" class="tab active" type="button">Login</button>
+        <button id="tab-auth" class="tab active" type="button">Auth</button>
         <button id="tab-mail" class="tab" type="button">Mail</button>
-        <button id="tab-compose" class="tab" type="button">Compose</button>
         <button id="tab-admin" class="tab" type="button">Admin</button>
         <button id="btn-logout" class="tab" type="button">Logout</button>
       </nav>
@@ -42,43 +41,55 @@
       <section id="status-line" class="status-line" aria-live="polite">READY</section>
       <div class="rule-dot" aria-hidden="true"></div>
 
-      <section id="view-auth" class="card-grid">
-        <article class="panel">
-          <h2>Login</h2>
-          <form id="form-login" class="stack">
-            <label>Email <input name="email" type="email" required autocomplete="username"></label>
-            <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
-            <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
-          </form>
-        </article>
+      <section id="view-auth" class="auth-shell">
+        <article class="panel auth-panel" aria-labelledby="auth-title">
+          <header class="auth-header">
+            <h2 id="auth-title">Account Access</h2>
+            <p class="hint">Select one action at a time: sign in, request approval, or reset credentials.</p>
+          </header>
 
-        <article class="panel">
-          <h2>Registration</h2>
-          <form id="form-register" class="stack">
-            <label>Email <input name="email" type="email" required autocomplete="email"></label>
-            <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
-            <div id="captcha-shell" class="captcha-shell hidden">
-              <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
-              <div id="captcha-widget-container" class="captcha-widget-container"></div>
-              <label id="captcha-manual-wrap" class="hidden">Captcha Token (manual fallback)<input id="captcha-token-manual" type="text" autocomplete="off"></label>
-              <p id="captcha-error" class="hint"></p>
-            </div>
-            <input id="captcha-token-hidden" name="captcha_token" type="hidden" value="">
-            <button class="cmd-btn" type="submit">Submit For Approval</button>
-          </form>
-        </article>
+          <div class="auth-segments" role="tablist" aria-label="Authentication actions">
+            <button id="auth-mode-login" class="auth-segment is-active" type="button" role="tab" aria-selected="true" aria-controls="auth-pane-login">Login</button>
+            <button id="auth-mode-register" class="auth-segment" type="button" role="tab" aria-selected="false" aria-controls="auth-pane-register">Register</button>
+            <button id="auth-mode-reset" class="auth-segment" type="button" role="tab" aria-selected="false" aria-controls="auth-pane-reset">Password Reset</button>
+          </div>
 
-        <article class="panel">
-          <h2>Password Reset</h2>
-          <form id="form-reset-request" class="stack boxed">
-            <label>Email <input name="email" type="email" required autocomplete="email"></label>
-            <button class="cmd-btn" type="submit">Request Token</button>
-          </form>
-          <form id="form-reset-confirm" class="stack">
-            <label>Reset Token <input name="token" type="text" required autocomplete="one-time-code"></label>
-            <label>New Password <input name="new_password" type="password" required autocomplete="new-password"></label>
-            <button class="cmd-btn" type="submit">Apply New Password</button>
-          </form>
+          <section id="auth-pane-login" class="auth-pane" role="tabpanel" aria-labelledby="auth-mode-login">
+            <form id="form-login" class="stack auth-form">
+              <label>Email <input name="email" type="email" required autocomplete="username"></label>
+              <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+              <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
+            </form>
+          </section>
+
+          <section id="auth-pane-register" class="auth-pane hidden" role="tabpanel" aria-labelledby="auth-mode-register">
+            <form id="form-register" class="stack auth-form">
+              <label>Email <input name="email" type="email" required autocomplete="email"></label>
+              <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
+              <div id="captcha-shell" class="captcha-shell hidden">
+                <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
+                <div id="captcha-widget-container" class="captcha-widget-container"></div>
+                <label id="captcha-manual-wrap" class="hidden">Captcha Token (manual fallback)<input id="captcha-token-manual" type="text" autocomplete="off"></label>
+                <p id="captcha-error" class="hint"></p>
+              </div>
+              <input id="captcha-token-hidden" name="captcha_token" type="hidden" value="">
+              <button class="cmd-btn cmd-btn--primary" type="submit">Submit For Approval</button>
+            </form>
+          </section>
+
+          <section id="auth-pane-reset" class="auth-pane hidden" role="tabpanel" aria-labelledby="auth-mode-reset">
+            <form id="form-reset-request" class="stack auth-form auth-group">
+              <h3>Request Token</h3>
+              <label>Email <input name="email" type="email" required autocomplete="email"></label>
+              <button class="cmd-btn" type="submit">Request Token</button>
+            </form>
+            <form id="form-reset-confirm" class="stack auth-form auth-group">
+              <h3>Apply New Password</h3>
+              <label>Reset Token <input name="token" type="text" required autocomplete="one-time-code"></label>
+              <label>New Password <input name="new_password" type="password" required autocomplete="new-password"></label>
+              <button class="cmd-btn cmd-btn--primary" type="submit">Apply New Password</button>
+            </form>
+          </section>
         </article>
       </section>
 
@@ -196,14 +207,22 @@
         </div>
       </section>
 
-      <section id="view-mail" class="mail-layout hidden">
-        <aside class="panel rail">
-          <h2>Mailboxes</h2>
-          <ul id="mailboxes" class="list"></ul>
-        </aside>
+      <section id="view-mail" class="mail-workspace hidden">
+        <article class="panel workspace-header">
+          <div>
+            <h2>Mailbox Workspace</h2>
+            <p class="hint">Read, search, and manage messages in one continuous flow.</p>
+          </div>
+          <button id="btn-compose-open" class="cmd-btn cmd-btn--primary" type="button">New Message</button>
+        </article>
 
-        <section class="panel rail-wide">
-          <h2>Messages</h2>
+        <article class="panel">
+          <h3>Mailboxes</h3>
+          <ul id="mailboxes" class="list"></ul>
+        </article>
+
+        <article class="panel">
+          <h3>Messages</h3>
           <div class="searchbar">
             <input id="search-input" type="text" placeholder="Search subject, body, sender">
             <button id="btn-search" class="cmd-btn" type="button">Search</button>
@@ -214,10 +233,10 @@
             </thead>
             <tbody id="messages"></tbody>
           </table>
-        </section>
+        </article>
 
-        <article class="panel rail-wide">
-          <h2>Viewer</h2>
+        <article class="panel">
+          <h3>Viewer</h3>
           <div id="message-meta" class="meta"></div>
           <pre id="message-body" class="message-body">Select a message.</pre>
           <div id="attachment-list" class="attachments"></div>
@@ -227,17 +246,6 @@
             <button id="btn-trash" class="cmd-btn" type="button">Move To Trash</button>
           </div>
         </article>
-      </section>
-
-      <section id="view-compose" class="panel hidden">
-        <h2>Compose</h2>
-        <form id="form-compose" class="stack">
-          <label>To (comma separated)<input name="to" type="text" required autocomplete="email"></label>
-          <label>Subject<input name="subject" type="text" required autocomplete="off"></label>
-          <label>Body<textarea name="body" rows="10" required autocomplete="off"></textarea></label>
-          <label>Attachments<input name="attachments" type="file" multiple></label>
-          <button class="cmd-btn cmd-btn--primary" type="submit">Send</button>
-        </form>
       </section>
 
       <section id="view-admin" class="panel hidden">
@@ -283,6 +291,25 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div id="compose-overlay" class="compose-overlay hidden" aria-hidden="true">
+    <article id="compose-dialog" class="compose-dialog panel" role="dialog" aria-modal="true" aria-labelledby="compose-title">
+      <header class="compose-header">
+        <h2 id="compose-title">New Message</h2>
+        <button id="btn-compose-close" class="cmd-btn" type="button" aria-label="Close compose">Close</button>
+      </header>
+      <form id="form-compose" class="stack compose-form">
+        <label>To (comma separated)<input name="to" type="text" required autocomplete="email"></label>
+        <label>Subject<input name="subject" type="text" required autocomplete="off"></label>
+        <label>Body<textarea name="body" rows="10" required autocomplete="off"></textarea></label>
+        <label>Attachments<input name="attachments" type="file" multiple></label>
+        <div class="actions compose-actions">
+          <button class="cmd-btn" id="btn-compose-cancel" type="button">Cancel</button>
+          <button class="cmd-btn cmd-btn--primary" type="submit">Send</button>
+        </div>
+      </form>
+    </article>
   </div>
 
   <script src="/app.js" defer></script>

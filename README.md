@@ -10,6 +10,7 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 - Request-aware cookie security policy (`COOKIE_SECURE_MODE=auto|always|never`) for direct/proxy deployment compatibility.
 - Startup safety checks for session key strength, cookie security, and CAPTCHA config.
 - Admin user lifecycle controls: approve/reject/suspend/unsuspend/reset password.
+- Rejected registration policy: rejected pending users are removed from active `users` records (legacy cleanup migration included).
 - Password reset token flow.
 - Audit log endpoint + admin UI table.
 - Real IMAP integration (list/search/read/flags/move).
@@ -39,6 +40,17 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
    - Choose region
    - Set domain
    - Create admin account (default suggestion: `webmaster@{domain}`)
+
+## Web UI model
+- Single top-level navigation flow: `Auth`, `Mail`, `Admin` (plus `Setup` when required).
+- Auth is segmented into one centered surface with three modes:
+  - `Login`
+  - `Register` (with CAPTCHA when enabled)
+  - `Password Reset`
+- Mail and Compose are unified:
+  - mailbox + message list + viewer stay in one Mail workspace
+  - compose opens as an elevated modal panel from `New Message`
+  - compose draft is persisted locally until successful send
 
 ## Auto installer (recommended)
 Interactive, prompt-driven installer (no CLI arguments). Validated for Ubuntu Server on:

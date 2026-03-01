@@ -29,6 +29,7 @@ func newAdminRegistrationRouter(t *testing.T) (http.Handler, *store.Store) {
 	for _, migration := range []string{
 		filepath.Join("..", "..", "migrations", "001_init.sql"),
 		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
+		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -173,12 +174,26 @@ func TestAdminRejectRegistrationFlow(t *testing.T) {
 	if reg.Status != "rejected" {
 		t.Fatalf("expected registration status rejected, got %q", reg.Status)
 	}
-	u, err := st.GetUserByEmail(t.Context(), "reject@example.com")
-	if err != nil {
-		t.Fatalf("load user: %v", err)
+	_, err = st.GetUserByEmail(t.Context(), "reject@example.com")
+	if err != store.ErrNotFound {
+		t.Fatalf("expected rejected user to be deleted, got err=%v", err)
 	}
-	if u.Status != models.UserRejected {
-		t.Fatalf("expected user status rejected, got %q", u.Status)
+
+	usersRec := doAdminRequest(t, router, http.MethodGet, "/api/v1/admin/users?page=1&page_size=100", nil, sess, csrf)
+	if usersRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from users list, got %d body=%s", usersRec.Code, usersRec.Body.String())
+	}
+	var usersPayload struct {
+		Items []struct {
+			Email string `json:"email"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(usersRec.Body.Bytes(), &usersPayload); err != nil {
+		t.Fatalf("decode users payload: %v body=%s", err, usersRec.Body.String())
+	}
+	for _, it := range usersPayload.Items {
+		if it.Email == "reject@example.com" {
+			t.Fatalf("rejected user must not appear in users list")
+		}
 	}
 }
-

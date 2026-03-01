@@ -35,6 +35,7 @@ func newUpdateFixture(t *testing.T, enabled bool, configured bool) updateTestFix
 	for _, migration := range []string{
 		filepath.Join("..", "..", "migrations", "001_init.sql"),
 		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
+		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)

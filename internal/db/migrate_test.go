@@ -50,6 +50,7 @@ CREATE TABLE sessions (
 	for _, migration := range []string{
 		filepath.Join("..", "..", "migrations", "001_init.sql"),
 		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
+		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
 	} {
 		if err := ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -108,4 +109,70 @@ func hasColumn(t *testing.T, sqdb *sql.DB, tableName, colName string) bool {
 		t.Fatalf("iterate table_info %s: %v", tableName, err)
 	}
 	return false
+}
+
+func TestCleanupRejectedUsersMigrationRemovesLegacyRows(t *testing.T) {
+	sqdb, err := OpenSQLite(filepath.Join(t.TempDir(), "cleanup.db"), 1, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqdb.Close() })
+
+	if err := ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "001_init.sql")); err != nil {
+		t.Fatalf("apply migration 001: %v", err)
+	}
+	if err := ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "002_users_mail_login.sql")); err != nil {
+		t.Fatalf("apply migration 002: %v", err)
+	}
+
+	now := time.Now().UTC()
+	_, err = sqdb.Exec(
+		`INSERT INTO users(id,email,password_hash,role,status,provision_state,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"u_rej", "rejected@example.com", "hash", "user", "rejected", "pending", now,
+	)
+	if err != nil {
+		t.Fatalf("insert rejected user: %v", err)
+	}
+	_, err = sqdb.Exec(
+		`INSERT INTO sessions(id,user_id,token_hash,mail_secret,expires_at,idle_expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"s_rej", "u_rej", "token_hash_rej", "", now.Add(time.Hour), now.Add(time.Hour), now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert rejected user session: %v", err)
+	}
+	_, err = sqdb.Exec(
+		`INSERT INTO password_reset_tokens(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)`,
+		"p_rej", "u_rej", "reset_hash_rej", now.Add(time.Hour), now,
+	)
+	if err != nil {
+		t.Fatalf("insert rejected reset token: %v", err)
+	}
+
+	if err := ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql")); err != nil {
+		t.Fatalf("apply migration 003: %v", err)
+	}
+
+	var usersCount int
+	if err := sqdb.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM users WHERE status='rejected'`).Scan(&usersCount); err != nil {
+		t.Fatalf("count rejected users: %v", err)
+	}
+	if usersCount != 0 {
+		t.Fatalf("expected rejected users cleanup, found %d rows", usersCount)
+	}
+
+	var sessCount int
+	if err := sqdb.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM sessions WHERE user_id='u_rej'`).Scan(&sessCount); err != nil {
+		t.Fatalf("count rejected sessions: %v", err)
+	}
+	if sessCount != 0 {
+		t.Fatalf("expected rejected sessions cleanup, found %d rows", sessCount)
+	}
+
+	var resetCount int
+	if err := sqdb.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM password_reset_tokens WHERE user_id='u_rej'`).Scan(&resetCount); err != nil {
+		t.Fatalf("count rejected reset tokens: %v", err)
+	}
+	if resetCount != 0 {
+		t.Fatalf("expected rejected reset token cleanup, found %d rows", resetCount)
+	}
 }

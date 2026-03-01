@@ -40,6 +40,11 @@ const state = {
     widgetBlocked: false,
     widgetError: "",
   },
+  ui: {
+    activeAuthPane: "login",
+    composeOpen: false,
+    composeLastTrigger: null,
+  },
 };
 
 const el = {
@@ -49,14 +54,18 @@ const el = {
   tabSetup: document.getElementById("tab-setup"),
   tabAuth: document.getElementById("tab-auth"),
   tabMail: document.getElementById("tab-mail"),
-  tabCompose: document.getElementById("tab-compose"),
   tabAdmin: document.getElementById("tab-admin"),
   btnLogout: document.getElementById("btn-logout"),
   viewSetup: document.getElementById("view-setup"),
   viewAuth: document.getElementById("view-auth"),
   viewMail: document.getElementById("view-mail"),
-  viewCompose: document.getElementById("view-compose"),
   viewAdmin: document.getElementById("view-admin"),
+  authModeLogin: document.getElementById("auth-mode-login"),
+  authModeRegister: document.getElementById("auth-mode-register"),
+  authModeReset: document.getElementById("auth-mode-reset"),
+  authPaneLogin: document.getElementById("auth-pane-login"),
+  authPaneRegister: document.getElementById("auth-pane-register"),
+  authPaneReset: document.getElementById("auth-pane-reset"),
   mailboxes: document.getElementById("mailboxes"),
   messages: document.getElementById("messages"),
   meta: document.getElementById("message-meta"),
@@ -67,6 +76,11 @@ const el = {
   btnFlag: document.getElementById("btn-flag"),
   btnSeen: document.getElementById("btn-mark-seen"),
   btnTrash: document.getElementById("btn-trash"),
+  btnComposeOpen: document.getElementById("btn-compose-open"),
+  btnComposeClose: document.getElementById("btn-compose-close"),
+  btnComposeCancel: document.getElementById("btn-compose-cancel"),
+  composeOverlay: document.getElementById("compose-overlay"),
+  composeDialog: document.getElementById("compose-dialog"),
   composeForm: document.getElementById("form-compose"),
   registerForm: document.getElementById("form-register"),
   registerSubmit: document.querySelector("#form-register button[type='submit']"),
@@ -167,6 +181,34 @@ function setSetupInlineStatus(text, type = "info") {
   else el.setupInlineStatus.style.color = "var(--fg-muted)";
 }
 
+function setActiveAuthPane(pane) {
+  const next = ["login", "register", "reset"].includes(String(pane || "")) ? String(pane) : "login";
+  state.ui.activeAuthPane = next;
+  const modes = {
+    login: el.authModeLogin,
+    register: el.authModeRegister,
+    reset: el.authModeReset,
+  };
+  const panes = {
+    login: el.authPaneLogin,
+    register: el.authPaneRegister,
+    reset: el.authPaneReset,
+  };
+  Object.entries(modes).forEach(([key, button]) => {
+    if (!button) return;
+    const active = key === next;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.setAttribute("tabindex", active ? "0" : "-1");
+  });
+  Object.entries(panes).forEach(([key, panel]) => {
+    if (!panel) return;
+    const hidden = key !== next;
+    panel.classList.toggle("hidden", hidden);
+    panel.setAttribute("aria-hidden", hidden ? "true" : "false");
+  });
+}
+
 function getCookie(name) {
   const m = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
   return m ? decodeURIComponent(m[2]) : "";
@@ -198,10 +240,12 @@ function routeToAuthWithMessage(message, code = "") {
   state.auth.lastUnauthorizedAtMs = now;
   state.auth.lastUnauthorizedCode = code;
   state.user = null;
+  closeComposeOverlay(false);
   applyNavVisibility();
   if (!state.setup.required) {
     setActiveTab(el.tabAuth);
     showView("auth");
+    setActiveAuthPane("login");
     void initCaptchaUI();
   }
   if (shouldAnnounce) {
@@ -239,6 +283,61 @@ function restoreComposeDraft(form) {
     if (typeof draft.body === "string") form.elements.body.value = draft.body;
   } catch {
     localStorage.removeItem(composeDraftKey());
+  }
+}
+
+function composeFocusableElements() {
+  if (!el.composeDialog) return [];
+  return Array.from(el.composeDialog.querySelectorAll("button, [href], input, textarea, select, [tabindex]:not([tabindex='-1'])"))
+    .filter((node) => !node.disabled && node.offsetParent !== null);
+}
+
+function openComposeOverlay(trigger = null) {
+  if (!el.composeOverlay) return;
+  state.ui.composeOpen = true;
+  state.ui.composeLastTrigger = trigger || document.activeElement || null;
+  el.composeOverlay.classList.remove("hidden");
+  el.composeOverlay.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  if (el.composeForm) {
+    restoreComposeDraft(el.composeForm);
+    const toInput = el.composeForm.elements.to;
+    if (toInput && typeof toInput.focus === "function") {
+      toInput.focus();
+    }
+  }
+}
+
+function closeComposeOverlay(restoreFocus = true) {
+  if (!el.composeOverlay) return;
+  state.ui.composeOpen = false;
+  el.composeOverlay.classList.add("hidden");
+  el.composeOverlay.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  if (restoreFocus && state.ui.composeLastTrigger && typeof state.ui.composeLastTrigger.focus === "function") {
+    state.ui.composeLastTrigger.focus();
+  }
+  state.ui.composeLastTrigger = null;
+}
+
+function handleComposeOverlayKeydown(event) {
+  if (!state.ui.composeOpen) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeComposeOverlay(true);
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusables = composeFocusableElements();
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
   }
 }
 
@@ -644,7 +743,7 @@ function setSetupCooldown(waitSec) {
 }
 
 function setActiveTab(tab) {
-  [el.tabSetup, el.tabAuth, el.tabMail, el.tabCompose, el.tabAdmin]
+  [el.tabSetup, el.tabAuth, el.tabMail, el.tabAdmin]
     .filter(Boolean)
     .forEach((btn) => btn.classList.remove("active"));
   if (tab) tab.classList.add("active");
@@ -654,12 +753,10 @@ function showView(name) {
   el.viewSetup.classList.add("hidden");
   el.viewAuth.classList.add("hidden");
   el.viewMail.classList.add("hidden");
-  el.viewCompose.classList.add("hidden");
   el.viewAdmin.classList.add("hidden");
   if (name === "setup") el.viewSetup.classList.remove("hidden");
   if (name === "auth") el.viewAuth.classList.remove("hidden");
   if (name === "mail") el.viewMail.classList.remove("hidden");
-  if (name === "compose") el.viewCompose.classList.remove("hidden");
   if (name === "admin") el.viewAdmin.classList.remove("hidden");
 
   if (!el.appShell) return;
@@ -680,7 +777,6 @@ function applyNavVisibility() {
     el.tabSetup.style.display = "inline-block";
     el.tabAuth.style.display = "none";
     el.tabMail.style.display = "none";
-    el.tabCompose.style.display = "none";
     el.tabAdmin.style.display = "none";
     el.btnLogout.style.display = "none";
     return;
@@ -689,7 +785,6 @@ function applyNavVisibility() {
   el.tabSetup.style.display = "none";
   el.tabAuth.style.display = "inline-block";
   el.tabMail.style.display = "inline-block";
-  el.tabCompose.style.display = "inline-block";
   el.tabAdmin.style.display = state.user && state.user.role === "admin" ? "inline-block" : "none";
   el.btnLogout.style.display = state.user ? "inline-block" : "none";
 }
@@ -1448,6 +1543,7 @@ function bindSetupUI() {
             applyNavVisibility();
             setActiveTab(el.tabAuth);
             showView("auth");
+            setActiveAuthPane("login");
             setStatus("SETUP ALREADY COMPLETED. SIGN IN WITH ADMIN ACCOUNT.", "info");
             setSetupInlineStatus("");
             return;
@@ -1558,6 +1654,30 @@ function bindSetupUI() {
 
 function bindUI() {
   bindSetupUI();
+  setActiveAuthPane("login");
+  if (el.authModeLogin) {
+    el.authModeLogin.onclick = () => setActiveAuthPane("login");
+  }
+  if (el.authModeRegister) {
+    el.authModeRegister.onclick = () => {
+      setActiveAuthPane("register");
+      void initCaptchaUI();
+    };
+  }
+  if (el.authModeReset) {
+    el.authModeReset.onclick = () => setActiveAuthPane("reset");
+  }
+  const authModeButtons = [el.authModeLogin, el.authModeRegister, el.authModeReset].filter(Boolean);
+  authModeButtons.forEach((button, index) => {
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      event.preventDefault();
+      const delta = event.key === "ArrowRight" ? 1 : -1;
+      const nextIndex = (index + delta + authModeButtons.length) % authModeButtons.length;
+      authModeButtons[nextIndex].focus();
+      authModeButtons[nextIndex].click();
+    });
+  });
   if (el.captchaManualInput) {
     el.captchaManualInput.addEventListener("input", () => {
       setCaptchaToken(el.captchaManualInput.value);
@@ -1577,10 +1697,9 @@ function bindUI() {
         showView("setup");
       } else if (!state.user) {
         showView("auth");
+        setActiveAuthPane(state.ui.activeAuthPane || "login");
       } else if (!el.viewAdmin.classList.contains("hidden")) {
         showView("admin");
-      } else if (!el.viewCompose.classList.contains("hidden")) {
-        showView("compose");
       } else {
         showView("mail");
       }
@@ -1704,6 +1823,7 @@ function bindUI() {
       setStatus("MESSAGE SENT", "ok");
       e.target.reset();
       clearComposeDraft();
+      closeComposeOverlay(true);
       await loadMessages();
     } catch (err) {
       if (err.code === "smtp_sender_rejected") {
@@ -1771,6 +1891,27 @@ function bindUI() {
     el.composeForm.addEventListener("change", persistDraft);
   }
 
+  if (el.btnComposeOpen) {
+    el.btnComposeOpen.onclick = () => {
+      if (!state.user || state.setup.required) return;
+      openComposeOverlay(el.btnComposeOpen);
+    };
+  }
+  if (el.btnComposeClose) {
+    el.btnComposeClose.onclick = () => closeComposeOverlay(true);
+  }
+  if (el.btnComposeCancel) {
+    el.btnComposeCancel.onclick = () => closeComposeOverlay(true);
+  }
+  if (el.composeOverlay) {
+    el.composeOverlay.addEventListener("click", (event) => {
+      if (event.target === el.composeOverlay) {
+        closeComposeOverlay(true);
+      }
+    });
+  }
+  document.addEventListener("keydown", handleComposeOverlayKeydown);
+
   el.tabSetup.onclick = () => {
     if (!state.setup.required) return;
     setActiveTab(el.tabSetup);
@@ -1779,13 +1920,16 @@ function bindUI() {
 
   el.tabAuth.onclick = () => {
     if (state.setup.required) return;
+    closeComposeOverlay(false);
     setActiveTab(el.tabAuth);
     showView("auth");
+    setActiveAuthPane("login");
     void initCaptchaUI();
   };
 
   el.tabMail.onclick = async () => {
     if (!state.user || state.setup.required) return;
+    closeComposeOverlay(false);
     setActiveTab(el.tabMail);
     showView("mail");
     try {
@@ -1796,15 +1940,9 @@ function bindUI() {
     }
   };
 
-  el.tabCompose.onclick = () => {
-    if (!state.user || state.setup.required) return;
-    setActiveTab(el.tabCompose);
-    showView("compose");
-    restoreComposeDraft(el.composeForm);
-  };
-
   el.tabAdmin.onclick = async () => {
     if (!state.user || state.user.role !== "admin" || state.setup.required) return;
+    closeComposeOverlay(false);
     setActiveTab(el.tabAdmin);
     showView("admin");
     try {
@@ -1823,9 +1961,11 @@ function bindUI() {
     stopUpdatePolling();
     state.user = null;
     state.selectedMessage = null;
+    closeComposeOverlay(false);
     applyNavVisibility();
     setActiveTab(el.tabAuth);
     showView("auth");
+    setActiveAuthPane("login");
     void initCaptchaUI();
     setStatus("SIGNED OUT", "ok");
   };
@@ -1892,6 +2032,7 @@ async function bootstrap() {
   if (!session.ok) {
     setActiveTab(el.tabAuth);
     showView("auth");
+    setActiveAuthPane("login");
     await initCaptchaUI();
     setStatus("AUTH REQUIRED");
     return;

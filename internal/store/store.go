@@ -201,7 +201,11 @@ func (s *Store) UpdateProvisionState(ctx context.Context, userID, state string, 
 
 func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
+		 FROM users
+		 WHERE status <> 'rejected'
+		 ORDER BY created_at DESC
+		 LIMIT ? OFFSET ?`,
 		limit, offset,
 	)
 	if err != nil {
@@ -347,6 +351,78 @@ func (s *Store) SetRegistrationDecision(ctx context.Context, regID, status, deci
 		return ErrConflict
 	}
 	return nil
+}
+
+// RejectRegistrationAndDeletePendingUser marks a pending registration as rejected and
+// removes the associated pending user in one transaction.
+func (s *Store) RejectRegistrationAndDeletePendingUser(ctx context.Context, regID, decidedBy, reason string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var email, regStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT email,status FROM registrations WHERE id=?`, regID).Scan(&email, &regStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	if regStatus != "pending" {
+		return "", ErrConflict
+	}
+
+	var userID string
+	var userStatus models.UserStatus
+	if err := tx.QueryRowContext(ctx, `SELECT id,status FROM users WHERE email=?`, email).Scan(&userID, &userStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	if userStatus != models.UserPending {
+		return "", ErrConflict
+	}
+
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE registrations SET status=?,decided_at=?,decided_by=?,reason=? WHERE id=? AND status='pending'`,
+		"rejected", now, decidedBy, reason, regID,
+	)
+	if err != nil {
+		return "", err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if rows == 0 {
+		return "", ErrConflict
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
+		return "", err
+	}
+	res, err = tx.ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID)
+	if err != nil {
+		return "", err
+	}
+	rows, err = res.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if rows == 0 {
+		return "", ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return userID, nil
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess models.Session) error {

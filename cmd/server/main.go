@@ -40,6 +40,7 @@ func main() {
 	for _, migration := range []string{
 		"migrations/001_init.sql",
 		"migrations/002_users_mail_login.sql",
+		"migrations/003_cleanup_rejected_users.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)

@@ -270,25 +270,12 @@ func (s *Service) ApproveRegistration(ctx context.Context, adminID, regID string
 }
 
 func (s *Service) RejectRegistration(ctx context.Context, adminID, regID, reason string) error {
-	r, err := s.st.GetRegistrationByID(ctx, regID)
+	userID, err := s.st.RejectRegistrationAndDeletePendingUser(ctx, regID, adminID, reason)
 	if err != nil {
 		return err
 	}
-	if r.Status != "pending" {
-		return store.ErrConflict
-	}
-	u, err := s.st.GetUserByEmail(ctx, r.Email)
-	if err != nil {
-		return err
-	}
-	if err := s.st.SetRegistrationDecision(ctx, regID, "rejected", adminID, reason); err != nil {
-		return err
-	}
-	if err := s.st.UpdateUserStatus(ctx, u.ID, models.UserRejected, nil); err != nil {
-		return err
-	}
-	meta, _ := json.Marshal(map[string]string{"registration_id": regID, "user_id": u.ID, "reason": reason})
-	return s.st.InsertAudit(ctx, adminID, "registration.reject", u.ID, string(meta))
+	meta, _ := json.Marshal(map[string]string{"registration_id": regID, "user_id": userID, "reason": reason})
+	return s.st.InsertAudit(ctx, adminID, "registration.reject", userID, string(meta))
 }
 
 func (s *Service) SuspendUser(ctx context.Context, adminID, userID string) error {

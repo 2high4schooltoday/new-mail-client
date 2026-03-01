@@ -98,7 +98,7 @@ html[data-theme="machine-dark"] {
   --dur-med: 180ms;
   --ease-linearish: cubic-bezier(0.2, 0.2, 0, 1);
 
-  --rail-max: 1640px;
+  --rail-max: 1080px;
 }
 
 * {
@@ -157,10 +157,12 @@ label,
 
 .app-shell {
   max-width: var(--rail-max);
-  margin: var(--s-4) auto;
+  margin: var(--s-5) auto;
   border: 1px solid var(--line-1);
-  box-shadow: 2px 2px 0 var(--shadow);
+  border-radius: 18px;
+  box-shadow: 0 18px 42px color-mix(in srgb, var(--shadow) 36%, transparent);
   background: var(--bg-1);
+  overflow: hidden;
 }
 
 .page-office {}
@@ -170,7 +172,7 @@ label,
 .page-oobe {}
 
 .topbar {
-  padding: var(--s-4) var(--s-5) var(--s-3);
+  padding: var(--s-4) var(--s-6) var(--s-3);
   border-bottom: 1px solid var(--line-1);
   background: var(--topbar-grad);
 }
@@ -255,7 +257,7 @@ html[data-theme="machine-dark"] .palette span {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: var(--s-3);
   margin-top: var(--s-3);
 }
@@ -263,16 +265,16 @@ html[data-theme="machine-dark"] .palette span {
 .tab,
 .btn,
 .cmd-btn {
-  border: 2px solid var(--btn-line);
-  border-bottom-width: 3px;
+  border: 1px solid var(--btn-line);
   background: var(--btn-bg);
   color: var(--btn-fg);
-  padding: 8px 10px;
+  padding: 10px 12px;
   font-size: 0.95rem;
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: uppercase;
   cursor: pointer;
+  border-radius: 12px;
   transition: background var(--dur-fast) var(--ease-linearish), transform var(--dur-fast) var(--ease-linearish), color var(--dur-fast) var(--ease-linearish);
 }
 
@@ -301,8 +303,9 @@ input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
 a:focus-visible {
-  outline: 2px solid var(--sig-info);
+  outline: 3px solid var(--sig-info);
   outline-offset: 2px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sig-info) 30%, transparent);
 }
 
 .cmd-btn--primary {
@@ -316,7 +319,9 @@ html[data-theme="machine-dark"] .cmd-btn--primary {
 }
 
 main {
-  padding: var(--s-4) var(--s-5) var(--s-5);
+  padding: var(--s-5) var(--s-6) var(--s-6);
+  display: grid;
+  gap: var(--s-4);
 }
 
 .status-line {
@@ -336,9 +341,10 @@ main {
 
 .panel {
   background: var(--bg-1);
-  border: 1px solid var(--line-1);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line-1) 35%, transparent);
-  padding: var(--s-3);
+  border: 1px solid color-mix(in srgb, var(--line-1) 88%, transparent);
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--shadow) 24%, transparent);
+  border-radius: 14px;
+  padding: var(--s-4);
 }
 
 .grid-2,
@@ -363,13 +369,13 @@ main {
 
 .stack {
   display: grid;
-  gap: var(--s-2);
+  gap: var(--s-3);
 }
 
 label {
   display: grid;
-  gap: 5px;
-  font-size: 0.9rem;
+  gap: 6px;
+  font-size: 0.88rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -378,11 +384,12 @@ input,
 textarea,
 select {
   width: 100%;
-  border: 1px solid var(--line-1);
+  border: 1px solid color-mix(in srgb, var(--line-1) 72%, transparent);
   background: var(--bg-2);
   color: var(--fg-0);
-  padding: 8px;
+  padding: 10px 12px;
   font-size: 0.95rem;
+  border-radius: 10px;
 }
 
 textarea {
@@ -396,19 +403,21 @@ textarea {
 }
 
 .captcha-shell {
-  margin-top: var(--s-1);
+  margin-top: var(--s-2);
   padding: var(--s-3);
-  border: 1px dashed var(--line-1);
-  background: color-mix(in srgb, var(--bg-2) 82%, var(--bg-1));
+  border: 1px solid color-mix(in srgb, var(--line-1) 65%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-2) 90%, var(--bg-1));
   display: grid;
-  gap: var(--s-2);
+  gap: var(--s-3);
 }
 
 .captcha-widget-container {
   min-height: 90px;
-  border: 1px solid var(--line-1);
+  border: 1px solid color-mix(in srgb, var(--line-1) 64%, transparent);
+  border-radius: 10px;
   background: var(--bg-2);
-  padding: var(--s-2);
+  padding: var(--s-3);
 }
 
 .captcha-widget-container:empty::before {
@@ -779,15 +788,79 @@ textarea {
   }
 }
 
-.mail-layout {
+.auth-shell,
+.mail-workspace {
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+}
+
+#view-admin {
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+}
+
+.auth-panel {
   display: grid;
-  grid-template-columns: 260px minmax(350px, 1fr) minmax(380px, 1.1fr);
+  gap: var(--s-4);
+}
+
+.auth-header h2 {
+  margin-bottom: var(--s-1);
+}
+
+.auth-segments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+.auth-segment {
+  border: 1px solid color-mix(in srgb, var(--line-1) 80%, transparent);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  color: var(--fg-0);
+  font-size: var(--t-sm);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.auth-segment.is-active {
+  border-color: color-mix(in srgb, var(--sig-accent) 68%, var(--line-0));
+  background: color-mix(in srgb, var(--sig-accent) 24%, var(--bg-2));
+}
+
+.auth-pane {
+  display: grid;
+  gap: var(--s-4);
+}
+
+.auth-form {
+  max-width: 620px;
+}
+
+.auth-group {
+  margin-top: var(--s-2);
+}
+
+.auth-group h3 {
+  margin-bottom: var(--s-2);
+}
+
+.mail-workspace {
+  display: grid;
   gap: var(--s-3);
 }
 
-.rail,
-.rail-wide {
-  min-height: 580px;
+.workspace-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
 }
 
 .list {
@@ -801,10 +874,11 @@ textarea {
 .list button {
   width: 100%;
   text-align: left;
-  border: 1px solid var(--line-1);
+  border: 1px solid color-mix(in srgb, var(--line-1) 75%, transparent);
+  border-radius: 10px;
   background: var(--bg-2);
   color: var(--fg-0);
-  padding: 8px;
+  padding: 10px 12px;
   font-size: 0.92rem;
   cursor: pointer;
 }
@@ -817,7 +891,7 @@ textarea {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: var(--s-2);
-  margin-bottom: var(--s-2);
+  margin-bottom: var(--s-3);
 }
 
 .table,
@@ -831,8 +905,8 @@ textarea {
 .table td,
 .data-table th,
 .data-table td {
-  border: 1px solid var(--tbl-line);
-  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--tbl-line) 85%, transparent);
+  padding: 8px 10px;
   text-align: left;
   vertical-align: top;
 }
@@ -883,15 +957,17 @@ textarea {
 }
 
 .meta {
-  border: 1px dotted var(--dot-line);
-  padding: var(--s-2);
+  border: 1px solid color-mix(in srgb, var(--line-1) 65%, transparent);
+  border-radius: 10px;
+  padding: var(--s-3);
   margin-bottom: var(--s-2);
   background: var(--bg-2);
   min-height: 72px;
 }
 
 .message-body {
-  border: 1px solid var(--line-1);
+  border: 1px solid color-mix(in srgb, var(--line-1) 68%, transparent);
+  border-radius: 10px;
   background: var(--bg-2);
   color: var(--fg-0);
   min-height: 250px;
@@ -922,6 +998,38 @@ textarea {
   display: flex;
   gap: var(--s-2);
   flex-wrap: wrap;
+}
+
+.compose-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, #000 36%, transparent);
+  padding: var(--s-4);
+}
+
+.compose-dialog {
+  width: min(860px, 100%);
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+}
+
+.compose-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.compose-form {
+  gap: var(--s-3);
+}
+
+.compose-actions {
+  justify-content: flex-end;
 }
 
 .status-chip,
@@ -1026,17 +1134,12 @@ textarea {
 }
 
 @media (max-width: 1200px) {
-  .mail-layout {
+  .grid-3,
+  .card-grid {
     grid-template-columns: 1fr;
   }
 
-  .rail,
-  .rail-wide {
-    min-height: auto;
-  }
-
-  .grid-3,
-  .card-grid {
+  .auth-segments {
     grid-template-columns: 1fr;
   }
 }
@@ -1046,16 +1149,22 @@ textarea {
     margin: 0;
     border-left: 0;
     border-right: 0;
+    border-radius: 0;
     box-shadow: none;
   }
 
   .tabs {
-    grid-template-columns: repeat(2, minmax(130px, 1fr));
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 
   .card-grid,
   .grid-2 {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-header {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   h1 {
@@ -1116,6 +1225,14 @@ textarea {
   .oobe-footer #setup-next,
   .oobe-footer #mk-next {
     grid-area: next;
+  }
+
+  .compose-overlay {
+    padding: var(--s-2);
+  }
+
+  .compose-dialog {
+    max-height: calc(100vh - 24px);
   }
 }
 
