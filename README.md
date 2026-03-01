@@ -171,6 +171,14 @@ Recommended Ubuntu self-host setup:
    - `WASM_VERSION=<pinned-version>` (avoid `latest` in production)
    - `CACHE_HOST` optional (set only if outbound fetch is restricted)
 
+`scripts/auto_install.sh` can now auto-provision CAP runtime:
+- optional Docker deployment to `/opt/cap/docker-compose.yml`
+- canonical volume `cap-data` (with migration from legacy `cap_cap-data` when safe)
+- forced `ENABLE_ASSETS_SERVER=true`
+- pinned default versions if unset/invalid
+- container name conflict repair (`/cap`) and compose fallback to direct `docker run`
+- smoke checks for upstream + proxied CAP assets and `siteverify`
+
 CAP runtime health checks (required):
 - Do **not** use `GET /<site_key>/` as primary health signal.
 - Use these checks instead:

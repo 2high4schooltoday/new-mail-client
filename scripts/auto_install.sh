@@ -7,6 +7,9 @@ ENV_EXAMPLE="$ROOT_DIR/.env.example"
 OUT_ENV="$ROOT_DIR/.env"
 DEFAULT_REPO_URL="${MAILCLIENT_REPO_URL:-https://github.com/2high4schooltoday/new-mail-client.git}"
 DEFAULT_REPO_REF="${MAILCLIENT_REPO_REF:-main}"
+DEFAULT_CAP_IMAGE="${DESPATCH_CAPTCHA_CAP_IMAGE_DEFAULT:-tiagozip/cap:latest}"
+DEFAULT_CAP_WIDGET_VERSION="${DESPATCH_CAPTCHA_DEFAULT_WIDGET_VERSION:-0.0.6}"
+DEFAULT_CAP_WASM_VERSION="${DESPATCH_CAPTCHA_DEFAULT_WASM_VERSION:-0.0.6}"
 APT_UPDATED=0
 DESPATCH_NONINTERACTIVE="${DESPATCH_NONINTERACTIVE:-0}"
 DESPATCH_TUI_MODE="${DESPATCH_TUI_MODE:-0}"
@@ -209,6 +212,8 @@ env_key_for_input_prompt() {
     "CAP ENABLE_ASSETS_SERVER value (true/false)") echo "DESPATCH_CAPTCHA_CAP_ENABLE_ASSETS_SERVER" ;;
     "CAP WIDGET_VERSION (pin, avoid latest)") echo "DESPATCH_CAPTCHA_CAP_WIDGET_VERSION" ;;
     "CAP WASM_VERSION (pin, avoid latest)") echo "DESPATCH_CAPTCHA_CAP_WASM_VERSION" ;;
+    "CAP image (Docker)") echo "DESPATCH_CAPTCHA_CAP_IMAGE" ;;
+    "CAP admin key (for CAP dashboard access)") echo "DESPATCH_CAPTCHA_CAP_ADMIN_KEY" ;;
     "Dovecot auth backend mode (pam or sql)") echo "DESPATCH_DOVECOT_AUTH_MODE" ;;
     "Dovecot auth DB driver (mysql or pgx)") echo "DESPATCH_DOVECOT_AUTH_DB_DRIVER" ;;
     "Dovecot auth DB DSN") echo "DESPATCH_DOVECOT_AUTH_DB_DSN" ;;
@@ -230,9 +235,11 @@ env_key_for_yes_no_prompt() {
     "Detected installed reverse proxy"*) echo "DESPATCH_PROXY_SETUP" ;;
     "Install nginx automatically now?") echo "DESPATCH_INSTALL_NGINX" ;;
     "Install apache2 automatically now?") echo "DESPATCH_INSTALL_APACHE2" ;;
+    "Install Docker automatically now?") echo "DESPATCH_INSTALL_DOCKER" ;;
     "Continue without reverse proxy (direct mode on :8080)?") echo "DESPATCH_PROXY_FALLBACK_DIRECT" ;;
     "Enable TLS in reverse proxy config now (requires existing cert files)?") echo "DESPATCH_PROXY_TLS" ;;
     "Enable self-hosted CAP captcha for registration now?") echo "DESPATCH_CAPTCHA_ENABLE_CAP" ;;
+    "Auto-provision CAP standalone runtime with Docker?") echo "DESPATCH_CAPTCHA_AUTO_PROVISION" ;;
     "Re-enter TLS paths?") echo "DESPATCH_RETRY_TLS_PATHS" ;;
     "Enter Dovecot SQL settings manually now?") echo "DESPATCH_SQL_MANUAL" ;;
     "Install missing dependencies automatically with apt?") echo "DESPATCH_AUTO_INSTALL_DEPS" ;;
@@ -757,6 +764,190 @@ wait_for_condition() {
   return 1
 }
 
+detect_docker_compose_mode() {
+  if have_cmd docker && run_as_root docker compose version >/dev/null 2>&1; then
+    printf 'plugin'
+    return 0
+  fi
+  if have_cmd docker-compose; then
+    printf 'legacy'
+    return 0
+  fi
+  return 1
+}
+
+cap_compose_exec() {
+  local compose_file="$1"
+  shift
+  local mode
+  mode="$(detect_docker_compose_mode || true)"
+  case "$mode" in
+    plugin)
+      run_as_root docker compose -f "$compose_file" "$@"
+      ;;
+    legacy)
+      run_as_root docker-compose -f "$compose_file" "$@"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+cap_volume_has_data() {
+  local volume="$1"
+  local first
+  first="$(run_as_root docker run --rm -v "${volume}:/data" alpine sh -lc 'ls -A /data 2>/dev/null | head -n1' 2>/dev/null || true)"
+  [[ -n "$first" ]]
+}
+
+render_cap_compose() {
+  local upstream="$1" image="$2" admin_key="$3" widget_version="$4" wasm_version="$5"
+  local host="127.0.0.1" port="8077" bind_entry=""
+  if [[ "$upstream" == *:* ]]; then
+    host="$(trim "${upstream%:*}")"
+    port="$(trim "${upstream##*:}")"
+  else
+    port="$(trim "$upstream")"
+  fi
+  [[ "$host" == "localhost" ]] && host="127.0.0.1"
+  if [[ -z "$host" ]]; then
+    host="127.0.0.1"
+  fi
+  if [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  case "$host" in
+    127.0.0.1|0.0.0.0|::1)
+      bind_entry="127.0.0.1:${port}:80"
+      ;;
+    *)
+      bind_entry="${port}:80"
+      warn "CAP upstream host '${host}' is not loopback; binding CAP on 0.0.0.0:${port}."
+      ;;
+  esac
+
+  cat <<EOF
+services:
+  cap:
+    image: ${image}
+    container_name: cap
+    restart: unless-stopped
+    ports:
+      - "${bind_entry}"
+    environment:
+      ADMIN_KEY: "${admin_key}"
+      ENABLE_ASSETS_SERVER: "true"
+      WIDGET_VERSION: "${widget_version}"
+      WASM_VERSION: "${wasm_version}"
+    volumes:
+      - cap-data:/usr/src/app/.data
+
+volumes:
+  cap-data:
+    name: cap-data
+EOF
+}
+
+start_cap_runtime_direct() {
+  local upstream="$1" image="$2" admin_key="$3" widget_version="$4" wasm_version="$5"
+  local host="127.0.0.1" port="8077" publish=""
+  if [[ "$upstream" == *:* ]]; then
+    host="$(trim "${upstream%:*}")"
+    port="$(trim "${upstream##*:}")"
+  else
+    port="$(trim "$upstream")"
+  fi
+  [[ "$host" == "localhost" ]] && host="127.0.0.1"
+  if [[ -z "$host" ]]; then
+    host="127.0.0.1"
+  fi
+  if [[ -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if [[ "$host" == "127.0.0.1" || "$host" == "::1" || "$host" == "0.0.0.0" ]]; then
+    publish="127.0.0.1:${port}:80"
+  else
+    publish="${port}:80"
+  fi
+  run_as_root docker rm -f cap >/dev/null 2>&1 || true
+  run_as_root docker volume create cap-data >/dev/null
+  run_as_root docker run -d --name cap --restart unless-stopped \
+    -p "$publish" \
+    -e "ADMIN_KEY=${admin_key}" \
+    -e "ENABLE_ASSETS_SERVER=true" \
+    -e "WIDGET_VERSION=${widget_version}" \
+    -e "WASM_VERSION=${wasm_version}" \
+    -v cap-data:/usr/src/app/.data \
+    "$image" >/dev/null
+}
+
+provision_cap_runtime() {
+  local upstream="$1" image="$2" admin_key="$3" widget_version="$4" wasm_version="$5"
+  local cap_dir="/opt/cap" compose_file="${cap_dir}/docker-compose.yml" env_file="${cap_dir}/.env" tmp=""
+
+  if ! have_cmd docker; then
+    err "Docker is required for CAP auto-provisioning but not found."
+    return 1
+  fi
+  run_as_root mkdir -p "$cap_dir"
+
+  if ! tmp="$(mktemp)"; then
+    err "Failed to create temporary file for CAP compose."
+    return 1
+  fi
+  if ! render_cap_compose "$upstream" "$image" "$admin_key" "$widget_version" "$wasm_version" >"$tmp"; then
+    rm -f "$tmp"
+    err "Invalid CAP upstream '${upstream}'. Expected host:port."
+    return 1
+  fi
+  run_as_root install -m 0644 "$tmp" "$compose_file"
+  rm -f "$tmp"
+
+  if ! tmp="$(mktemp)"; then
+    err "Failed to create temporary file for CAP env."
+    return 1
+  fi
+  cat >"$tmp" <<EOF
+CAP_IMAGE=$image
+CAP_ADMIN_KEY=$admin_key
+CAP_UPSTREAM=$upstream
+CAP_WIDGET_VERSION=$widget_version
+CAP_WASM_VERSION=$wasm_version
+EOF
+  run_as_root install -m 0600 "$tmp" "$env_file"
+  rm -f "$tmp"
+
+  run_as_root docker volume create cap-data >/dev/null
+  if run_as_root docker volume inspect cap_cap-data >/dev/null 2>&1; then
+    if cap_volume_has_data cap_cap-data && ! cap_volume_has_data cap-data; then
+      warn "Detected legacy cap_cap-data volume with data and empty cap-data. Migrating to cap-data."
+      run_as_root docker run --rm -v cap_cap-data:/from -v cap-data:/to alpine sh -lc 'cp -a /from/. /to/'
+    elif cap_volume_has_data cap_cap-data && cap_volume_has_data cap-data; then
+      warn "Detected both cap-data and cap_cap-data with data. Keeping cap-data as canonical volume."
+    fi
+  fi
+
+  run_as_root docker rm -f cap >/dev/null 2>&1 || true
+  local compose_started=0
+  if detect_docker_compose_mode >/dev/null 2>&1; then
+    cap_compose_exec "$compose_file" down --remove-orphans >/dev/null 2>&1 || true
+    if cap_compose_exec "$compose_file" up -d --remove-orphans >/dev/null 2>&1; then
+      compose_started=1
+    fi
+  fi
+  if [[ "$compose_started" -ne 1 ]]; then
+    warn "Docker compose path failed or unavailable; falling back to direct docker run for CAP."
+    if ! start_cap_runtime_direct "$upstream" "$image" "$admin_key" "$widget_version" "$wasm_version"; then
+      return 1
+    fi
+  fi
+
+  local running
+  running="$(run_as_root docker inspect -f '{{.State.Running}}' cap 2>/dev/null || true)"
+  [[ "$running" == "true" ]]
+}
+
 detect_primary_ip() {
   local ip
   if have_cmd hostname; then
@@ -847,36 +1038,69 @@ verify_proxy_access() {
 
 verify_cap_siteverify_success_key() {
   local response="$1"
-  [[ "$response" == *"\"success\":"* ]]
+  [[ -n "$response" ]] || return 1
+  [[ "$response" == *"\"success\":"* ]] || return 1
+  [[ "$response" != *"<!doctype html"* ]] || return 1
+}
+
+verify_cap_text_asset_body() {
+  local body="$1"
+  [[ -n "$body" ]] || return 1
+  [[ "$body" != *"Failed to resolve the requested file"* ]] || return 1
+  [[ "$body" != *"Couldn't find the requested release version"* ]] || return 1
+  [[ "$body" != *"<!doctype html"* ]] || return 1
+}
+
+verify_cap_wasm_binary_url() {
+  local url="$1"
+  shift
+  local tmp size
+  if ! tmp="$(mktemp)"; then
+    return 1
+  fi
+  if ! curl "$@" -o "$tmp" "$url" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    return 1
+  fi
+  size="$(wc -c <"$tmp" | tr -d '[:space:]')"
+  rm -f "$tmp"
+  [[ -n "$size" && "$size" =~ ^[0-9]+$ ]] || return 1
+  [[ "$size" -gt 512 ]] || return 1
 }
 
 verify_cap_upstream_access() {
   local upstream="$1" site_key="$2" secret="$3"
-  local payload response
-  curl -fsS --max-time 8 "http://${upstream}/assets/widget.js" >/dev/null || return 1
-  curl -fsS --max-time 8 "http://${upstream}/assets/cap_wasm.js" >/dev/null || return 1
-  curl -fsS --max-time 8 "http://${upstream}/assets/cap_wasm_bg.wasm" >/dev/null || return 1
+  local payload response body
+  body="$(curl -fsS --max-time 8 "http://${upstream}/assets/widget.js" || true)"
+  verify_cap_text_asset_body "$body" || return 1
+  body="$(curl -fsS --max-time 8 "http://${upstream}/assets/cap_wasm.js" || true)"
+  verify_cap_text_asset_body "$body" || return 1
+  verify_cap_wasm_binary_url "http://${upstream}/assets/cap_wasm_bg.wasm" -fsS --max-time 8 || return 1
   payload="$(printf '{"secret":"%s","response":"installer-smoke-invalid-token"}' "$secret")"
-  response="$(curl -fsS --max-time 8 -H "Content-Type: application/json" -d "$payload" "http://${upstream}/${site_key}/siteverify" || true)"
+  response="$(curl -sS --max-time 8 -H "Content-Type: application/json" -d "$payload" "http://${upstream}/${site_key}/siteverify" || true)"
   verify_cap_siteverify_success_key "$response"
 }
 
 verify_cap_proxy_access() {
   local server="$1" tls_enabled="$2" site_key="$3" secret="$4"
-  local payload response
+  local payload response body
   payload="$(printf '{"secret":"%s","response":"installer-smoke-invalid-token"}' "$secret")"
   if [[ "$tls_enabled" == "1" ]]; then
-    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/widget.js" >/dev/null || return 1
-    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/cap_wasm.js" >/dev/null || return 1
-    curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/cap_wasm_bg.wasm" >/dev/null || return 1
-    response="$(curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" -H "Content-Type: application/json" -d "$payload" "https://${server}/cap/${site_key}/siteverify" || true)"
+    body="$(curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/widget.js" || true)"
+    verify_cap_text_asset_body "$body" || return 1
+    body="$(curl -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" "https://${server}/cap/assets/cap_wasm.js" || true)"
+    verify_cap_text_asset_body "$body" || return 1
+    verify_cap_wasm_binary_url "https://${server}/cap/assets/cap_wasm_bg.wasm" -kfsS --max-time 8 --resolve "${server}:443:127.0.0.1" || return 1
+    response="$(curl -ksS --max-time 8 --resolve "${server}:443:127.0.0.1" -H "Content-Type: application/json" -d "$payload" "https://${server}/cap/${site_key}/siteverify" || true)"
     verify_cap_siteverify_success_key "$response"
     return
   fi
-  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/widget.js" >/dev/null || return 1
-  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/cap_wasm.js" >/dev/null || return 1
-  curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/cap_wasm_bg.wasm" >/dev/null || return 1
-  response="$(curl -fsS --max-time 8 -H "Host: ${server}" -H "Content-Type: application/json" -d "$payload" "http://127.0.0.1/cap/${site_key}/siteverify" || true)"
+  body="$(curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/widget.js" || true)"
+  verify_cap_text_asset_body "$body" || return 1
+  body="$(curl -fsS --max-time 8 -H "Host: ${server}" "http://127.0.0.1/cap/assets/cap_wasm.js" || true)"
+  verify_cap_text_asset_body "$body" || return 1
+  verify_cap_wasm_binary_url "http://127.0.0.1/cap/assets/cap_wasm_bg.wasm" -fsS --max-time 8 -H "Host: ${server}" || return 1
+  response="$(curl -sS --max-time 8 -H "Host: ${server}" -H "Content-Type: application/json" -d "$payload" "http://127.0.0.1/cap/${site_key}/siteverify" || true)"
   verify_cap_siteverify_success_key "$response"
 }
 
@@ -1156,27 +1380,13 @@ render_apache_conf() {
 EOF
 )
   fi
-  cat <<EOF
-<VirtualHost *:80>
-    ServerName ${server_name}
-
-    ProxyPreserveHost On
-    ProxyRequests Off
-    AllowEncodedSlashes NoDecode
-
-    RequestHeader set X-Forwarded-Proto expr=%{REQUEST_SCHEME}
-${cap_proxy_block}
-    ProxyPass / http://${upstream}/ nocanon
-    ProxyPassReverse / http://${upstream}/
-
-    LimitRequestBody 31457280
-    Header always set X-Frame-Options "DENY"
-    Header always set X-Content-Type-Options "nosniff"
-</VirtualHost>
-EOF
-
   if [[ "$tls_enabled" == "1" ]]; then
     cat <<EOF
+<VirtualHost *:80>
+    ServerName ${server_name}
+    RewriteEngine On
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+</VirtualHost>
 
 <VirtualHost *:443>
     ServerName ${server_name}
@@ -1200,7 +1410,27 @@ ${cap_proxy_block}
     Header always set X-Content-Type-Options "nosniff"
 </VirtualHost>
 EOF
+    return
   fi
+
+  cat <<EOF
+<VirtualHost *:80>
+    ServerName ${server_name}
+
+    ProxyPreserveHost On
+    ProxyRequests Off
+    AllowEncodedSlashes NoDecode
+
+    RequestHeader set X-Forwarded-Proto expr=%{REQUEST_SCHEME}
+${cap_proxy_block}
+    ProxyPass / http://${upstream}/ nocanon
+    ProxyPassReverse / http://${upstream}/
+
+    LimitRequestBody 31457280
+    Header always set X-Frame-Options "DENY"
+    Header always set X-Content-Type-Options "nosniff"
+</VirtualHost>
+EOF
 }
 
 setup_nginx_proxy() {
@@ -1276,8 +1506,8 @@ setup_apache_proxy() {
   fi
   rm -f "$tmp"
 
-  if ! "${PREFIX[@]}" a2enmod proxy proxy_http headers >/dev/null; then
-    err "Failed enabling apache2 modules: proxy proxy_http headers"
+  if ! "${PREFIX[@]}" a2enmod proxy proxy_http headers rewrite >/dev/null; then
+    err "Failed enabling apache2 modules: proxy proxy_http headers rewrite"
     return 1
   fi
   if [[ "$tls_enabled" == "1" ]]; then
@@ -1411,8 +1641,11 @@ CAPTCHA_VERIFY_URL=""
 CAPTCHA_SECRET=""
 CAPTCHA_CAP_PROXY_UPSTREAM=""
 CAPTCHA_CAP_ENABLE_ASSETS_SERVER="true"
-CAPTCHA_CAP_WIDGET_VERSION=""
-CAPTCHA_CAP_WASM_VERSION=""
+CAPTCHA_CAP_WIDGET_VERSION="$DEFAULT_CAP_WIDGET_VERSION"
+CAPTCHA_CAP_WASM_VERSION="$DEFAULT_CAP_WASM_VERSION"
+CAPTCHA_CAP_AUTO_PROVISION=0
+CAPTCHA_CAP_IMAGE="$DEFAULT_CAP_IMAGE"
+CAPTCHA_CAP_ADMIN_KEY=""
 
 BASE_DOMAIN="$(prompt_input "Primary mail domain (used by first-run web setup)" "$BASE_DOMAIN_DEFAULT")"
 LISTEN_ADDR="$(prompt_input "HTTP listen address" "$LISTEN_ADDR_DEFAULT")"
@@ -1493,20 +1726,35 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
     CAPTCHA_SECRET="$(prompt_input "CAP verification secret" "$(generate_secret)")"
     CAPTCHA_CAP_PROXY_UPSTREAM="$(prompt_input "CAP upstream host:port for reverse proxy /cap/ route" "127.0.0.1:8077")"
     CAPTCHA_CAP_ENABLE_ASSETS_SERVER="$(lower "$(prompt_input "CAP ENABLE_ASSETS_SERVER value (true/false)" "true")")"
-    CAPTCHA_CAP_WIDGET_VERSION="$(trim "$(prompt_input "CAP WIDGET_VERSION (pin, avoid latest)" "")")"
-    CAPTCHA_CAP_WASM_VERSION="$(trim "$(prompt_input "CAP WASM_VERSION (pin, avoid latest)" "")")"
-    CAPTCHA_WIDGET_API_URL="/cap/${CAPTCHA_SITE_KEY}/"
-    CAPTCHA_VERIFY_URL="http://${CAPTCHA_CAP_PROXY_UPSTREAM}/${CAPTCHA_SITE_KEY}/siteverify"
-    if [[ "$CAPTCHA_CAP_ENABLE_ASSETS_SERVER" != "true" ]]; then
-      warn "ENABLE_ASSETS_SERVER is not set to true; CAP widget assets may fail with 500/ENOENT."
-    fi
+    CAPTCHA_CAP_WIDGET_VERSION="$(trim "$(prompt_input "CAP WIDGET_VERSION (pin, avoid latest)" "$DEFAULT_CAP_WIDGET_VERSION")")"
+    CAPTCHA_CAP_WASM_VERSION="$(trim "$(prompt_input "CAP WASM_VERSION (pin, avoid latest)" "$DEFAULT_CAP_WASM_VERSION")")"
     if [[ -z "$CAPTCHA_CAP_WIDGET_VERSION" || "$CAPTCHA_CAP_WIDGET_VERSION" == "latest" ]]; then
-      warn "CAP WIDGET_VERSION is not pinned. Set a concrete version in CAP standalone to avoid drift."
+      warn "Invalid CAP WIDGET_VERSION; defaulting to pinned ${DEFAULT_CAP_WIDGET_VERSION}."
+      CAPTCHA_CAP_WIDGET_VERSION="$DEFAULT_CAP_WIDGET_VERSION"
     fi
     if [[ -z "$CAPTCHA_CAP_WASM_VERSION" || "$CAPTCHA_CAP_WASM_VERSION" == "latest" ]]; then
-      warn "CAP WASM_VERSION is not pinned. Set a concrete version in CAP standalone to avoid drift."
+      warn "Invalid CAP WASM_VERSION; defaulting to pinned ${DEFAULT_CAP_WASM_VERSION}."
+      CAPTCHA_CAP_WASM_VERSION="$DEFAULT_CAP_WASM_VERSION"
+    fi
+    CAPTCHA_WIDGET_API_URL="/cap/${CAPTCHA_SITE_KEY}/"
+    CAPTCHA_VERIFY_URL="http://${CAPTCHA_CAP_PROXY_UPSTREAM}/${CAPTCHA_SITE_KEY}/siteverify"
+    CAPTCHA_CAP_ENABLE_ASSETS_SERVER="true"
+    if prompt_yes_no "Auto-provision CAP standalone runtime with Docker?" 1; then
+      CAPTCHA_CAP_AUTO_PROVISION=1
+      CAPTCHA_CAP_IMAGE="$(trim "$(prompt_input "CAP image (Docker)" "$DEFAULT_CAP_IMAGE")")"
+      CAPTCHA_CAP_ADMIN_KEY="$(prompt_input "CAP admin key (for CAP dashboard access)" "$(generate_secret)")"
+      if ! have_cmd docker && [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" ]]; then
+        warn "Docker is required for CAP auto-provisioning."
+        if prompt_yes_no "Install Docker automatically now?" 1; then
+          install_apt_packages docker.io docker-compose-plugin
+        fi
+      fi
     fi
   fi
+fi
+
+if [[ "$CAPTCHA_CAP_AUTO_PROVISION" == "1" && -z "$CAPTCHA_CAP_IMAGE" ]]; then
+  CAPTCHA_CAP_IMAGE="$DEFAULT_CAP_IMAGE"
 fi
 
 SQL_CONF="$(detect_sql_conf_file)"
@@ -1700,7 +1948,12 @@ if [[ "$DEPLOY_MODE" == "proxy" && "$PROXY_TLS" != "1" ]]; then
 fi
 if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
   log "CAPTCHA provider: cap (widget=${CAPTCHA_WIDGET_API_URL}, verify=${CAPTCHA_VERIFY_URL})"
-  log "Expected CAP standalone env: ENABLE_ASSETS_SERVER=${CAPTCHA_CAP_ENABLE_ASSETS_SERVER}, WIDGET_VERSION=${CAPTCHA_CAP_WIDGET_VERSION:-<pin-required>}, WASM_VERSION=${CAPTCHA_CAP_WASM_VERSION:-<pin-required>}"
+  log "Expected CAP standalone env: ENABLE_ASSETS_SERVER=${CAPTCHA_CAP_ENABLE_ASSETS_SERVER}, WIDGET_VERSION=${CAPTCHA_CAP_WIDGET_VERSION}, WASM_VERSION=${CAPTCHA_CAP_WASM_VERSION}"
+  if [[ "$CAPTCHA_CAP_AUTO_PROVISION" == "1" ]]; then
+    log "CAP runtime provisioning: enabled (image=${CAPTCHA_CAP_IMAGE}, upstream=${CAPTCHA_CAP_PROXY_UPSTREAM})"
+  else
+    warn "CAP runtime provisioning: disabled; ensure CAP service is already running on ${CAPTCHA_CAP_PROXY_UPSTREAM}."
+  fi
 fi
 log "Dovecot auth mode: $DOVECOT_AUTH_MODE"
 if [[ -n "$SQL_CONF" ]]; then
@@ -1873,6 +2126,17 @@ if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
     exit 1
   fi
 
+  if [[ "$CAPTCHA_CAP_AUTO_PROVISION" == "1" ]]; then
+    step "CAP standalone runtime provisioning"
+    if ! wait_for_condition "CAP runtime auto-provision" 3 1 provision_cap_runtime "$CAPTCHA_CAP_PROXY_UPSTREAM" "$CAPTCHA_CAP_IMAGE" "$CAPTCHA_CAP_ADMIN_KEY" "$CAPTCHA_CAP_WIDGET_VERSION" "$CAPTCHA_CAP_WASM_VERSION"; then
+      err "CAP runtime auto-provisioning failed."
+      err "Run: docker logs --tail 200 cap"
+      err "Run: docker ps -a | grep cap"
+      err "Run: cat /opt/cap/docker-compose.yml"
+      exit 1
+    fi
+  fi
+
   step "CAP public captcha config verification"
   if ! wait_for_condition "CAP public config endpoint" 20 1 verify_cap_public_config "$LOCAL_BASE_URL" "$CAPTCHA_SITE_KEY"; then
     err "Public captcha config endpoint does not report expected CAP settings."
@@ -1960,6 +2224,21 @@ First-run OOBE is web-only and will ask for:
 Cookie policy:
   - COOKIE_SECURE_MODE=${COOKIE_SECURE_MODE}
 DONE
+
+if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
+  cat <<DONE
+CAPTCHA:
+  - CAP widget endpoint: ${CAPTCHA_WIDGET_API_URL}
+  - CAP verify endpoint: ${CAPTCHA_VERIFY_URL}
+  - CAP upstream: ${CAPTCHA_CAP_PROXY_UPSTREAM}
+DONE
+  if [[ "$CAPTCHA_CAP_AUTO_PROVISION" == "1" ]]; then
+    cat <<DONE
+  - CAP runtime auto-provisioned in /opt/cap (container: cap, volume: cap-data)
+  - CAP runtime credentials: /opt/cap/.env
+DONE
+  fi
+fi
 
 if prompt_yes_no "Run Internet accessibility diagnostics now?" 1; then
   bash "$ROOT_DIR/scripts/diagnose_access.sh" || true

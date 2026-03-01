@@ -381,11 +381,48 @@ function capWidgetPaths(cfg) {
   return {
     endpoint: parsed.toString(),
     scriptURL: `${assetBase}/assets/widget.js`,
-    wasmURL: `${assetBase}/assets/cap_wasm.js`,
+    wasmURL: `${assetBase}/assets/cap_wasm_bg.wasm`,
+    hashesURL: `${assetBase}/assets/wasm-hashes.min.js`,
   };
 }
 
-function loadCapWidgetScript(paths) {
+async function fetchCapAsset(url, expectsBinary) {
+  const res = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+    credentials: "omit",
+  });
+  if (!res.ok) {
+    throw new Error(`asset ${url} returned HTTP ${res.status}`);
+  }
+  if (expectsBinary) {
+    const ctype = String(res.headers.get("content-type") || "").toLowerCase();
+    if (ctype.includes("text/html") || ctype.startsWith("text/")) {
+      throw new Error(`asset ${url} returned non-binary content-type ${ctype || "<empty>"}`);
+    }
+    await res.arrayBuffer();
+    return;
+  }
+  const body = await res.text();
+  if (!body || body.includes("Failed to resolve the requested file")) {
+    throw new Error(`asset ${url} is unresolved in CAP runtime`);
+  }
+}
+
+async function preflightCapAssets(paths) {
+  await fetchCapAsset(paths.scriptURL, false);
+  await fetchCapAsset(paths.wasmURL, true);
+  let hashesURL = "";
+  try {
+    await fetchCapAsset(paths.hashesURL, false);
+    hashesURL = paths.hashesURL;
+  } catch {
+    hashesURL = "";
+  }
+  return { hashesURL };
+}
+
+function loadCapWidgetScript(paths, preflight = null) {
   if (state.captcha.scriptLoaded && window.customElements && window.customElements.get("cap-widget")) {
     return Promise.resolve();
   }
@@ -394,6 +431,11 @@ function loadCapWidgetScript(paths) {
   }
   state.captcha.scriptPromise = new Promise((resolve, reject) => {
     window.CAP_CUSTOM_WASM_URL = paths.wasmURL;
+    if (preflight?.hashesURL) {
+      window.CAP_CUSTOM_HASHES_URL = preflight.hashesURL;
+    } else {
+      delete window.CAP_CUSTOM_HASHES_URL;
+    }
     const existing = document.querySelector("script[data-cap-widget-script='1']");
     if (existing) {
       existing.addEventListener("load", () => {
@@ -425,6 +467,9 @@ function mountCapWidget(paths) {
   clearCaptchaWidget();
   if (!el.captchaWidgetContainer) return;
   const widget = document.createElement("cap-widget");
+  // cap-widget versions in standalone runtime read `cap-api-endpoint` directly.
+  // Keep the data-* attribute for forward compatibility.
+  widget.setAttribute("cap-api-endpoint", paths.endpoint);
   widget.setAttribute("data-cap-api-endpoint", paths.endpoint);
   widget.setAttribute("data-cap-hidden-field-name", "cap_internal_token");
   widget.setAttribute("data-cap-language", "en");
@@ -437,7 +482,7 @@ function mountCapWidget(paths) {
       setCaptchaNote("Challenge solved. You can submit registration.", "ok");
       return;
     }
-    const hidden = el.captchaWidgetContainer.querySelector("input[name='cap_internal_token']");
+    const hidden = el.captchaWidgetContainer.querySelector("input[name='cap_internal_token'], input[name='cap-token']");
     setCaptchaToken(hidden ? hidden.value : "");
     if (state.captcha.token) {
       setCaptchaError("");
@@ -500,7 +545,8 @@ async function initCaptchaUI() {
   let paths = null;
   try {
     paths = capWidgetPaths(cfg);
-    await loadCapWidgetScript(paths);
+    const preflight = await preflightCapAssets(paths);
+    await loadCapWidgetScript(paths, preflight);
     mountCapWidget(paths);
   } catch (err) {
     state.captcha.widgetBlocked = true;
@@ -508,8 +554,11 @@ async function initCaptchaUI() {
     const assetHint = paths
       ? `Check self-hosted CAP assets: ${paths.scriptURL} and ${paths.wasmURL}.`
       : "Check CAPTCHA_WIDGET_API_URL and CAP standalone route.";
+    const secureHint = !window.isSecureContext
+      ? " Browser context is not secure; CAPTCHA worker hashing requires HTTPS."
+      : "";
     setCaptchaError("Captcha widget failed to load from self-hosted CAP assets.");
-    setCaptchaNote(`CAP asset server unavailable. ${assetHint} (${err.message})`, "error");
+    setCaptchaNote(`CAP asset server unavailable. ${assetHint}${secureHint} (${err.message})`, "error");
   }
   syncRegisterSubmitState();
 }
@@ -526,8 +575,13 @@ async function resetCaptchaChallenge() {
   }
   try {
     const paths = capWidgetPaths(state.captcha.config);
+    const preflight = await preflightCapAssets(paths);
     if (!state.captcha.scriptLoaded) {
-      await loadCapWidgetScript(paths);
+      await loadCapWidgetScript(paths, preflight);
+    } else if (preflight?.hashesURL) {
+      window.CAP_CUSTOM_HASHES_URL = preflight.hashesURL;
+    } else {
+      delete window.CAP_CUSTOM_HASHES_URL;
     }
     mountCapWidget(paths);
     setCaptchaError("");
