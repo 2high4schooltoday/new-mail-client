@@ -118,6 +118,28 @@ It checks:
 - `ufw` rules
 - DNS vs server public IP (when tools are available)
 
+## Web panel software updates (Ubuntu)
+Admin panel can check GitHub Releases and queue manual upgrades.
+
+Requires updater units:
+- `mailclient-updater.path`
+- `mailclient-updater.service`
+
+Default runtime paths:
+- request: `/var/lib/mailclient/update/request/update-request.json`
+- status: `/var/lib/mailclient/update/status/update-status.json`
+- lock: `/var/lib/mailclient/update/lock/update.lock`
+- backups: `/var/lib/mailclient/update/backups/`
+
+Relevant `.env` options:
+- `UPDATE_ENABLED`
+- `UPDATE_REPO_OWNER`
+- `UPDATE_REPO_NAME`
+- `UPDATE_CHECK_INTERVAL_MIN`
+- `UPDATE_HTTP_TIMEOUT_SEC`
+- `UPDATE_GITHUB_TOKEN` (optional)
+- `UPDATE_BACKUP_KEEP`
+
 ## SMTP sender diagnostics (Ubuntu)
 If sending fails with `smtp_sender_rejected` or `smtp_error` related to sender identity, run:
 
@@ -188,6 +210,10 @@ Base: `/api/v1`
   - `GET /admin/audit-log`
   - `GET /admin/system/mail-health`
   - `POST /admin/users/{id}/retry-provision`
+  - `GET /admin/system/version`
+  - `GET /admin/system/update/status`
+  - `POST /admin/system/update/check`
+  - `POST /admin/system/update/apply`
 
 ## Test
 - `go test ./...`

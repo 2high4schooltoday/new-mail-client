@@ -26,7 +26,9 @@ import (
 	"mailclient/internal/rate"
 	"mailclient/internal/service"
 	"mailclient/internal/store"
+	"mailclient/internal/update"
 	"mailclient/internal/util"
+	"mailclient/internal/version"
 )
 
 type Handlers struct {
@@ -34,6 +36,7 @@ type Handlers struct {
 	svc             *service.Service
 	limiter         *rate.Limiter
 	captchaVerifier captcha.Verifier
+	updateMgr       *update.Manager
 }
 
 const (
@@ -47,6 +50,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 		svc:             svc,
 		limiter:         rate.NewLimiter(),
 		captchaVerifier: captcha.NewVerifier(cfg),
+		updateMgr:       update.NewManager(cfg),
 	}
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -136,6 +140,8 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 				r.Get("/users", h.AdminListUsers)
 				r.Get("/audit-log", h.AdminAuditLog)
 				r.Get("/system/mail-health", h.AdminMailHealth)
+				r.Get("/system/version", h.AdminVersion)
+				r.Get("/system/update/status", h.AdminUpdateStatus)
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
 					r.Post("/registrations/{id}/approve", h.AdminApproveRegistration)
@@ -144,6 +150,8 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.Post("/users/{id}/unsuspend", h.AdminUnsuspendUser)
 					r.Post("/users/{id}/reset-password", h.AdminResetPassword)
 					r.Post("/users/{id}/retry-provision", h.AdminRetryProvisionUser)
+					r.With(middleware.RateLimit(h.limiter, "update_check", 20, time.Minute, h.cfg.TrustProxy)).Post("/system/update/check", h.AdminUpdateCheck)
+					r.With(middleware.RateLimit(h.limiter, "update_apply", 10, time.Minute, h.cfg.TrustProxy)).Post("/system/update/apply", h.AdminUpdateApply)
 				})
 			})
 		})
@@ -755,6 +763,68 @@ func (h *Handlers) AdminMailHealth(w http.ResponseWriter, r *http.Request) {
 		out["smtp"] = map[string]any{"ok": false, "error": err.Error()}
 	}
 	util.WriteJSON(w, 200, out)
+}
+
+func (h *Handlers) AdminVersion(w http.ResponseWriter, r *http.Request) {
+	util.WriteJSON(w, 200, version.Current())
+}
+
+func (h *Handlers) AdminUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := h.updateMgr.Status(r.Context(), h.svc.Store(), false)
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, status)
+}
+
+func (h *Handlers) AdminUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	status, err := h.updateMgr.Status(r.Context(), h.svc.Store(), true)
+	if err != nil {
+		util.WriteError(w, 502, "update_check_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, status)
+}
+
+func (h *Handlers) AdminUpdateApply(w http.ResponseWriter, r *http.Request) {
+	admin, _ := middleware.User(r.Context())
+	var req struct {
+		TargetVersion string `json:"target_version"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+			return
+		}
+	}
+	applyReq, err := h.updateMgr.QueueApply(
+		r.Context(),
+		h.svc.Store(),
+		admin.Email,
+		req.TargetVersion,
+		middleware.RequestID(r.Context()),
+	)
+	if err != nil {
+		code := update.ApplyErrorCode(err)
+		status := 500
+		switch code {
+		case "updater_not_configured":
+			status = 503
+		case "update_in_progress":
+			status = 409
+		case "invalid_target_version":
+			status = 400
+		}
+		util.WriteError(w, status, code, err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 202, map[string]any{
+		"status":         "queued",
+		"request_id":     applyReq.RequestID,
+		"requested_at":   applyReq.RequestedAt,
+		"target_version": applyReq.TargetVersion,
+	})
 }
 
 func parsePagination(r *http.Request) (int, int) {

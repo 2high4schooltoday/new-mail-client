@@ -263,8 +263,18 @@ finish_stage_ok
 begin_stage "service" "Service Teardown" "25"
 log "Removing service files..."
 if have_cmd systemctl; then
+  safe_systemctl stop mailclient-updater.path
+  safe_systemctl disable mailclient-updater.path
+  safe_systemctl stop mailclient-updater.service
+  safe_systemctl disable mailclient-updater.service
   safe_systemctl stop mailclient
   safe_systemctl disable mailclient
+  if [[ -f /etc/systemd/system/mailclient-updater.path ]]; then
+    run_as_root rm -f /etc/systemd/system/mailclient-updater.path
+  fi
+  if [[ -f /etc/systemd/system/mailclient-updater.service ]]; then
+    run_as_root rm -f /etc/systemd/system/mailclient-updater.service
+  fi
   if [[ -f /etc/systemd/system/mailclient.service ]]; then
     run_as_root rm -f /etc/systemd/system/mailclient.service
   fi

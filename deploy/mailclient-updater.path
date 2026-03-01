@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for Mailclient update requests
+
+[Path]
+PathExists=/var/lib/mailclient/update/request/update-request.json
+PathChanged=/var/lib/mailclient/update/request/update-request.json
+Unit=mailclient-updater.service
+
+[Install]
+WantedBy=multi-user.target
+

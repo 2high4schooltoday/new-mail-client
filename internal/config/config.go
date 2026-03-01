@@ -70,6 +70,18 @@ type Config struct {
 	PasswordResetSender  string
 	PasswordResetFrom    string
 	PasswordResetBaseURL string
+
+	UpdateEnabled          bool
+	UpdateRepoOwner        string
+	UpdateRepoName         string
+	UpdateCheckIntervalMin int
+	UpdateHTTPTimeoutSec   int
+	UpdateGitHubToken      string
+	UpdateBackupKeep       int
+	UpdateBaseDir          string
+	UpdateInstallDir       string
+	UpdateServiceName      string
+	UpdateSystemdUnitDir   string
 }
 
 func Load() (Config, error) {
@@ -136,6 +148,17 @@ func Load() (Config, error) {
 		PasswordResetSender:      strings.ToLower(env("PASSWORD_RESET_SENDER", "log")),
 		PasswordResetFrom:        env("PASSWORD_RESET_FROM", "webmaster@example.com"),
 		PasswordResetBaseURL:     env("PASSWORD_RESET_BASE_URL", ""),
+		UpdateEnabled:            envBool("UPDATE_ENABLED", true),
+		UpdateRepoOwner:          env("UPDATE_REPO_OWNER", "2high4schooltoday"),
+		UpdateRepoName:           env("UPDATE_REPO_NAME", "new-mail-client"),
+		UpdateCheckIntervalMin:   envInt("UPDATE_CHECK_INTERVAL_MIN", 60),
+		UpdateHTTPTimeoutSec:     envInt("UPDATE_HTTP_TIMEOUT_SEC", 10),
+		UpdateGitHubToken:        env("UPDATE_GITHUB_TOKEN", ""),
+		UpdateBackupKeep:         envInt("UPDATE_BACKUP_KEEP", 3),
+		UpdateBaseDir:            env("UPDATE_BASE_DIR", "/var/lib/mailclient/update"),
+		UpdateInstallDir:         env("UPDATE_INSTALL_DIR", "/opt/mailclient"),
+		UpdateServiceName:        env("UPDATE_SERVICE_NAME", "mailclient"),
+		UpdateSystemdUnitDir:     env("UPDATE_SYSTEMD_UNIT_DIR", "/etc/systemd/system"),
 	}
 
 	if cfg.SessionIdleMinutes <= 0 || cfg.SessionAbsoluteHour <= 0 {
@@ -189,6 +212,30 @@ func Load() (Config, error) {
 				return Config{}, fmt.Errorf("unsupported CAPTCHA_PROVIDER: %s", cfg.CaptchaProvider)
 			}
 		}
+	}
+	if cfg.UpdateCheckIntervalMin <= 0 {
+		return Config{}, fmt.Errorf("UPDATE_CHECK_INTERVAL_MIN must be positive")
+	}
+	if cfg.UpdateHTTPTimeoutSec <= 0 {
+		return Config{}, fmt.Errorf("UPDATE_HTTP_TIMEOUT_SEC must be positive")
+	}
+	if cfg.UpdateBackupKeep < 1 {
+		return Config{}, fmt.Errorf("UPDATE_BACKUP_KEEP must be >= 1")
+	}
+	if strings.TrimSpace(cfg.UpdateRepoOwner) == "" || strings.TrimSpace(cfg.UpdateRepoName) == "" {
+		return Config{}, fmt.Errorf("UPDATE_REPO_OWNER and UPDATE_REPO_NAME are required")
+	}
+	if strings.TrimSpace(cfg.UpdateBaseDir) == "" {
+		return Config{}, fmt.Errorf("UPDATE_BASE_DIR is required")
+	}
+	if strings.TrimSpace(cfg.UpdateInstallDir) == "" {
+		return Config{}, fmt.Errorf("UPDATE_INSTALL_DIR is required")
+	}
+	if strings.TrimSpace(cfg.UpdateServiceName) == "" {
+		return Config{}, fmt.Errorf("UPDATE_SERVICE_NAME is required")
+	}
+	if strings.TrimSpace(cfg.UpdateSystemdUnitDir) == "" {
+		return Config{}, fmt.Errorf("UPDATE_SYSTEMD_UNIT_DIR is required")
 	}
 	return cfg, nil
 }

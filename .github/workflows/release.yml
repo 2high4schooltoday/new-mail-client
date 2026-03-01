@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release archives
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          COMMIT="${GITHUB_SHA}"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          SOURCE_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            PKG_DIR="dist/pkg-${ARCH}"
+            mkdir -p "${PKG_DIR}"
+            LDFLAGS="-X 'mailclient/internal/version.Version=${VERSION}' -X 'mailclient/internal/version.Commit=${COMMIT}' -X 'mailclient/internal/version.BuildTime=${BUILD_TIME}' -X 'mailclient/internal/version.SourceRepo=${SOURCE_REPO}'"
+            GOOS=linux GOARCH="${ARCH}" go build -ldflags "${LDFLAGS}" -o "${PKG_DIR}/mailclient" ./cmd/server
+            cp -R web "${PKG_DIR}/web"
+            cp -R migrations "${PKG_DIR}/migrations"
+            tar -C "${PKG_DIR}" -czf "dist/mailclient-linux-${ARCH}.tar.gz" mailclient web migrations
+          done
+          (
+            cd dist
+            sha256sum mailclient-linux-amd64.tar.gz mailclient-linux-arm64.tar.gz > checksums.txt
+          )
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/mailclient-linux-amd64.tar.gz
+            dist/mailclient-linux-arm64.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true

@@ -78,3 +78,28 @@ func TestResolveCookieSecureAuto(t *testing.T) {
 		t.Fatalf("expected tls request to resolve secure=true")
 	}
 }
+
+func TestLoadUpdateDefaults(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.UpdateEnabled {
+		t.Fatalf("expected update feature enabled by default")
+	}
+	if cfg.UpdateRepoOwner == "" || cfg.UpdateRepoName == "" {
+		t.Fatalf("expected default update repo owner/name to be set")
+	}
+	if cfg.UpdateCheckIntervalMin <= 0 || cfg.UpdateHTTPTimeoutSec <= 0 {
+		t.Fatalf("expected positive update intervals/timeouts")
+	}
+}
+
+func TestLoadRejectsInvalidUpdateConfig(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("UPDATE_CHECK_INTERVAL_MIN", "0")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected load failure for UPDATE_CHECK_INTERVAL_MIN=0")
+	}
+}

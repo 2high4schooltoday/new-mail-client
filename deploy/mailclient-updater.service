@@ -1,0 +1,17 @@
+[Unit]
+Description=Mailclient Privileged Update Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mailclient
+EnvironmentFile=/opt/mailclient/.env
+ExecStart=/opt/mailclient/mailclient update-worker
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+

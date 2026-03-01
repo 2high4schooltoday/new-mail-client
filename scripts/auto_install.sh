@@ -1545,6 +1545,17 @@ set_env_var "$OUT_ENV" "SMTP_INSECURE_SKIP_VERIFY" "$SMTP_INSECURE_SKIP_VERIFY"
 
 set_env_var "$OUT_ENV" "BOOTSTRAP_ADMIN_EMAIL" ""
 set_env_var "$OUT_ENV" "BOOTSTRAP_ADMIN_PASSWORD" ""
+set_env_var "$OUT_ENV" "UPDATE_ENABLED" "true"
+set_env_var "$OUT_ENV" "UPDATE_REPO_OWNER" "2high4schooltoday"
+set_env_var "$OUT_ENV" "UPDATE_REPO_NAME" "new-mail-client"
+set_env_var "$OUT_ENV" "UPDATE_CHECK_INTERVAL_MIN" "60"
+set_env_var "$OUT_ENV" "UPDATE_HTTP_TIMEOUT_SEC" "10"
+set_env_var "$OUT_ENV" "UPDATE_GITHUB_TOKEN" ""
+set_env_var "$OUT_ENV" "UPDATE_BACKUP_KEEP" "3"
+set_env_var "$OUT_ENV" "UPDATE_BASE_DIR" "/var/lib/mailclient/update"
+set_env_var "$OUT_ENV" "UPDATE_INSTALL_DIR" "/opt/mailclient"
+set_env_var "$OUT_ENV" "UPDATE_SERVICE_NAME" "mailclient"
+set_env_var "$OUT_ENV" "UPDATE_SYSTEMD_UNIT_DIR" "/etc/systemd/system"
 
 if [[ -n "$DOVECOT_DRIVER" ]]; then
   set_env_var "$OUT_ENV" "DOVECOT_AUTH_DB_DRIVER" "$DOVECOT_DRIVER"
@@ -1622,9 +1633,14 @@ fi
 
 begin_stage "build" "Build Binary" "15"
 log "Building mailclient binary for linux/${GOARCH}"
+BUILD_VERSION="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || echo dev)"
+BUILD_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUILD_REPO="${MAILCLIENT_REPO_URL:-https://github.com/2high4schooltoday/new-mail-client}"
+BUILD_LDFLAGS="-X 'mailclient/internal/version.Version=${BUILD_VERSION}' -X 'mailclient/internal/version.Commit=${BUILD_COMMIT}' -X 'mailclient/internal/version.BuildTime=${BUILD_TIME}' -X 'mailclient/internal/version.SourceRepo=${BUILD_REPO}'"
 (
   cd "$ROOT_DIR"
-  GOOS=linux GOARCH="$GOARCH" go build -o "$ROOT_DIR/mailclient" ./cmd/server
+  GOOS=linux GOARCH="$GOARCH" go build -ldflags "$BUILD_LDFLAGS" -o "$ROOT_DIR/mailclient" ./cmd/server
 )
 finish_stage_ok
 
@@ -1633,6 +1649,7 @@ begin_stage "filesystem_and_user" "Filesystem and User Setup" "10"
 if ! id -u mailclient >/dev/null 2>&1; then
   "${PREFIX[@]}" useradd --system --home /var/lib/mailclient --shell /usr/sbin/nologin mailclient
 fi
+"${PREFIX[@]}" mkdir -p /var/lib/mailclient/update/request /var/lib/mailclient/update/status /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 
 "${PREFIX[@]}" install -m 0755 "$ROOT_DIR/mailclient" /opt/mailclient/mailclient
 "${PREFIX[@]}" install -m 0644 "$OUT_ENV" /opt/mailclient/.env
@@ -1640,12 +1657,18 @@ fi
 "${PREFIX[@]}" cp -R "$ROOT_DIR/web" /opt/mailclient/web
 "${PREFIX[@]}" cp -R "$ROOT_DIR/migrations" /opt/mailclient/migrations
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient.service" /etc/systemd/system/mailclient.service
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.service" /etc/systemd/system/mailclient-updater.service
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.path" /etc/systemd/system/mailclient-updater.path
 "${PREFIX[@]}" chown -R mailclient:mailclient /opt/mailclient /var/lib/mailclient
+"${PREFIX[@]}" chown root:root /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
+"${PREFIX[@]}" chmod 0750 /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
+"${PREFIX[@]}" chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
 finish_stage_ok
 
 begin_stage "service_install_start" "Service Install and Start" "10"
 "${PREFIX[@]}" systemctl daemon-reload
 "${PREFIX[@]}" systemctl enable --now mailclient
+"${PREFIX[@]}" systemctl enable --now mailclient-updater.path
 
 log "Service installed and started: mailclient"
 finish_stage_ok

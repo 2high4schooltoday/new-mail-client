@@ -24,6 +24,12 @@ const state = {
     retryTimer: 0,
     adminMailboxLogin: "",
   },
+  update: {
+    pollTimer: 0,
+    checking: false,
+    applying: false,
+    lastStatus: null,
+  },
 };
 
 const el = {
@@ -55,6 +61,15 @@ const el = {
   adminRegs: document.getElementById("admin-registrations"),
   adminUsers: document.getElementById("admin-users"),
   adminAudit: document.getElementById("admin-audit"),
+  updateCurrentVersion: document.getElementById("update-current-version"),
+  updateCurrentCommit: document.getElementById("update-current-commit"),
+  updateLatestVersion: document.getElementById("update-latest-version"),
+  updateAvailable: document.getElementById("update-available"),
+  updateLastChecked: document.getElementById("update-last-checked"),
+  updateApplyState: document.getElementById("update-apply-state"),
+  updateNote: document.getElementById("update-note"),
+  btnUpdateCheck: document.getElementById("btn-update-check"),
+  btnUpdateApply: document.getElementById("btn-update-apply"),
   setupBackIcon: document.getElementById("setup-back-icon"),
   setupClose: document.getElementById("setup-close"),
   setupForm: document.getElementById("form-setup"),
@@ -824,6 +839,105 @@ async function sendCompose(form) {
   clearComposeDraft();
 }
 
+function setUpdateNote(text, type = "info") {
+  if (!el.updateNote) return;
+  el.updateNote.textContent = text || "";
+  if (type === "error") el.updateNote.style.color = "var(--sig-err)";
+  else if (type === "ok") el.updateNote.style.color = "var(--sig-ok)";
+  else el.updateNote.style.color = "var(--fg-muted)";
+}
+
+function applyUpdateControls(status) {
+  if (!el.btnUpdateCheck || !el.btnUpdateApply) return;
+  const st = status || state.update.lastStatus || {};
+  const applyState = String(st.apply?.state || "idle");
+  const busy = applyState === "queued" || applyState === "in_progress";
+  el.btnUpdateCheck.disabled = state.update.checking;
+  const canApply = !!st.enabled && !!st.configured && !!st.update_available && !busy && !state.update.applying;
+  el.btnUpdateApply.disabled = !canApply;
+}
+
+function renderUpdateStatus(status) {
+  state.update.lastStatus = status || null;
+  if (!status) {
+    if (el.updateCurrentVersion) el.updateCurrentVersion.textContent = "-";
+    if (el.updateCurrentCommit) el.updateCurrentCommit.textContent = "-";
+    if (el.updateLatestVersion) el.updateLatestVersion.textContent = "-";
+    if (el.updateAvailable) el.updateAvailable.textContent = "-";
+    if (el.updateLastChecked) el.updateLastChecked.textContent = "-";
+    if (el.updateApplyState) el.updateApplyState.textContent = "idle";
+    setUpdateNote("Update status unavailable.", "error");
+    applyUpdateControls();
+    return;
+  }
+  if (el.updateCurrentVersion) el.updateCurrentVersion.textContent = status.current?.version || "-";
+  if (el.updateCurrentCommit) el.updateCurrentCommit.textContent = status.current?.commit || "-";
+  if (el.updateLatestVersion) el.updateLatestVersion.textContent = status.latest?.tag_name || "-";
+  if (el.updateAvailable) el.updateAvailable.textContent = status.update_available ? "YES" : "NO";
+  if (el.updateLastChecked) el.updateLastChecked.textContent = formatDate(status.last_checked_at) || "-";
+  if (el.updateApplyState) el.updateApplyState.textContent = String(status.apply?.state || "idle");
+
+  if (!status.enabled) {
+    setUpdateNote("Software update feature is disabled in configuration (UPDATE_ENABLED=false).", "info");
+  } else if (!status.configured) {
+    setUpdateNote("Updater is not configured on this host. Install mailclient-updater systemd units to enable one-click updates.", "error");
+  } else if (status.last_check_error) {
+    setUpdateNote(`Latest check failed: ${status.last_check_error}`, "error");
+  } else if (status.update_available && status.latest?.tag_name) {
+    setUpdateNote(`New release available: ${status.latest.tag_name}`, "ok");
+  } else {
+    setUpdateNote("No update currently available.", "info");
+  }
+  applyUpdateControls(status);
+}
+
+function isUpdateStateBusy(status) {
+  const stateName = String(status?.apply?.state || "");
+  return stateName === "queued" || stateName === "in_progress";
+}
+
+function stopUpdatePolling() {
+  if (!state.update.pollTimer) return;
+  clearInterval(state.update.pollTimer);
+  state.update.pollTimer = 0;
+}
+
+function startUpdatePolling() {
+  stopUpdatePolling();
+  state.update.pollTimer = window.setInterval(async () => {
+    try {
+      const status = await api("/api/v1/admin/system/update/status");
+      renderUpdateStatus(status);
+      if (!isUpdateStateBusy(status)) {
+        stopUpdatePolling();
+        if (status.apply?.state === "completed") {
+          setStatus(`UPDATE COMPLETED: ${status.apply?.to_version || "new version active"}`, "ok");
+        } else if (status.apply?.state === "rolled_back" || status.apply?.state === "failed") {
+          setStatus(`UPDATE FAILED: ${status.apply?.error || "rolled back"}`, "error");
+        }
+      }
+    } catch (err) {
+      setUpdateNote(`Failed to refresh update status: ${err.message}`, "error");
+    }
+  }, 2500);
+}
+
+async function loadUpdateStatus(forceCheck = false) {
+  if (!state.user || state.user.role !== "admin") {
+    throw new Error("admin role required");
+  }
+  const status = forceCheck
+    ? await api("/api/v1/admin/system/update/check", { method: "POST", json: {} })
+    : await api("/api/v1/admin/system/update/status");
+  renderUpdateStatus(status);
+  if (isUpdateStateBusy(status)) {
+    startUpdatePolling();
+  } else {
+    stopUpdatePolling();
+  }
+  return status;
+}
+
 async function loadAdmin() {
   if (!state.user) {
     throw new Error("Sign in required");
@@ -833,6 +947,12 @@ async function loadAdmin() {
     api("/api/v1/admin/users?page=1&page_size=100"),
     api("/api/v1/admin/audit-log?page=1&page_size=100"),
   ]);
+  try {
+    await loadUpdateStatus(false);
+  } catch (err) {
+    renderUpdateStatus(null);
+    setUpdateNote(`Unable to load updater status: ${err.message}`, "error");
+  }
 
   el.adminRegs.innerHTML = "";
   for (const r of regs.items || []) {
@@ -1176,6 +1296,55 @@ function bindUI() {
     }
   });
 
+  if (el.btnUpdateCheck) {
+    el.btnUpdateCheck.onclick = async () => {
+      if (!state.user || state.user.role !== "admin") return;
+      state.update.checking = true;
+      applyUpdateControls();
+      try {
+        await loadUpdateStatus(true);
+        setStatus("UPDATE CHECK COMPLETE", "ok");
+      } catch (err) {
+        setUpdateNote(`Update check failed: ${err.message}`, "error");
+        setStatus(err.message, "error");
+      } finally {
+        state.update.checking = false;
+        applyUpdateControls();
+      }
+    };
+  }
+
+  if (el.btnUpdateApply) {
+    el.btnUpdateApply.onclick = async () => {
+      if (!state.user || state.user.role !== "admin") return;
+      state.update.applying = true;
+      applyUpdateControls();
+      try {
+        const targetVersion = state.update.lastStatus?.latest?.tag_name || "";
+        await api("/api/v1/admin/system/update/apply", {
+          method: "POST",
+          json: targetVersion ? { target_version: targetVersion } : {},
+        });
+        setStatus(`UPDATE QUEUED${targetVersion ? ` (${targetVersion})` : ""}`, "info");
+        await loadUpdateStatus(false);
+        startUpdatePolling();
+      } catch (err) {
+        if (err.code === "updater_not_configured") {
+          setUpdateNote("Updater is not configured on this host. Install mailclient-updater units first.", "error");
+        } else if (err.code === "update_in_progress") {
+          setUpdateNote("An update is already running. Waiting for completion.", "info");
+          startUpdatePolling();
+        } else {
+          setUpdateNote(`Update request failed: ${err.message}`, "error");
+        }
+        setStatus(err.message, "error");
+      } finally {
+        state.update.applying = false;
+        applyUpdateControls();
+      }
+    };
+  }
+
   if (el.composeForm) {
     restoreComposeDraft(el.composeForm);
     const persistDraft = () => saveComposeDraft(el.composeForm);
@@ -1231,6 +1400,7 @@ function bindUI() {
     } catch {
       // ignore
     }
+    stopUpdatePolling();
     state.user = null;
     state.selectedMessage = null;
     applyNavVisibility();
