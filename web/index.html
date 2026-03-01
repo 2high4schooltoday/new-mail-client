@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="paper-light">
+<html lang="en" data-theme="machine-dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -19,17 +19,17 @@
           <h1>Despatch</h1>
           <p class="hint">Mail operations console</p>
         </div>
+        <nav class="tabs" aria-label="Primary">
+          <button id="tab-setup" class="tab" type="button">Setup</button>
+          <button id="tab-auth" class="tab active" type="button">Auth</button>
+          <button id="tab-mail" class="tab" type="button">Mail</button>
+          <button id="tab-admin" class="tab" type="button">Admin</button>
+        </nav>
         <div class="topbar-tools">
-          <button id="btn-theme" class="cmd-btn cmd-btn--dense theme-toggle" type="button" aria-label="Toggle theme">Theme: Paper</button>
+          <button id="btn-theme" class="cmd-btn cmd-btn--dense theme-toggle" type="button" aria-label="Toggle theme">Theme: Machine</button>
           <button id="btn-logout" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Sign Out</button>
         </div>
       </div>
-      <nav class="tabs" aria-label="Primary">
-        <button id="tab-setup" class="tab" type="button">Setup</button>
-        <button id="tab-auth" class="tab active" type="button">Auth</button>
-        <button id="tab-mail" class="tab" type="button">Mail</button>
-        <button id="tab-admin" class="tab" type="button">Admin</button>
-      </nav>
     </header>
 
     <main>
@@ -218,7 +218,7 @@
             <div class="pane-head">
               <h3>Mailboxes</h3>
             </div>
-            <ul id="mailboxes" class="list mailbox-list"></ul>
+            <ul id="mailboxes" class="list mailbox-list" role="listbox" aria-label="Mailboxes" tabindex="0"></ul>
           </aside>
 
           <section id="mail-pane-messages" class="panel mail-pane mail-pane--messages" tabindex="-1">
@@ -230,7 +230,7 @@
               <input id="search-input" type="text" placeholder="Search subject, body, sender">
               <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
             </div>
-            <ul id="messages" class="message-list" role="listbox" aria-label="Messages"></ul>
+            <ul id="messages" class="message-list" role="listbox" aria-label="Messages" tabindex="0"></ul>
           </section>
 
           <section id="mail-pane-reader" class="panel mail-pane mail-pane--reader" tabindex="-1">
@@ -241,7 +241,7 @@
             <div id="message-meta" class="meta"></div>
             <pre id="message-body" class="message-body">Select a message.</pre>
             <div id="attachment-list" class="attachments"></div>
-            <div class="actions">
+            <div class="actions reader-commands">
               <button id="btn-flag" class="cmd-btn cmd-btn--dense" type="button">Flag</button>
               <button id="btn-mark-seen" class="cmd-btn cmd-btn--dense" type="button">Mark Seen</button>
               <button id="btn-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Move To Trash</button>
@@ -367,6 +367,15 @@
                 <h3>Audit Log</h3>
                 <div class="section-tools">
                   <input id="admin-audit-q" type="text" placeholder="Search action, target, metadata">
+                  <select id="admin-audit-action">
+                    <option value="all">All actions</option>
+                    <option value="registration.approve">Registration approve</option>
+                    <option value="registration.reject">Registration reject</option>
+                    <option value="user.suspend">User suspend</option>
+                    <option value="user.unsuspend">User unsuspend</option>
+                    <option value="user.reset_password">User password reset</option>
+                    <option value="user.retry_provision">User provision retry</option>
+                  </select>
                   <input id="admin-audit-actor" type="text" placeholder="Actor email">
                   <input id="admin-audit-target" type="text" placeholder="Target">
                   <input id="admin-audit-from" type="date">

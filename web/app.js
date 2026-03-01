@@ -3,7 +3,7 @@ const state = {
   mailbox: "INBOX",
   messages: [],
   selectedMessage: null,
-  theme: "paper-light",
+  theme: "machine-dark",
   auth: {
     lastUnauthorizedAtMs: 0,
     lastUnauthorizedCode: "",
@@ -67,6 +67,7 @@ const state = {
     },
     audit: {
       q: "",
+      action: "all",
       actor: "",
       target: "",
       from: "",
@@ -161,6 +162,7 @@ const el = {
   btnUserUnsuspend: document.getElementById("btn-user-unsuspend"),
   adminUserCheckAll: document.getElementById("admin-user-check-all"),
   adminAuditQ: document.getElementById("admin-audit-q"),
+  adminAuditAction: document.getElementById("admin-audit-action"),
   adminAuditActor: document.getElementById("admin-audit-actor"),
   adminAuditTarget: document.getElementById("admin-audit-target"),
   adminAuditFrom: document.getElementById("admin-audit-from"),
@@ -235,7 +237,7 @@ const ThemeController = {
       this.setTheme(forced);
       return state.theme;
     }
-    this.setTheme(localStorage.getItem("ui.theme") || "paper-light");
+    this.setTheme(localStorage.getItem("ui.theme") || "machine-dark");
     return state.theme;
   },
 };
@@ -304,6 +306,56 @@ function setActiveAuthPane(pane) {
     panel.classList.toggle("hidden", hidden);
     panel.setAttribute("aria-hidden", hidden ? "true" : "false");
   });
+}
+
+function safeDomID(prefix, raw, fallback = "item") {
+  const stem = String(raw || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${prefix}${stem || fallback}`;
+}
+
+function syncMailboxActiveDescendant() {
+  if (!el.mailboxes) return;
+  const buttons = mailboxesButtons();
+  const active = buttons.find((node) => String(node.dataset.mailboxName || "") === state.mailbox) || null;
+  for (const button of buttons) {
+    const isActive = button === active;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+    button.tabIndex = -1;
+  }
+  if (active) {
+    if (!active.id) {
+      active.id = safeDomID("mailbox-option-", active.dataset.mailboxName || "", `${buttons.indexOf(active)}`);
+    }
+    el.mailboxes.setAttribute("aria-activedescendant", active.id);
+  } else {
+    el.mailboxes.removeAttribute("aria-activedescendant");
+  }
+}
+
+function syncMessageActiveDescendant() {
+  if (!el.messages) return;
+  const buttons = messageButtons();
+  const selectedID = String(state.selectedMessage?.id || "");
+  const active = buttons.find((node) => String(node.dataset.messageId || "") === selectedID) || null;
+  for (const button of buttons) {
+    const isActive = button === active;
+    const row = button.closest(".message-row");
+    if (row) row.classList.toggle("active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+    button.tabIndex = -1;
+  }
+  if (active) {
+    if (!active.id) {
+      active.id = safeDomID("message-option-", active.dataset.messageId || "", `${buttons.indexOf(active)}`);
+    }
+    el.messages.setAttribute("aria-activedescendant", active.id);
+  } else {
+    el.messages.removeAttribute("aria-activedescendant");
+  }
 }
 
 function getCookie(name) {
@@ -879,16 +931,25 @@ function paneElement(name) {
   return el.mailPaneReader;
 }
 
+function paneFocusElement(name) {
+  if (name === "mailboxes") return el.mailboxes || paneElement(name);
+  if (name === "messages") return el.messages || paneElement(name);
+  return paneElement(name);
+}
+
 function focusMailPane(name) {
   const next = ["mailboxes", "messages", "reader"].includes(String(name || "")) ? String(name) : "mailboxes";
   state.ui.activeKeyboardPane = next;
   [el.mailPaneMailboxes, el.mailPaneMessages, el.mailPaneReader]
     .filter(Boolean)
     .forEach((node) => node.classList.remove("is-keyboard-pane"));
-  const target = paneElement(next);
-  if (target) {
-    target.classList.add("is-keyboard-pane");
-    target.focus({ preventScroll: true });
+  const pane = paneElement(next);
+  const focusTarget = paneFocusElement(next);
+  if (pane) {
+    pane.classList.add("is-keyboard-pane");
+  }
+  if (focusTarget && typeof focusTarget.focus === "function") {
+    focusTarget.focus({ preventScroll: true });
   }
 }
 
@@ -906,6 +967,8 @@ function setActiveMailPane(name, opts = {}) {
   if (el.mailBackToMessages) {
     el.mailBackToMessages.classList.toggle("hidden", !isMobileLayout() || next !== "reader");
   }
+  syncMailboxActiveDescendant();
+  syncMessageActiveDescendant();
   if (opts.focus !== false) {
     focusMailPane(next);
   }
@@ -1352,18 +1415,23 @@ async function loadMailboxes() {
   }
   const data = await api("/api/v1/mailboxes");
   el.mailboxes.innerHTML = "";
-  for (const mb of data) {
+  for (const [index, mb] of data.entries()) {
     const li = document.createElement("li");
+    li.className = "mailbox-row";
     const btn = document.createElement("button");
     btn.innerHTML = `<span class="mailbox-name">${escapeHtml(mb.name)}</span><span class="mailbox-count">${Number(mb.unread || 0)}/${Number(mb.messages || 0)}</span>`;
     btn.className = mb.name === state.mailbox ? "active" : "";
     btn.dataset.mailboxName = mb.name;
+    btn.id = safeDomID("mailbox-option-", mb.name, `${index}`);
     btn.type = "button";
+    btn.setAttribute("role", "option");
+    btn.setAttribute("aria-selected", mb.name === state.mailbox ? "true" : "false");
+    btn.tabIndex = -1;
     btn.onclick = async () => {
       state.mailbox = mb.name;
       state.selectedMessage = null;
       el.body.textContent = "Select a message.";
-      el.meta.textContent = "";
+      el.meta.innerHTML = "";
       el.attachments.textContent = "";
       await loadMessages();
       await loadMailboxes();
@@ -1372,6 +1440,7 @@ async function loadMailboxes() {
     li.appendChild(btn);
     el.mailboxes.appendChild(li);
   }
+  syncMailboxActiveDescendant();
 }
 
 function renderMessages(items) {
@@ -1394,15 +1463,19 @@ function renderMessages(items) {
     btn.type = "button";
     btn.className = "message-row-btn";
     btn.dataset.messageId = m.id;
+    btn.id = safeDomID("message-option-", m.id, "message");
     btn.setAttribute("role", "option");
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
-    btn.innerHTML = `<span class="message-from">${escapeHtml(m.from || "(unknown sender)")}</span>
+    btn.tabIndex = -1;
+    btn.innerHTML = `<span class="message-mark" aria-hidden="true"></span>
+      <span class="message-from">${escapeHtml(m.from || "(unknown sender)")}</span>
       <span class="message-subject">${escapeHtml(m.subject || "(no subject)")}</span>
       <span class="message-date">${escapeHtml(formatDate(m.date))}</span>`;
     btn.onclick = () => openMessage(m.id);
     li.appendChild(btn);
     el.messages.appendChild(li);
   }
+  syncMessageActiveDescendant();
 }
 
 async function loadMessages() {
@@ -1420,10 +1493,13 @@ async function openMessage(id) {
   }
   const m = await api(`/api/v1/messages/${encodeURIComponent(id)}`);
   state.selectedMessage = m;
-  el.meta.innerHTML = `<div><b>From:</b> ${escapeHtml(m.from || "")}</div>
-    <div><b>To:</b> ${escapeHtml((m.to || []).join(", "))}</div>
-    <div><b>Subject:</b> ${escapeHtml(m.subject || "")}</div>
-    <div><b>Date:</b> ${formatDate(m.date)}</div>`;
+  const metaRows = [
+    ["From", escapeHtml(m.from || "-")],
+    ["To", escapeHtml((m.to || []).join(", ") || "-")],
+    ["Subject", escapeHtml(m.subject || "-")],
+    ["Date", escapeHtml(formatDate(m.date) || "-")],
+  ];
+  el.meta.innerHTML = metaRows.map(([label, value]) => `<div><span class="meta-label">${label}</span><span class="meta-value">${value}</span></div>`).join("");
   el.body.textContent = m.body || "(empty)";
 
   el.attachments.innerHTML = "";
@@ -1435,6 +1511,7 @@ async function openMessage(id) {
     el.attachments.appendChild(link);
   }
   renderMessages(state.messages);
+  syncMessageActiveDescendant();
   setActiveMailPane("reader");
 }
 
@@ -1849,6 +1926,7 @@ async function loadAdminAudit() {
   const f = state.admin.audit;
   const query = adminQuery({
     q: f.q,
+    action: f.action,
     actor: f.actor,
     target: f.target,
     from: f.from,
@@ -1917,11 +1995,11 @@ async function runBulkUserAction(action) {
 }
 
 function mailboxesButtons() {
-  return Array.from(el.mailboxes.querySelectorAll("button"));
+  return Array.from(el.mailboxes.querySelectorAll("button[role='option']"));
 }
 
 function messageButtons() {
-  return Array.from(el.messages.querySelectorAll(".message-row-btn"));
+  return Array.from(el.messages.querySelectorAll(".message-row-btn[role='option']"));
 }
 
 async function moveMailboxSelection(delta) {
@@ -1931,8 +2009,11 @@ async function moveMailboxSelection(delta) {
   const next = Math.max(0, Math.min(buttons.length - 1, index + delta));
   const nextBtn = buttons[next];
   if (nextBtn) {
-    nextBtn.focus();
+    if (el.mailboxes && typeof el.mailboxes.focus === "function") {
+      el.mailboxes.focus({ preventScroll: true });
+    }
     nextBtn.click();
+    syncMailboxActiveDescendant();
   }
 }
 
@@ -1945,8 +2026,11 @@ async function moveMessageSelection(delta) {
   const next = Math.max(0, Math.min(buttons.length - 1, index + delta));
   const nextBtn = buttons[next];
   if (nextBtn) {
-    nextBtn.focus();
+    if (el.messages && typeof el.messages.focus === "function") {
+      el.messages.focus({ preventScroll: true });
+    }
     nextBtn.click();
+    syncMessageActiveDescendant();
   }
 }
 
@@ -2001,24 +2085,18 @@ async function handleMailKeyboard(event) {
   if (event.key === "Enter") {
     if (state.ui.activeKeyboardPane === "mailboxes") {
       event.preventDefault();
-      const active = document.activeElement;
-      if (active && active.closest && active.closest("#mailboxes")) {
-        active.click();
-      } else {
-        const current = mailboxesButtons().find((node) => String(node.dataset.mailboxName || "") === state.mailbox);
-        if (current) current.click();
-      }
+      const activeID = el.mailboxes?.getAttribute("aria-activedescendant") || "";
+      const active = activeID ? document.getElementById(activeID) : null;
+      const current = active || mailboxesButtons().find((node) => String(node.dataset.mailboxName || "") === state.mailbox);
+      if (current) current.click();
       return;
     }
     if (state.ui.activeKeyboardPane === "messages") {
       event.preventDefault();
-      const active = document.activeElement;
-      if (active && active.closest && active.closest("#messages")) {
-        active.click();
-      } else {
-        const current = messageButtons().find((node) => String(node.dataset.messageId || "") === String(state.selectedMessage?.id || ""));
-        if (current) current.click();
-      }
+      const activeID = el.messages?.getAttribute("aria-activedescendant") || "";
+      const active = activeID ? document.getElementById(activeID) : null;
+      const current = active || messageButtons().find((node) => String(node.dataset.messageId || "") === String(state.selectedMessage?.id || ""));
+      if (current) current.click();
     }
   }
 
@@ -2322,6 +2400,7 @@ function bindUI() {
   if (el.btnAdminAuditApply) {
     el.btnAdminAuditApply.onclick = async () => {
       state.admin.audit.q = String(el.adminAuditQ?.value || "").trim();
+      state.admin.audit.action = String(el.adminAuditAction?.value || "all").trim();
       state.admin.audit.actor = String(el.adminAuditActor?.value || "").trim();
       state.admin.audit.target = String(el.adminAuditTarget?.value || "").trim();
       state.admin.audit.from = String(el.adminAuditFrom?.value || "").trim();
@@ -2457,6 +2536,17 @@ function bindUI() {
       if (pane === el.mailPaneMailboxes) focusMailPane("mailboxes");
       if (pane === el.mailPaneMessages) focusMailPane("messages");
       if (pane === el.mailPaneReader) focusMailPane("reader");
+    });
+  });
+  [el.mailboxes, el.messages].forEach((list) => {
+    if (!list) return;
+    list.addEventListener("focus", () => {
+      if (list === el.mailboxes) focusMailPane("mailboxes");
+      if (list === el.messages) focusMailPane("messages");
+    });
+    list.addEventListener("click", () => {
+      if (list === el.mailboxes) focusMailPane("mailboxes");
+      if (list === el.messages) focusMailPane("messages");
     });
   });
   window.addEventListener("resize", () => setActiveMailPane(state.ui.activeMailPane, { focus: false }));

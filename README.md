@@ -30,6 +30,13 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 - Persistent failed-login counters in SQLite `rate_limit_events`.
 - No heavy background workers.
 
+## UI release gates
+Run these before packaging a release:
+- `go test ./...`
+- `./scripts/check_warm_palette.sh`
+- `./scripts/check_ui_contract.sh`
+- `./scripts/check_surface_depth.sh`
+
 ## Quick start
 1. Run interactive installer:
    - `./scripts/auto_install.sh`
