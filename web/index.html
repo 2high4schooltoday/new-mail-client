@@ -57,7 +57,13 @@
           <form id="form-register" class="stack">
             <label>Email <input name="email" type="email" required autocomplete="email"></label>
             <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
-            <label>Captcha Token (if enabled)<input name="captcha_token" type="text"></label>
+            <div id="captcha-shell" class="captcha-shell hidden">
+              <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
+              <div id="captcha-widget-container" class="captcha-widget-container"></div>
+              <label id="captcha-manual-wrap" class="hidden">Captcha Token (manual fallback)<input id="captcha-token-manual" type="text" autocomplete="off"></label>
+              <p id="captcha-error" class="hint"></p>
+            </div>
+            <input id="captcha-token-hidden" name="captcha_token" type="hidden" value="">
             <button class="cmd-btn" type="submit">Submit For Approval</button>
           </form>
         </article>

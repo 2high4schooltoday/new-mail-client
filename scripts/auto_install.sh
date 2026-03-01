@@ -142,13 +142,13 @@ run_nonfatal_step() {
 }
 
 configure_selected_proxy() {
-  local server="$1" server_name="$2" upstream="$3" tls_enabled="$4" cert_file="$5" key_file="$6"
+  local server="$1" server_name="$2" upstream="$3" tls_enabled="$4" cert_file="$5" key_file="$6" cap_upstream="${7:-}"
   case "$server" in
     nginx)
-      setup_nginx_proxy "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file"
+      setup_nginx_proxy "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" "$cap_upstream"
       ;;
     apache2)
-      setup_apache_proxy "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file"
+      setup_apache_proxy "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" "$cap_upstream"
       ;;
     *)
       err "Unknown proxy server: $server"
@@ -203,6 +203,9 @@ env_key_for_input_prompt() {
     "Public server name for reverse proxy") echo "DESPATCH_PROXY_SERVER_NAME" ;;
     "TLS certificate file") echo "DESPATCH_PROXY_CERT" ;;
     "TLS private key file") echo "DESPATCH_PROXY_KEY" ;;
+    "CAP site key") echo "DESPATCH_CAPTCHA_SITE_KEY" ;;
+    "CAP verification secret") echo "DESPATCH_CAPTCHA_SECRET" ;;
+    "CAP upstream host:port for reverse proxy /cap/ route") echo "DESPATCH_CAPTCHA_CAP_UPSTREAM" ;;
     "Dovecot auth backend mode (pam or sql)") echo "DESPATCH_DOVECOT_AUTH_MODE" ;;
     "Dovecot auth DB driver (mysql or pgx)") echo "DESPATCH_DOVECOT_AUTH_DB_DRIVER" ;;
     "Dovecot auth DB DSN") echo "DESPATCH_DOVECOT_AUTH_DB_DSN" ;;
@@ -226,6 +229,7 @@ env_key_for_yes_no_prompt() {
     "Install apache2 automatically now?") echo "DESPATCH_INSTALL_APACHE2" ;;
     "Continue without reverse proxy (direct mode on :8080)?") echo "DESPATCH_PROXY_FALLBACK_DIRECT" ;;
     "Enable TLS in reverse proxy config now (requires existing cert files)?") echo "DESPATCH_PROXY_TLS" ;;
+    "Enable self-hosted CAP captcha for registration now?") echo "DESPATCH_CAPTCHA_ENABLE_CAP" ;;
     "Re-enter TLS paths?") echo "DESPATCH_RETRY_TLS_PATHS" ;;
     "Enter Dovecot SQL settings manually now?") echo "DESPATCH_SQL_MANUAL" ;;
     "Install missing dependencies automatically with apt?") echo "DESPATCH_AUTO_INSTALL_DEPS" ;;
@@ -1022,7 +1026,21 @@ ensure_service_dependencies() {
 }
 
 render_nginx_conf() {
-  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5"
+  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5" cap_upstream="${6:-}"
+  local cap_location_block=""
+  if [[ -n "$cap_upstream" ]]; then
+    cap_location_block=$(cat <<EOF
+    location /cap/ {
+        proxy_pass http://${cap_upstream}/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+EOF
+)
+  fi
   if [[ "$tls_enabled" == "1" ]]; then
     cat <<EOF
 server {
@@ -1043,6 +1061,7 @@ server {
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
 
+${cap_location_block}
     location / {
         proxy_pass http://${upstream};
         proxy_http_version 1.1;
@@ -1065,6 +1084,7 @@ server {
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
 
+${cap_location_block}
     location / {
         proxy_pass http://${upstream};
         proxy_http_version 1.1;
@@ -1078,7 +1098,15 @@ EOF
 }
 
 render_apache_conf() {
-  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5"
+  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5" cap_upstream="${6:-}"
+  local cap_proxy_block=""
+  if [[ -n "$cap_upstream" ]]; then
+    cap_proxy_block=$(cat <<EOF
+    ProxyPass /cap/ http://${cap_upstream}/ nocanon
+    ProxyPassReverse /cap/ http://${cap_upstream}/
+EOF
+)
+  fi
   cat <<EOF
 <VirtualHost *:80>
     ServerName ${server_name}
@@ -1088,6 +1116,7 @@ render_apache_conf() {
     AllowEncodedSlashes NoDecode
 
     RequestHeader set X-Forwarded-Proto expr=%{REQUEST_SCHEME}
+${cap_proxy_block}
     ProxyPass / http://${upstream}/ nocanon
     ProxyPassReverse / http://${upstream}/
 
@@ -1112,6 +1141,7 @@ EOF
     AllowEncodedSlashes NoDecode
 
     RequestHeader set X-Forwarded-Proto "https"
+${cap_proxy_block}
     ProxyPass / http://${upstream}/ nocanon
     ProxyPassReverse / http://${upstream}/
 
@@ -1125,7 +1155,7 @@ EOF
 }
 
 setup_nginx_proxy() {
-  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5"
+  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5" cap_upstream="${6:-}"
   local conf="/etc/nginx/sites-available/mailclient.conf"
   local enabled="/etc/nginx/sites-enabled/mailclient.conf"
   local tmp
@@ -1137,7 +1167,7 @@ setup_nginx_proxy() {
     err "Failed to create temporary file for nginx config."
     return 1
   fi
-  render_nginx_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" >"$tmp"
+  render_nginx_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" "$cap_upstream" >"$tmp"
 
   if ! "${PREFIX[@]}" mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled; then
     err "Failed to create nginx site directories."
@@ -1177,7 +1207,7 @@ setup_nginx_proxy() {
 }
 
 setup_apache_proxy() {
-  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5"
+  local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5" cap_upstream="${6:-}"
   local conf="/etc/apache2/sites-available/mailclient.conf"
   local tmp
   if ! have_cmd apache2ctl || ! have_cmd a2enmod || ! have_cmd a2ensite; then
@@ -1188,7 +1218,7 @@ setup_apache_proxy() {
     err "Failed to create temporary file for apache2 config."
     return 1
   fi
-  render_apache_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" >"$tmp"
+  render_apache_conf "$server_name" "$upstream" "$tls_enabled" "$cert_file" "$key_file" "$cap_upstream" >"$tmp"
 
   if ! "${PREFIX[@]}" install -m 0644 "$tmp" "$conf"; then
     err "Failed to install apache2 config: $conf"
@@ -1324,6 +1354,13 @@ PROXY_TLS=0
 PROXY_CERT=""
 PROXY_KEY=""
 DEPLOY_MODE="direct"
+CAPTCHA_ENABLED="false"
+CAPTCHA_PROVIDER="turnstile"
+CAPTCHA_SITE_KEY=""
+CAPTCHA_WIDGET_API_URL=""
+CAPTCHA_VERIFY_URL=""
+CAPTCHA_SECRET=""
+CAPTCHA_CAP_PROXY_UPSTREAM=""
 
 BASE_DOMAIN="$(prompt_input "Primary mail domain (used by first-run web setup)" "$BASE_DOMAIN_DEFAULT")"
 LISTEN_ADDR="$(prompt_input "HTTP listen address" "$LISTEN_ADDR_DEFAULT")"
@@ -1393,6 +1430,18 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
         fi
       fi
     fi
+  fi
+fi
+
+if [[ "$PROXY_SETUP" -eq 1 ]]; then
+  if prompt_yes_no "Enable self-hosted CAP captcha for registration now?" 0; then
+    CAPTCHA_ENABLED="true"
+    CAPTCHA_PROVIDER="cap"
+    CAPTCHA_SITE_KEY="$(prompt_input "CAP site key" "cap-site-key")"
+    CAPTCHA_SECRET="$(prompt_input "CAP verification secret" "$(generate_secret)")"
+    CAPTCHA_CAP_PROXY_UPSTREAM="$(prompt_input "CAP upstream host:port for reverse proxy /cap/ route" "127.0.0.1:8077")"
+    CAPTCHA_WIDGET_API_URL="/cap/${CAPTCHA_SITE_KEY}/"
+    CAPTCHA_VERIFY_URL="http://${CAPTCHA_CAP_PROXY_UPSTREAM}/${CAPTCHA_SITE_KEY}/siteverify"
   fi
 fi
 
@@ -1556,6 +1605,12 @@ set_env_var "$OUT_ENV" "UPDATE_BASE_DIR" "/var/lib/mailclient/update"
 set_env_var "$OUT_ENV" "UPDATE_INSTALL_DIR" "/opt/mailclient"
 set_env_var "$OUT_ENV" "UPDATE_SERVICE_NAME" "mailclient"
 set_env_var "$OUT_ENV" "UPDATE_SYSTEMD_UNIT_DIR" "/etc/systemd/system"
+set_env_var "$OUT_ENV" "CAPTCHA_ENABLED" "$CAPTCHA_ENABLED"
+set_env_var "$OUT_ENV" "CAPTCHA_PROVIDER" "$CAPTCHA_PROVIDER"
+set_env_var "$OUT_ENV" "CAPTCHA_SITE_KEY" "$CAPTCHA_SITE_KEY"
+set_env_var "$OUT_ENV" "CAPTCHA_WIDGET_API_URL" "$CAPTCHA_WIDGET_API_URL"
+set_env_var "$OUT_ENV" "CAPTCHA_VERIFY_URL" "$CAPTCHA_VERIFY_URL"
+set_env_var "$OUT_ENV" "CAPTCHA_SECRET" "$CAPTCHA_SECRET"
 
 if [[ -n "$DOVECOT_DRIVER" ]]; then
   set_env_var "$OUT_ENV" "DOVECOT_AUTH_DB_DRIVER" "$DOVECOT_DRIVER"
@@ -1578,6 +1633,9 @@ log "Deployment mode: $DEPLOY_MODE"
 log "Cookie secure mode: $COOKIE_SECURE_MODE"
 if [[ "$DEPLOY_MODE" == "proxy" && "$PROXY_TLS" != "1" ]]; then
   warn "Reverse proxy TLS is disabled; cookies are configured for HTTP transport (COOKIE_SECURE_MODE=never)."
+fi
+if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
+  log "CAPTCHA provider: cap (widget=${CAPTCHA_WIDGET_API_URL}, verify=${CAPTCHA_VERIFY_URL})"
 fi
 log "Dovecot auth mode: $DOVECOT_AUTH_MODE"
 if [[ -n "$SQL_CONF" ]]; then
@@ -1688,7 +1746,7 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
     fallback_to_direct_mode || true
   else
     APP_UPSTREAM="$LISTEN_ADDR"
-    if configure_selected_proxy "$PROXY_SERVER" "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY"; then
+    if configure_selected_proxy "$PROXY_SERVER" "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY" "$CAPTCHA_CAP_PROXY_UPSTREAM"; then
       log "Reverse proxy configured: ${PROXY_SERVER} (${PROXY_SERVER_NAME})"
       if [[ "$PROXY_SERVER" == "nginx" ]]; then
         log "Reverse proxy config path: /etc/nginx/sites-available/mailclient.conf"

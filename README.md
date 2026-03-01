@@ -149,6 +149,27 @@ Relevant `.env` options:
 - `UPDATE_GITHUB_TOKEN` (optional)
 - `UPDATE_BACKUP_KEEP`
 
+## CAPTCHA with CAP standalone (Ubuntu)
+Registration supports `turnstile`, `hcaptcha`, and self-hosted [`tiagozip/cap`](https://github.com/tiagozip/cap).
+
+When `CAPTCHA_PROVIDER=cap`, frontend loads widget config from:
+- `GET /api/v1/public/captcha/config`
+
+Recommended Ubuntu self-host setup:
+1. Run CAP standalone service (Docker or systemd) on localhost, for example `127.0.0.1:8077`.
+2. Proxy `/cap/` publicly through your reverse proxy to CAP service.
+3. Configure app env:
+   - `CAPTCHA_ENABLED=true`
+   - `CAPTCHA_PROVIDER=cap`
+   - `CAPTCHA_SITE_KEY=<your-site-key>`
+   - `CAPTCHA_WIDGET_API_URL=/cap/<your-site-key>/`
+   - `CAPTCHA_VERIFY_URL=http://127.0.0.1:8077/<your-site-key>/siteverify`
+   - `CAPTCHA_SECRET=<your-secret>`
+
+Failure policy is fail-closed for registration:
+- Missing/invalid challenge: `captcha_required` (`400`)
+- Verification backend unavailable: `captcha_unavailable` (`503`)
+
 ## SMTP sender diagnostics (Ubuntu)
 If sending fails with `smtp_sender_rejected` or `smtp_error` related to sender identity, run:
 
@@ -189,6 +210,7 @@ Adjust table/column env vars if your auth schema differs.
 Base: `/api/v1`
 
 - Auth/registration:
+  - `GET /public/captcha/config`
   - `GET /setup/status`
   - `POST /setup/complete`
   - `POST /register`

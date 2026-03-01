@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +33,8 @@ type Config struct {
 
 	CaptchaEnabled   bool
 	CaptchaProvider  string
+	CaptchaSiteKey   string
+	CaptchaWidgetURL string
 	CaptchaVerifyURL string
 	CaptchaSecret    string
 
@@ -116,7 +120,9 @@ func Load() (Config, error) {
 		CORSAllowedOrigins:       envCSV("CORS_ALLOWED_ORIGINS"),
 		CaptchaEnabled:           envBool("CAPTCHA_ENABLED", false),
 		CaptchaProvider:          strings.ToLower(env("CAPTCHA_PROVIDER", "turnstile")),
-		CaptchaVerifyURL:         env("CAPTCHA_VERIFY_URL", ""),
+		CaptchaSiteKey:           strings.TrimSpace(env("CAPTCHA_SITE_KEY", "")),
+		CaptchaWidgetURL:         strings.TrimSpace(env("CAPTCHA_WIDGET_API_URL", "")),
+		CaptchaVerifyURL:         strings.TrimSpace(env("CAPTCHA_VERIFY_URL", "")),
 		CaptchaSecret:            env("CAPTCHA_SECRET", ""),
 		PasswordMinLength:        envInt("PASSWORD_MIN_LENGTH", 12),
 		PasswordMaxLength:        envInt("PASSWORD_MAX_LENGTH", 128),
@@ -202,15 +208,36 @@ func Load() (Config, error) {
 		if strings.TrimSpace(cfg.CaptchaSecret) == "" {
 			return Config{}, fmt.Errorf("CAPTCHA_SECRET is required when CAPTCHA_ENABLED=true")
 		}
-		if strings.TrimSpace(cfg.CaptchaVerifyURL) == "" {
-			switch cfg.CaptchaProvider {
-			case "turnstile", "":
+		switch cfg.CaptchaProvider {
+		case "turnstile", "":
+			cfg.CaptchaProvider = "turnstile"
+			if strings.TrimSpace(cfg.CaptchaVerifyURL) == "" {
 				cfg.CaptchaVerifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-			case "hcaptcha":
-				cfg.CaptchaVerifyURL = "https://hcaptcha.com/siteverify"
-			default:
-				return Config{}, fmt.Errorf("unsupported CAPTCHA_PROVIDER: %s", cfg.CaptchaProvider)
 			}
+		case "hcaptcha":
+			if strings.TrimSpace(cfg.CaptchaVerifyURL) == "" {
+				cfg.CaptchaVerifyURL = "https://hcaptcha.com/siteverify"
+			}
+		case "cap":
+			if cfg.CaptchaSiteKey == "" {
+				return Config{}, fmt.Errorf("CAPTCHA_SITE_KEY is required when CAPTCHA_PROVIDER=cap")
+			}
+			if cfg.CaptchaWidgetURL == "" {
+				cfg.CaptchaWidgetURL = "/cap/" + path.Clean(cfg.CaptchaSiteKey) + "/"
+			}
+			cfg.CaptchaWidgetURL = ensureTrailingSlash(cfg.CaptchaWidgetURL)
+			if strings.TrimSpace(cfg.CaptchaVerifyURL) == "" {
+				if isAbsoluteHTTPURL(cfg.CaptchaWidgetURL) {
+					cfg.CaptchaVerifyURL = cfg.CaptchaWidgetURL + "siteverify"
+				} else {
+					return Config{}, fmt.Errorf("CAPTCHA_VERIFY_URL is required when CAPTCHA_PROVIDER=cap and CAPTCHA_WIDGET_API_URL is relative")
+				}
+			}
+			if !isAbsoluteHTTPURL(cfg.CaptchaVerifyURL) {
+				return Config{}, fmt.Errorf("CAPTCHA_VERIFY_URL must be an absolute http(s) URL when CAPTCHA_PROVIDER=cap")
+			}
+		default:
+			return Config{}, fmt.Errorf("unsupported CAPTCHA_PROVIDER: %s", cfg.CaptchaProvider)
 		}
 	}
 	if cfg.UpdateCheckIntervalMin <= 0 {
@@ -285,6 +312,28 @@ func envBoolWithSet(k string, d bool) (bool, bool) {
 		return d, true
 	}
 	return b, true
+}
+
+func ensureTrailingSlash(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return v
+	}
+	if strings.HasSuffix(v, "/") {
+		return v
+	}
+	return v + "/"
+}
+
+func isAbsoluteHTTPURL(v string) bool {
+	u, err := url.Parse(strings.TrimSpace(v))
+	if err != nil || u == nil {
+		return false
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	return true
 }
 
 func envCSV(k string) []string {

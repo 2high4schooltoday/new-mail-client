@@ -395,6 +395,38 @@ textarea {
   font-size: var(--t-sm);
 }
 
+.captcha-shell {
+  margin-top: var(--s-1);
+  padding: var(--s-3);
+  border: 1px dashed var(--line-1);
+  background: color-mix(in srgb, var(--bg-2) 82%, var(--bg-1));
+  display: grid;
+  gap: var(--s-2);
+}
+
+.captcha-widget-container {
+  min-height: 90px;
+  border: 1px solid var(--line-1);
+  background: var(--bg-2);
+  padding: var(--s-2);
+}
+
+.captcha-widget-container:empty::before {
+  content: "Captcha widget loading...";
+  color: var(--fg-muted);
+  font-size: var(--t-sm);
+}
+
+#captcha-manual-wrap {
+  margin-top: var(--s-1);
+}
+
+#captcha-error {
+  margin: 0;
+  min-height: 1.2em;
+  color: var(--sig-err);
+}
+
 .page-oobe-assistant {
   --oobe-bg: color-mix(in srgb, var(--bg-0) 82%, var(--bg-1));
   --oobe-surface: color-mix(in srgb, var(--bg-1) 88%, var(--bg-2));

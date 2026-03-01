@@ -31,6 +31,15 @@ const state = {
     lastStatus: null,
     apiMissing: false,
   },
+  captcha: {
+    config: null,
+    token: "",
+    scriptLoaded: false,
+    scriptPromise: null,
+    widgetActive: false,
+    widgetBlocked: false,
+    widgetError: "",
+  },
 };
 
 const el = {
@@ -59,6 +68,15 @@ const el = {
   btnSeen: document.getElementById("btn-mark-seen"),
   btnTrash: document.getElementById("btn-trash"),
   composeForm: document.getElementById("form-compose"),
+  registerForm: document.getElementById("form-register"),
+  registerSubmit: document.querySelector("#form-register button[type='submit']"),
+  captchaShell: document.getElementById("captcha-shell"),
+  captchaNote: document.getElementById("captcha-note"),
+  captchaError: document.getElementById("captcha-error"),
+  captchaWidgetContainer: document.getElementById("captcha-widget-container"),
+  captchaManualWrap: document.getElementById("captcha-manual-wrap"),
+  captchaManualInput: document.getElementById("captcha-token-manual"),
+  captchaTokenHidden: document.getElementById("captcha-token-hidden"),
   adminRegs: document.getElementById("admin-registrations"),
   adminUsers: document.getElementById("admin-users"),
   adminAudit: document.getElementById("admin-audit"),
@@ -184,6 +202,7 @@ function routeToAuthWithMessage(message, code = "") {
   if (!state.setup.required) {
     setActiveTab(el.tabAuth);
     showView("auth");
+    void initCaptchaUI();
   }
   if (shouldAnnounce) {
     setStatus(message, "error");
@@ -274,6 +293,247 @@ async function api(path, opts = {}) {
     throw error;
   }
   return payload;
+}
+
+function ensureSlashSuffix(v) {
+  const value = String(v || "").trim();
+  if (!value) return "";
+  if (value.endsWith("/")) return value;
+  return `${value}/`;
+}
+
+function setCaptchaToken(token) {
+  state.captcha.token = String(token || "").trim();
+  if (el.captchaTokenHidden) {
+    el.captchaTokenHidden.value = state.captcha.token;
+  }
+  if (el.captchaManualInput && document.activeElement !== el.captchaManualInput) {
+    el.captchaManualInput.value = state.captcha.token;
+  }
+  syncRegisterSubmitState();
+}
+
+function setCaptchaNote(text, type = "info") {
+  if (!el.captchaNote) return;
+  el.captchaNote.textContent = text || "";
+  if (type === "error") el.captchaNote.style.color = "var(--sig-err)";
+  else if (type === "ok") el.captchaNote.style.color = "var(--sig-ok)";
+  else el.captchaNote.style.color = "var(--fg-muted)";
+}
+
+function setCaptchaError(text) {
+  state.captcha.widgetError = String(text || "");
+  if (!el.captchaError) return;
+  el.captchaError.textContent = state.captcha.widgetError;
+  el.captchaError.style.color = state.captcha.widgetError ? "var(--sig-err)" : "var(--fg-muted)";
+}
+
+function syncRegisterSubmitState() {
+  if (!el.registerSubmit) return;
+  const cfg = state.captcha.config;
+  if (!cfg || !cfg.enabled) {
+    el.registerSubmit.disabled = false;
+    return;
+  }
+  const provider = String(cfg.provider || "").toLowerCase();
+  if (provider !== "cap") {
+    el.registerSubmit.disabled = state.captcha.token.length === 0;
+    return;
+  }
+  if (state.captcha.widgetBlocked) {
+    el.registerSubmit.disabled = true;
+    return;
+  }
+  el.registerSubmit.disabled = state.captcha.token.length === 0;
+}
+
+function renderCaptchaShell(show) {
+  if (!el.captchaShell) return;
+  el.captchaShell.classList.toggle("hidden", !show);
+}
+
+function showCaptchaManualInput(show) {
+  if (!el.captchaManualWrap) return;
+  el.captchaManualWrap.classList.toggle("hidden", !show);
+}
+
+function clearCaptchaWidget() {
+  if (!el.captchaWidgetContainer) return;
+  el.captchaWidgetContainer.replaceChildren();
+}
+
+function capWidgetPaths(cfg) {
+  const endpoint = ensureSlashSuffix(cfg?.widget_api_url || "");
+  if (!endpoint) {
+    throw new Error("CAPTCHA_WIDGET_API_URL is not set");
+  }
+  const siteKey = String(cfg?.site_key || "").trim();
+  const parsed = new URL(endpoint, window.location.origin);
+  let path = parsed.pathname.replace(/\/+$/, "");
+  if (siteKey) {
+    const suffix = `/${siteKey}`.toLowerCase();
+    if (path.toLowerCase().endsWith(suffix)) {
+      path = path.slice(0, path.length - suffix.length);
+    }
+  }
+  if (!path) path = "/";
+  const assetBase = `${parsed.origin}${path}`.replace(/\/$/, "");
+  return {
+    endpoint: parsed.toString(),
+    scriptURL: `${assetBase}/assets/widget.js`,
+    wasmURL: `${assetBase}/assets/cap_wasm.js`,
+  };
+}
+
+function loadCapWidgetScript(paths) {
+  if (state.captcha.scriptLoaded && window.customElements && window.customElements.get("cap-widget")) {
+    return Promise.resolve();
+  }
+  if (state.captcha.scriptPromise) {
+    return state.captcha.scriptPromise;
+  }
+  state.captcha.scriptPromise = new Promise((resolve, reject) => {
+    window.CAP_CUSTOM_WASM_URL = paths.wasmURL;
+    const existing = document.querySelector("script[data-cap-widget-script='1']");
+    if (existing) {
+      existing.addEventListener("load", () => {
+        state.captcha.scriptLoaded = true;
+        resolve();
+      }, { once: true });
+      existing.addEventListener("error", () => reject(new Error("failed to load cap widget script")), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = paths.scriptURL;
+    script.defer = true;
+    script.dataset.capWidgetScript = "1";
+    script.onload = () => {
+      state.captcha.scriptLoaded = true;
+      resolve();
+    };
+    script.onerror = () => {
+      reject(new Error("failed to load cap widget script"));
+    };
+    document.head.appendChild(script);
+  }).finally(() => {
+    state.captcha.scriptPromise = null;
+  });
+  return state.captcha.scriptPromise;
+}
+
+function mountCapWidget(paths) {
+  clearCaptchaWidget();
+  if (!el.captchaWidgetContainer) return;
+  const widget = document.createElement("cap-widget");
+  widget.setAttribute("data-cap-api-endpoint", paths.endpoint);
+  widget.setAttribute("data-cap-hidden-field-name", "cap_internal_token");
+  widget.setAttribute("data-cap-language", "en");
+  widget.setAttribute("data-cap-max-retries", "3");
+  widget.addEventListener("solve", (event) => {
+    const detailToken = String(event?.detail?.token || "").trim();
+    if (detailToken) {
+      setCaptchaToken(detailToken);
+      setCaptchaError("");
+      setCaptchaNote("Challenge solved. You can submit registration.", "ok");
+      return;
+    }
+    const hidden = el.captchaWidgetContainer.querySelector("input[name='cap_internal_token']");
+    setCaptchaToken(hidden ? hidden.value : "");
+    if (state.captcha.token) {
+      setCaptchaError("");
+      setCaptchaNote("Challenge solved. You can submit registration.", "ok");
+    }
+  });
+  widget.addEventListener("error", () => {
+    setCaptchaToken("");
+    setCaptchaError("Captcha challenge failed. Retry the challenge.");
+    setCaptchaNote("Captcha challenge not solved yet.", "error");
+  });
+  widget.addEventListener("reset", () => {
+    setCaptchaToken("");
+    setCaptchaError("");
+    setCaptchaNote("Complete the challenge to continue registration.", "info");
+  });
+  el.captchaWidgetContainer.appendChild(widget);
+  state.captcha.widgetActive = true;
+  setCaptchaToken("");
+}
+
+async function loadCaptchaConfig() {
+  try {
+    const cfg = await api("/api/v1/public/captcha/config", { logErrors: false });
+    state.captcha.config = cfg || null;
+  } catch {
+    state.captcha.config = null;
+  }
+  return state.captcha.config;
+}
+
+async function initCaptchaUI() {
+  const cfg = await loadCaptchaConfig();
+  if (!cfg || !cfg.enabled) {
+    renderCaptchaShell(false);
+    showCaptchaManualInput(false);
+    setCaptchaToken("");
+    state.captcha.widgetBlocked = false;
+    state.captcha.widgetActive = false;
+    setCaptchaError("");
+    return;
+  }
+
+  renderCaptchaShell(true);
+  state.captcha.widgetBlocked = false;
+  state.captcha.widgetActive = false;
+  setCaptchaToken("");
+  setCaptchaError("");
+
+  const provider = String(cfg.provider || "").toLowerCase();
+  if (provider !== "cap") {
+    showCaptchaManualInput(true);
+    setCaptchaNote("Captcha is enabled. Provide token from configured provider.", "info");
+    syncRegisterSubmitState();
+    return;
+  }
+
+  showCaptchaManualInput(false);
+  setCaptchaNote("Complete the challenge to continue registration.", "info");
+  try {
+    const paths = capWidgetPaths(cfg);
+    await loadCapWidgetScript(paths);
+    mountCapWidget(paths);
+  } catch (err) {
+    state.captcha.widgetBlocked = true;
+    setCaptchaToken("");
+    setCaptchaError("Captcha widget failed to load.");
+    setCaptchaNote(`Captcha unavailable: ${err.message}`, "error");
+  }
+  syncRegisterSubmitState();
+}
+
+async function resetCaptchaChallenge() {
+  if (!state.captcha.config || !state.captcha.config.enabled) {
+    setCaptchaToken("");
+    return;
+  }
+  const provider = String(state.captcha.config.provider || "").toLowerCase();
+  if (provider !== "cap") {
+    setCaptchaToken("");
+    return;
+  }
+  try {
+    const paths = capWidgetPaths(state.captcha.config);
+    if (!state.captcha.scriptLoaded) {
+      await loadCapWidgetScript(paths);
+    }
+    mountCapWidget(paths);
+    setCaptchaError("");
+    setCaptchaNote("Complete the challenge to continue registration.", "info");
+  } catch {
+    state.captcha.widgetBlocked = true;
+    setCaptchaToken("");
+    setCaptchaError("Captcha widget failed to reset.");
+  }
+  syncRegisterSubmitState();
 }
 
 function legacyUpdaterStatus() {
@@ -1225,6 +1485,17 @@ function bindSetupUI() {
 
 function bindUI() {
   bindSetupUI();
+  if (el.captchaManualInput) {
+    el.captchaManualInput.addEventListener("input", () => {
+      setCaptchaToken(el.captchaManualInput.value);
+      if (state.captcha.token) {
+        setCaptchaError("");
+        setCaptchaNote("Captcha token captured.", "ok");
+      } else {
+        setCaptchaNote("Captcha is enabled. Provide token from configured provider.", "info");
+      }
+    });
+  }
   if (el.btnTheme) {
     el.btnTheme.onclick = () => {
       const next = ThemeController.getTheme() === "paper-light" ? "machine-dark" : "paper-light";
@@ -1278,19 +1549,47 @@ function bindUI() {
   document.getElementById("form-register").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    const captchaToken = String(fd.get("captcha_token") || "").trim();
+    const captchaEnabled = !!state.captcha.config?.enabled;
+    if (captchaEnabled && !captchaToken) {
+      setCaptchaError("Complete captcha challenge before submitting registration.");
+      setCaptchaNote("Captcha challenge not solved yet.", "error");
+      setStatus("Complete captcha challenge before submitting registration.", "error");
+      syncRegisterSubmitState();
+      return;
+    }
     try {
       await api("/api/v1/register", {
         method: "POST",
-        json: { email: fd.get("email"), password: fd.get("password"), captcha_token: fd.get("captcha_token") },
+        json: { email: fd.get("email"), password: fd.get("password"), captcha_token: captchaToken },
       });
       setStatus("REGISTRATION SUBMITTED. WAIT FOR APPROVAL.", "ok");
       e.target.reset();
+      await resetCaptchaChallenge();
     } catch (err) {
       if (err.code === "setup_required") {
         await enterSetupIfRequired();
         return;
       }
+      if (err.code === "captcha_required") {
+        setCaptchaError("Captcha validation failed. Please solve a fresh challenge and retry.");
+        setCaptchaNote("Captcha challenge failed verification.", "error");
+        setStatus("Captcha validation failed. Solve challenge again and retry.", "error");
+        await resetCaptchaChallenge();
+        return;
+      }
+      if (err.code === "captcha_unavailable") {
+        const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
+        setCaptchaError("Captcha verification service is currently unavailable.");
+        setCaptchaNote(`Verification service unavailable${requestRef}.`, "error");
+        setStatus(`Captcha verification service is unavailable. Please retry shortly.${requestRef}`, "error");
+        await resetCaptchaChallenge();
+        return;
+      }
       setStatus(err.message, "error");
+      if (captchaEnabled) {
+        await resetCaptchaChallenge();
+      }
     }
   });
 
@@ -1409,6 +1708,7 @@ function bindUI() {
     if (state.setup.required) return;
     setActiveTab(el.tabAuth);
     showView("auth");
+    void initCaptchaUI();
   };
 
   el.tabMail.onclick = async () => {
@@ -1453,6 +1753,7 @@ function bindUI() {
     applyNavVisibility();
     setActiveTab(el.tabAuth);
     showView("auth");
+    void initCaptchaUI();
     setStatus("SIGNED OUT", "ok");
   };
 
@@ -1503,6 +1804,7 @@ function bindUI() {
 async function bootstrap() {
   ThemeController.initTheme();
   bindUI();
+  await initCaptchaUI();
 
   try {
     if (await enterSetupIfRequired()) {
@@ -1517,6 +1819,7 @@ async function bootstrap() {
   if (!session.ok) {
     setActiveTab(el.tabAuth);
     showView("auth");
+    await initCaptchaUI();
     setStatus("AUTH REQUIRED");
     return;
   }

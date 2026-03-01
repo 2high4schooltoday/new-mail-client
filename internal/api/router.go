@@ -108,6 +108,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/public/captcha/config", h.PublicCaptchaConfig)
 		r.Get("/setup/status", h.SetupStatus)
 		r.With(middleware.RateLimit(h.limiter, "setup_complete", 20, time.Minute, h.cfg.TrustProxy)).Post("/setup/complete", h.SetupComplete)
 		r.With(middleware.RateLimit(h.limiter, "register", 10, time.Minute, h.cfg.TrustProxy)).Post("/register", h.Register)
@@ -178,6 +179,28 @@ type registerRequest struct {
 	Email        string `json:"email"`
 	Password     string `json:"password"`
 	CaptchaToken string `json:"captcha_token"`
+}
+
+func (h *Handlers) PublicCaptchaConfig(w http.ResponseWriter, r *http.Request) {
+	mode := "disabled"
+	provider := ""
+	siteKey := ""
+	widgetAPIURL := ""
+	if h.cfg.CaptchaEnabled {
+		mode = "required"
+		provider = strings.ToLower(strings.TrimSpace(h.cfg.CaptchaProvider))
+		if provider == "cap" {
+			siteKey = strings.TrimSpace(h.cfg.CaptchaSiteKey)
+			widgetAPIURL = strings.TrimSpace(h.cfg.CaptchaWidgetURL)
+		}
+	}
+	util.WriteJSON(w, 200, map[string]any{
+		"enabled":        h.cfg.CaptchaEnabled,
+		"provider":       provider,
+		"site_key":       siteKey,
+		"widget_api_url": widgetAPIURL,
+		"mode":           mode,
+	})
 }
 
 func (h *Handlers) SetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -280,13 +303,26 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
-	captchaOK := true
+	captchaOK := !h.cfg.CaptchaEnabled
 	if h.cfg.CaptchaEnabled {
 		ip := middleware.ClientIP(r, h.cfg.TrustProxy)
 		if err := h.captchaVerifier.Verify(r.Context(), req.CaptchaToken, ip); err != nil {
+			if errors.Is(err, captcha.ErrCaptchaUnavailable) {
+				log.Printf("captcha_verify_failed code=captcha_unavailable class=verifier_unavailable status=503 request_id=%s err=%q",
+					middleware.RequestID(r.Context()),
+					err.Error(),
+				)
+				util.WriteError(w, 503, "captcha_unavailable", "captcha verification service unavailable", middleware.RequestID(r.Context()))
+				return
+			}
+			log.Printf("captcha_verify_failed code=captcha_required class=invalid_or_missing_token status=400 request_id=%s err=%q",
+				middleware.RequestID(r.Context()),
+				err.Error(),
+			)
 			util.WriteError(w, 400, "captcha_required", "captcha validation failed", middleware.RequestID(r.Context()))
 			return
 		}
+		captchaOK = true
 	}
 	if err := h.svc.Register(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent(), captchaOK); err != nil {
 		util.WriteError(w, 400, "register_failed", err.Error(), middleware.RequestID(r.Context()))

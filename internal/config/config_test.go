@@ -103,3 +103,68 @@ func TestLoadRejectsInvalidUpdateConfig(t *testing.T) {
 		t.Fatalf("expected load failure for UPDATE_CHECK_INTERVAL_MIN=0")
 	}
 }
+
+func TestLoadCaptchaCapDerivesVerifyURLFromAbsoluteWidgetURL(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("CAPTCHA_ENABLED", "true")
+	t.Setenv("CAPTCHA_PROVIDER", "cap")
+	t.Setenv("CAPTCHA_SITE_KEY", "cap-site-key-123")
+	t.Setenv("CAPTCHA_SECRET", "cap-secret-123")
+	t.Setenv("CAPTCHA_WIDGET_API_URL", "https://cap.example.test/cap/cap-site-key-123/")
+	t.Setenv("CAPTCHA_VERIFY_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.CaptchaWidgetURL != "https://cap.example.test/cap/cap-site-key-123/" {
+		t.Fatalf("unexpected captcha widget URL: %q", cfg.CaptchaWidgetURL)
+	}
+	if cfg.CaptchaVerifyURL != "https://cap.example.test/cap/cap-site-key-123/siteverify" {
+		t.Fatalf("unexpected captcha verify URL: %q", cfg.CaptchaVerifyURL)
+	}
+}
+
+func TestLoadCaptchaCapRequiresSiteKey(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("CAPTCHA_ENABLED", "true")
+	t.Setenv("CAPTCHA_PROVIDER", "cap")
+	t.Setenv("CAPTCHA_SITE_KEY", "")
+	t.Setenv("CAPTCHA_SECRET", "cap-secret-123")
+
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error when CAPTCHA_SITE_KEY is empty for cap provider")
+	}
+}
+
+func TestLoadCaptchaCapRequiresVerifyURLWhenWidgetURLIsRelative(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("CAPTCHA_ENABLED", "true")
+	t.Setenv("CAPTCHA_PROVIDER", "cap")
+	t.Setenv("CAPTCHA_SITE_KEY", "cap-site-key-123")
+	t.Setenv("CAPTCHA_SECRET", "cap-secret-123")
+	t.Setenv("CAPTCHA_WIDGET_API_URL", "/cap/cap-site-key-123/")
+	t.Setenv("CAPTCHA_VERIFY_URL", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error for relative widget URL without CAPTCHA_VERIFY_URL")
+	}
+}
+
+func TestLoadCaptchaCapAcceptsExplicitVerifyURLForRelativeWidgetURL(t *testing.T) {
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("CAPTCHA_ENABLED", "true")
+	t.Setenv("CAPTCHA_PROVIDER", "cap")
+	t.Setenv("CAPTCHA_SITE_KEY", "cap-site-key-123")
+	t.Setenv("CAPTCHA_SECRET", "cap-secret-123")
+	t.Setenv("CAPTCHA_WIDGET_API_URL", "/cap/cap-site-key-123/")
+	t.Setenv("CAPTCHA_VERIFY_URL", "http://127.0.0.1:8077/cap-site-key-123/siteverify")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.CaptchaVerifyURL != "http://127.0.0.1:8077/cap-site-key-123/siteverify" {
+		t.Fatalf("unexpected captcha verify URL: %q", cfg.CaptchaVerifyURL)
+	}
+}
