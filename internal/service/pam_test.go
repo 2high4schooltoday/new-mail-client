@@ -113,6 +113,47 @@ func TestPAMModeLoginUsesMailCredentials(t *testing.T) {
 	}
 }
 
+func TestPAMModeLoginDetectsConnectivityErrors(t *testing.T) {
+	ctx := context.Background()
+	tmp := filepath.Join(t.TempDir(), "app.db")
+	sqdb, err := db.OpenSQLite(tmp, 2, 1, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqdb.Close() })
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "001_init.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "002_users_mail_login.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	st := store.New(sqdb)
+	cfg := config.Config{
+		DovecotAuthMode:     "pam",
+		SessionEncryptKey:   "this_is_a_test_session_key_that_is_long_enough_123456",
+		SessionIdleMinutes:  30,
+		SessionAbsoluteHour: 24,
+	}
+	svc := New(cfg, st, pamTestMailClient{failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused")}, mail.NoopProvisioner{}, nil)
+
+	localHash, err := auth.HashPassword("AnyPassword123!")
+	if err != nil {
+		t.Fatalf("hash local: %v", err)
+	}
+	u, err := st.CreateUser(ctx, "alice@example.com", localHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := st.UpdateProvisionState(ctx, u.ID, "ok", nil); err != nil {
+		t.Fatalf("set provision state: %v", err)
+	}
+
+	if _, _, err := svc.Login(ctx, "alice@example.com", "AnyPassword123!", "127.0.0.1", "test-agent"); !errors.Is(err, ErrPAMVerifierDown) {
+		t.Fatalf("expected ErrPAMVerifierDown, got: %v", err)
+	}
+}
+
 func TestPAMModeDisablesPasswordResetOperations(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newPAMTestService(t, "PamPass123!")

@@ -1099,6 +1099,11 @@ function bindUI() {
         await enterSetupIfRequired();
         return;
       }
+      if (err.code === "pam_verifier_unavailable") {
+        const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
+        setStatus(`PAM/IMAP auth backend is unreachable. Check IMAP connectivity or switch local dev to SQL auth mode.${requestRef}`, "error");
+        return;
+      }
       setStatus(err.message, "error");
     }
   });

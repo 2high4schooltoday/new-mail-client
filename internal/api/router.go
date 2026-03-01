@@ -303,6 +303,21 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, user, err := h.svc.Login(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent())
 	if err != nil {
+		if errors.Is(err, service.ErrPAMVerifierDown) {
+			msg := "cannot validate PAM credentials because IMAP connectivity failed; check IMAP_HOST/IMAP_PORT/IMAP_TLS/IMAP_STARTTLS"
+			lowerErr := strings.ToLower(err.Error())
+			if strings.Contains(lowerErr, "x509") || strings.Contains(lowerErr, "certificate") || strings.Contains(lowerErr, "tls") {
+				msg = "IMAP TLS verification failed while validating PAM credentials. If using IMAP_HOST=127.0.0.1, set IMAP_INSECURE_SKIP_VERIFY=true or set IMAP_HOST to your mail FQDN."
+			}
+			log.Printf("login_failed code=pam_verifier_unavailable class=verifier_unavailable status=502 email=%s request_id=%s err=%q",
+				strings.ToLower(strings.TrimSpace(req.Email)),
+				middleware.RequestID(r.Context()),
+				err.Error(),
+			)
+			util.WriteError(w, http.StatusBadGateway, "pam_verifier_unavailable", msg, middleware.RequestID(r.Context()))
+			return
+		}
+
 		normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
 		ip := middleware.ClientIP(r, h.cfg.TrustProxy)
 		key := ip + "|" + normalizedEmail

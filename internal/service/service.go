@@ -127,6 +127,9 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 		}
 		acceptedLogin, err := s.verifyMailCredentials(ctx, u.Email, password, "", stored)
 		if err != nil {
+			if isMailConnectivityError(err) {
+				return "", models.User{}, fmt.Errorf("%w: %v", ErrPAMVerifierDown, err)
+			}
 			return "", models.User{}, ErrInvalidCredentials
 		}
 		currentLogin := strings.TrimSpace(stored)
