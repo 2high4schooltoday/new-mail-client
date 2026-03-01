@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,6 +32,8 @@ type githubRelease struct {
 	Name        string               `json:"name"`
 	PublishedAt string               `json:"published_at"`
 	HTMLURL     string               `json:"html_url"`
+	Draft       bool                 `json:"draft"`
+	Prerelease  bool                 `json:"prerelease"`
 	Assets      []githubReleaseAsset `json:"assets"`
 }
 
@@ -40,7 +43,7 @@ type githubReleaseAsset struct {
 }
 
 func (c *githubClient) latestRelease(ctx context.Context, etag string) (ReleaseInfo, string, bool, error) {
-	out, newETag, notModified, err := c.latestReleaseRaw(ctx, etag)
+	out, newETag, notModified, err := c.latestPreferredReleaseRaw(ctx, etag)
 	if err != nil {
 		return ReleaseInfo{}, "", false, err
 	}
@@ -54,6 +57,24 @@ func (c *githubClient) latestRelease(ctx context.Context, etag string) (ReleaseI
 	return release, newETag, false, nil
 }
 
+func (c *githubClient) latestPreferredReleaseRaw(ctx context.Context, etag string) (githubRelease, string, bool, error) {
+	out, newETag, notModified, err := c.latestReleaseRaw(ctx, etag)
+	if err == nil {
+		return out, newETag, notModified, nil
+	}
+	var statusErr githubStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+		// `/releases/latest` ignores prereleases and returns 404 when only prereleases exist.
+		// Fall back to releases listing and pick the newest non-draft release.
+		fallback, fallbackETag, fallbackNotModified, fallbackErr := c.latestAnyReleaseRaw(ctx, etag)
+		if fallbackErr != nil {
+			return githubRelease{}, "", false, fallbackErr
+		}
+		return fallback, fallbackETag, fallbackNotModified, nil
+	}
+	return githubRelease{}, "", false, err
+}
+
 func (c *githubClient) latestReleaseRaw(ctx context.Context, etag string) (githubRelease, string, bool, error) {
 	path := fmt.Sprintf("/repos/%s/%s/releases/latest", url.PathEscape(c.cfg.UpdateRepoOwner), url.PathEscape(c.cfg.UpdateRepoName))
 	var out githubRelease
@@ -62,6 +83,28 @@ func (c *githubClient) latestReleaseRaw(ctx context.Context, etag string) (githu
 		return githubRelease{}, "", false, err
 	}
 	return out, newETag, notModified, nil
+}
+
+func (c *githubClient) latestAnyReleaseRaw(ctx context.Context, etag string) (githubRelease, string, bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/releases?per_page=10", url.PathEscape(c.cfg.UpdateRepoOwner), url.PathEscape(c.cfg.UpdateRepoName))
+	var list []githubRelease
+	newETag, notModified, err := c.requestJSON(ctx, path, etag, &list)
+	if err != nil {
+		return githubRelease{}, "", false, err
+	}
+	if notModified {
+		return githubRelease{}, newETag, true, nil
+	}
+	for _, rel := range list {
+		if rel.Draft {
+			continue
+		}
+		if strings.TrimSpace(rel.TagName) == "" {
+			continue
+		}
+		return rel, newETag, false, nil
+	}
+	return githubRelease{}, "", false, fmt.Errorf("github releases list is empty")
 }
 
 func (c *githubClient) releaseByTag(ctx context.Context, tag string) (githubRelease, error) {
@@ -73,6 +116,14 @@ func (c *githubClient) releaseByTag(ctx context.Context, tag string) (githubRele
 	var out githubRelease
 	_, _, err := c.requestJSON(ctx, path, "", &out)
 	return out, err
+}
+
+type githubStatusError struct {
+	StatusCode int
+}
+
+func (e githubStatusError) Error() string {
+	return fmt.Sprintf("github api returned status %d", e.StatusCode)
 }
 
 func (c *githubClient) requestJSON(ctx context.Context, path, etag string, out any) (string, bool, error) {
@@ -105,7 +156,7 @@ func (c *githubClient) requestJSON(ctx context.Context, path, etag string, out a
 		}
 		return resp.Header.Get("ETag"), false, nil
 	default:
-		return "", false, fmt.Errorf("github api returned status %d", resp.StatusCode)
+		return "", false, githubStatusError{StatusCode: resp.StatusCode}
 	}
 }
 

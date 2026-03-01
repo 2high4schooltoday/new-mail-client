@@ -281,7 +281,7 @@ func (m *Manager) resolveRelease(ctx context.Context, targetVersion string) (git
 	if targetVersion != "" {
 		return m.gh.releaseByTag(ctx, targetVersion)
 	}
-	rel, _, _, err := m.gh.latestReleaseRaw(ctx, "")
+	rel, _, _, err := m.gh.latestPreferredReleaseRaw(ctx, "")
 	return rel, err
 }
 

@@ -129,3 +129,39 @@ func TestGitHubLatestReleaseWithETag(t *testing.T) {
 		t.Fatalf("expected empty release payload on 304, got %q", second.TagName)
 	}
 }
+
+func TestGitHubLatestReleaseFallsBackToPrereleaseWhenLatest404(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/2high4schooltoday/new-mail-client/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/repos/2high4schooltoday/new-mail-client/releases", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"tag_name":"v1.0.0-alpha.1.1","name":"Alpha 1.0.0_01","published_at":"2026-03-01T12:29:38Z","html_url":"https://example.test/release-1","draft":false,"prerelease":true,"assets":[]},
+			{"tag_name":"v1.0.0-alpha.1","name":"Alpha 1.0.0","published_at":"2026-03-01T12:21:49Z","html_url":"https://example.test/release-2","draft":false,"prerelease":true,"assets":[]}
+		]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := config.Config{
+		UpdateRepoOwner:      "2high4schooltoday",
+		UpdateRepoName:       "new-mail-client",
+		UpdateHTTPTimeoutSec: 5,
+	}
+	gh := newGitHubClient(cfg)
+	gh.baseURL = srv.URL
+
+	latest, _, notModified, err := gh.latestRelease(context.Background(), "")
+	if err != nil {
+		t.Fatalf("latest release fallback call: %v", err)
+	}
+	if notModified {
+		t.Fatalf("did not expect not-modified from fallback call")
+	}
+	if latest.TagName != "v1.0.0-alpha.1.1" {
+		t.Fatalf("unexpected fallback tag: %q", latest.TagName)
+	}
+}
