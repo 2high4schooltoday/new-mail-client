@@ -203,7 +203,7 @@ func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]models.User
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
 		 FROM users
-		 WHERE status <> 'rejected'
+		 WHERE lower(trim(coalesce(status, ''))) <> 'rejected'
 		 ORDER BY created_at DESC
 		 LIMIT ? OFFSET ?`,
 		limit, offset,

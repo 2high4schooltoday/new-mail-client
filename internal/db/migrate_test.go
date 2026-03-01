@@ -51,6 +51,7 @@ CREATE TABLE sessions (
 		filepath.Join("..", "..", "migrations", "001_init.sql"),
 		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
 		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
+		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
 	} {
 		if err := ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -151,9 +152,12 @@ func TestCleanupRejectedUsersMigrationRemovesLegacyRows(t *testing.T) {
 	if err := ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql")); err != nil {
 		t.Fatalf("apply migration 003: %v", err)
 	}
+	if err := ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql")); err != nil {
+		t.Fatalf("apply migration 004: %v", err)
+	}
 
 	var usersCount int
-	if err := sqdb.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM users WHERE status='rejected'`).Scan(&usersCount); err != nil {
+	if err := sqdb.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM users WHERE lower(trim(coalesce(status, '')))='rejected'`).Scan(&usersCount); err != nil {
 		t.Fatalf("count rejected users: %v", err)
 	}
 	if usersCount != 0 {

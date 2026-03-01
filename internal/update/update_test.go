@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ func newUpdateTestStore(t *testing.T) *store.Store {
 		filepath.Join("..", "..", "migrations", "001_init.sql"),
 		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
 		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
+		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -202,5 +204,49 @@ func TestGitHubLatestReleaseFallsBackToPrereleaseWhenLatest404(t *testing.T) {
 	}
 	if latest.TagName != "v1.0.0-alpha.1.1" {
 		t.Fatalf("unexpected fallback tag: %q", latest.TagName)
+	}
+}
+
+func TestArchiveAssetCandidatesIncludeArchAliases(t *testing.T) {
+	t.Parallel()
+	candidates := archiveAssetCandidates("arm64")
+	joined := strings.Join(candidates, ",")
+	if !strings.Contains(joined, "mailclient-linux-arm64.tar.gz") {
+		t.Fatalf("missing arm64 archive candidate: %v", candidates)
+	}
+	if !strings.Contains(joined, "mailclient-linux-aarch64.tar.gz") {
+		t.Fatalf("missing aarch64 alias candidate: %v", candidates)
+	}
+}
+
+func TestResolveArchiveAssetUsesArchAlias(t *testing.T) {
+	t.Parallel()
+	release := githubRelease{
+		Assets: []githubReleaseAsset{
+			{Name: "mailclient-linux-aarch64.tar.gz", URL: "https://example.test/aarch64.tar.gz"},
+			{Name: "checksums.txt", URL: "https://example.test/checksums.txt"},
+		},
+	}
+	name, url, ok := resolveArchiveAsset(release, "arm64")
+	if !ok {
+		t.Fatalf("expected alias archive resolution to succeed")
+	}
+	if name != "mailclient-linux-aarch64.tar.gz" {
+		t.Fatalf("unexpected archive name: %q", name)
+	}
+	if url != "https://example.test/aarch64.tar.gz" {
+		t.Fatalf("unexpected archive url: %q", url)
+	}
+}
+
+func TestResolveArchiveAssetMissing(t *testing.T) {
+	t.Parallel()
+	release := githubRelease{
+		Assets: []githubReleaseAsset{
+			{Name: "checksums.txt", URL: "https://example.test/checksums.txt"},
+		},
+	}
+	if _, _, ok := resolveArchiveAsset(release, "arm64"); ok {
+		t.Fatalf("expected missing archive lookup to fail")
 	}
 }

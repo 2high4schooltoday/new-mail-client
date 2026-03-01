@@ -130,12 +130,17 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		return "", false, err
 	}
 	arch := runtime.GOARCH
-	archiveName := fmt.Sprintf("mailclient-linux-%s.tar.gz", arch)
-	checksumName := "checksums.txt"
-	archiveURL, ok := findAssetURL(release, archiveName)
+	archiveName, archiveURL, ok := resolveArchiveAsset(release, arch)
 	if !ok {
-		return "", false, fmt.Errorf("release asset %s not found", archiveName)
+		candidates := strings.Join(archiveAssetCandidates(arch), ", ")
+		return "", false, fmt.Errorf(
+			"release archive for GOARCH=%s not found (expected one of: %s); available assets: %s",
+			arch,
+			candidates,
+			strings.Join(releaseAssetNames(release), ", "),
+		)
 	}
+	checksumName := "checksums.txt"
 	checksumURL, ok := findAssetURL(release, checksumName)
 	if !ok {
 		return "", false, fmt.Errorf("release asset %s not found", checksumName)
@@ -277,6 +282,71 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	trimBackups(backupsDir(m.cfg), m.cfg.UpdateBackupKeep)
 
 	return release.TagName, false, nil
+}
+
+func resolveArchiveAsset(rel githubRelease, arch string) (string, string, bool) {
+	candidates := archiveAssetCandidates(arch)
+	for _, wanted := range candidates {
+		url, ok := findAssetURL(rel, wanted)
+		if ok {
+			return strings.TrimSpace(wanted), strings.TrimSpace(url), true
+		}
+	}
+	return "", "", false
+}
+
+func archiveAssetCandidates(arch string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(arch))
+	if normalized == "" {
+		normalized = runtime.GOARCH
+	}
+	archAliases := []string{normalized}
+	switch normalized {
+	case "amd64", "x86_64", "x64":
+		archAliases = append(archAliases, "amd64", "x86_64", "x64")
+	case "arm64", "aarch64":
+		archAliases = append(archAliases, "arm64", "aarch64")
+	}
+
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(archAliases)*4)
+	add := func(name string) {
+		n := strings.TrimSpace(strings.ToLower(name))
+		if n == "" {
+			return
+		}
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		out = append(out, name)
+	}
+	for _, alias := range archAliases {
+		a := strings.TrimSpace(strings.ToLower(alias))
+		if a == "" {
+			continue
+		}
+		add(fmt.Sprintf("mailclient-linux-%s.tar.gz", a))
+		add(fmt.Sprintf("mailclient-linux-%s.tgz", a))
+		add(fmt.Sprintf("mailclient_%s_linux.tar.gz", a))
+		add(fmt.Sprintf("mailclient_%s_linux.tgz", a))
+	}
+	return out
+}
+
+func releaseAssetNames(rel githubRelease) []string {
+	names := make([]string, 0, len(rel.Assets))
+	for _, asset := range rel.Assets {
+		name := strings.TrimSpace(asset.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return []string{"<none>"}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (m *Manager) resolveRelease(ctx context.Context, targetVersion string) (githubRelease, error) {

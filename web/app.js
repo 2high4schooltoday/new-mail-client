@@ -181,6 +181,29 @@ function setSetupInlineStatus(text, type = "info") {
   else el.setupInlineStatus.style.color = "var(--fg-muted)";
 }
 
+function apiRequestRef(err) {
+  return err && err.requestID ? ` (request ${err.requestID})` : "";
+}
+
+function formatAPIError(err, fallbackMessage = "Request failed") {
+  const fallback = String(fallbackMessage || "Request failed");
+  if (!err || typeof err !== "object") {
+    return fallback;
+  }
+  if (err.code === "csrf_failed") {
+    return `Action blocked by CSRF protection. Refresh the page and retry.${apiRequestRef(err)}`;
+  }
+  if (err.status === 401 && isSessionErrorCode(String(err.code || ""))) {
+    return `${reauthMessageForCode(String(err.code || ""))}${apiRequestRef(err)}`;
+  }
+  const base = String(err.message || fallback).trim() || fallback;
+  return `${base}${apiRequestRef(err)}`;
+}
+
+function presentAPIError(err, fallbackMessage) {
+  setStatus(formatAPIError(err, fallbackMessage), "error");
+}
+
 function setActiveAuthPane(pane) {
   const next = ["login", "register", "reset"].includes(String(pane || "")) ? String(pane) : "login";
   state.ui.activeAuthPane = next;
@@ -1157,7 +1180,10 @@ async function enterSetupIfRequired() {
 
 async function refreshSession(opts = {}) {
   try {
-    const me = await api("/api/v1/me", { skipUnauthorizedHandling: !!opts.skipUnauthorizedHandling });
+    const me = await api("/api/v1/me", {
+      skipUnauthorizedHandling: !!opts.skipUnauthorizedHandling,
+      logErrors: !opts.skipUnauthorizedHandling,
+    });
     state.user = me;
     setStatus(`SIGNED IN AS ${me.email.toUpperCase()}`, "ok");
     applyNavVisibility();
@@ -1288,8 +1314,9 @@ function applyUpdateControls(status) {
   const applyState = String(st.apply?.state || "idle");
   const busy = applyState === "queued" || applyState === "in_progress";
   const checkSupported = !st.legacy_backend;
+  const assetMissing = String(st.last_check_error || "").toLowerCase().includes("release asset");
   el.btnUpdateCheck.disabled = state.update.checking || !checkSupported;
-  const canApply = !!st.enabled && !!st.configured && !!st.update_available && !busy && !state.update.applying;
+  const canApply = !!st.enabled && !!st.configured && !!st.update_available && !busy && !state.update.applying && !assetMissing;
   el.btnUpdateApply.disabled = !canApply;
 }
 
@@ -1320,7 +1347,11 @@ function renderUpdateStatus(status) {
   } else if (!status.configured) {
     setUpdateNote("Updater is not configured on this host. Install mailclient-updater systemd units to enable one-click updates.", "error");
   } else if (status.last_check_error) {
-    setUpdateNote(`Latest check failed: ${status.last_check_error}`, "error");
+    if (String(status.last_check_error).toLowerCase().includes("release asset")) {
+      setUpdateNote(`Release packaging issue detected for this CPU architecture: ${status.last_check_error}`, "error");
+    } else {
+      setUpdateNote(`Latest check failed: ${status.last_check_error}`, "error");
+    }
   } else if (status.update_available && status.latest?.tag_name) {
     setUpdateNote(`New release available: ${status.latest.tag_name}`, "ok");
   } else {
@@ -1426,22 +1457,32 @@ async function loadAdmin() {
     approve.className = "cmd-btn cmd-btn--primary";
     approve.textContent = "Approve";
     approve.onclick = async () => {
-      if (!regID) {
-        throw new Error("registration id missing from API response");
+      try {
+        if (!regID) {
+          throw new Error("registration id missing from API response");
+        }
+        await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/approve`, { method: "POST", json: {} });
+        await loadAdmin();
+        setStatus(`APPROVED ${regEmail.toUpperCase()}`, "ok");
+      } catch (err) {
+        presentAPIError(err, "Failed to approve registration");
       }
-      await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/approve`, { method: "POST", json: {} });
-      await loadAdmin();
     };
     const reject = document.createElement("button");
     reject.className = "cmd-btn";
     reject.textContent = "Reject";
     reject.onclick = async () => {
-      if (!regID) {
-        throw new Error("registration id missing from API response");
+      try {
+        if (!regID) {
+          throw new Error("registration id missing from API response");
+        }
+        const reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
+        await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/reject`, { method: "POST", json: { reason } });
+        await loadAdmin();
+        setStatus(`REJECTED ${regEmail.toUpperCase()}`, "ok");
+      } catch (err) {
+        presentAPIError(err, "Failed to reject registration");
       }
-      const reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
-      await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/reject`, { method: "POST", json: { reason } });
-      await loadAdmin();
     };
     if (!regID) {
       approve.disabled = true;
@@ -1455,26 +1496,38 @@ async function loadAdmin() {
   }
 
   el.adminUsers.innerHTML = "";
-  for (const u of users.items || []) {
+  const visibleUsers = (users.items || []).filter((u) => String(u.status || "").trim().toLowerCase() !== "rejected");
+  for (const u of visibleUsers) {
+    const userStatus = String(u.status || "").trim().toLowerCase();
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${escapeHtml(u.email)}</td><td>${escapeHtml(u.role)}</td><td><span class="status-chip">${escapeHtml(u.status)}</span></td><td></td>`;
     const td = tr.children[3];
-    if (u.status === "active") {
+    if (userStatus === "active") {
       const btn = document.createElement("button");
       btn.className = "cmd-btn";
       btn.textContent = "Suspend";
       btn.onclick = async () => {
-        await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/suspend`, { method: "POST", json: {} });
-        await loadAdmin();
+        try {
+          await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/suspend`, { method: "POST", json: {} });
+          await loadAdmin();
+          setStatus(`SUSPENDED ${u.email.toUpperCase()}`, "ok");
+        } catch (err) {
+          presentAPIError(err, "Failed to suspend user");
+        }
       };
       td.appendChild(btn);
-    } else if (u.status === "suspended") {
+    } else if (userStatus === "suspended") {
       const btn = document.createElement("button");
       btn.className = "cmd-btn";
       btn.textContent = "Unsuspend";
       btn.onclick = async () => {
-        await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/unsuspend`, { method: "POST", json: {} });
-        await loadAdmin();
+        try {
+          await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/unsuspend`, { method: "POST", json: {} });
+          await loadAdmin();
+          setStatus(`UNSUSPENDED ${u.email.toUpperCase()}`, "ok");
+        } catch (err) {
+          presentAPIError(err, "Failed to unsuspend user");
+        }
       };
       td.appendChild(btn);
     }
@@ -1483,10 +1536,14 @@ async function loadAdmin() {
     reset.className = "cmd-btn";
     reset.textContent = "Reset Password";
     reset.onclick = async () => {
-      const pw = prompt(`New password for ${u.email}:`);
-      if (!pw) return;
-      await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST", json: { new_password: pw } });
-      setStatus(`PASSWORD RESET FOR ${u.email}`, "ok");
+      try {
+        const pw = prompt(`New password for ${u.email}:`);
+        if (!pw) return;
+        await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST", json: { new_password: pw } });
+        setStatus(`PASSWORD RESET FOR ${u.email}`, "ok");
+      } catch (err) {
+        presentAPIError(err, "Failed to reset password");
+      }
     };
     td.appendChild(reset);
 
@@ -1936,7 +1993,7 @@ function bindUI() {
       await loadMailboxes();
       await loadMessages();
     } catch (err) {
-      setStatus(err.message, "error");
+      presentAPIError(err, "Failed to load mail");
     }
   };
 
@@ -1948,7 +2005,7 @@ function bindUI() {
     try {
       await loadAdmin();
     } catch (err) {
-      setStatus(err.message, "error");
+      presentAPIError(err, "Failed to load admin data");
     }
   };
 

@@ -178,6 +178,35 @@ if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   else
     printf '[WARN] curl or BASE_DOMAIN missing; proxy route check skipped.\n'
   fi
+
+  if [[ "$PROXY_TLS" == "1" && -n "$BASE_DOMAIN" ]]; then
+    if have_cmd curl; then
+      redirect_location="$(curl -ksSI --max-time 6 -H "Host: ${BASE_DOMAIN}" "http://127.0.0.1/" | awk -F': ' '/^Location:/ {print $2}' | tr -d '\r' | head -n1 || true)"
+      if [[ "$redirect_location" =~ ^https:// ]]; then
+        record_ok "HTTP -> HTTPS redirect is active for ${BASE_DOMAIN}"
+      else
+        record_fail 22 "TLS_REDIRECT_MISSING: http://${BASE_DOMAIN}/ does not redirect to HTTPS"
+      fi
+    fi
+
+    if [[ "$PROXY_SERVER" == "apache2" ]] && have_cmd apache2ctl; then
+      apache_dump="$(apache2ctl -S 2>/dev/null || true)"
+      if echo "$apache_dump" | grep -Eqi "port 443 namevhost[[:space:]]+${BASE_DOMAIN}([[:space:]]|$)"; then
+        record_ok "apache2 has dedicated :443 vhost for ${BASE_DOMAIN}"
+      else
+        record_fail 22 "TLS_VHOST_MISSING: apache2 has no explicit :443 vhost for ${BASE_DOMAIN}"
+      fi
+    fi
+
+    if have_cmd openssl; then
+      cert_san="$(echo | openssl s_client -connect 127.0.0.1:443 -servername "${BASE_DOMAIN}" 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)"
+      if echo "$cert_san" | grep -Fq "DNS:${BASE_DOMAIN}"; then
+        record_ok "TLS certificate SAN covers ${BASE_DOMAIN}"
+      else
+        record_fail 22 "TLS_CERT_MISMATCH: certificate on 443 does not include SAN for ${BASE_DOMAIN}"
+      fi
+    fi
+  fi
 fi
 
 printf '\n--- Cookie policy ---\n'
@@ -281,6 +310,7 @@ case "$code" in
   10) printf 'Next: check app logs -> journalctl -u mailclient -n 100 --no-pager\n' ;;
   20) printf 'Next: check proxy service status/config test.\n' ;;
   21) printf 'Next: verify proxy server_name/vhost routes to 127.0.0.1:8080.\n' ;;
+  22) printf 'Next: fix TLS vhost/certificate mapping for BASE_DOMAIN (redirect + SAN + 443 vhost).\n' ;;
   30) printf 'Next: open required firewall ports (ufw/security groups).\n' ;;
   40) printf 'Next: update DNS A record to this server public IP.\n' ;;
   50) printf 'Next: align COOKIE_SECURE_MODE with deploy mode and restart mailclient.\n' ;;
