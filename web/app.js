@@ -29,6 +29,7 @@ const state = {
     checking: false,
     applying: false,
     lastStatus: null,
+    apiMissing: false,
   },
 };
 
@@ -251,7 +252,7 @@ async function api(path, opts = {}) {
     error.retryAfterSec = Number(res.headers.get("Retry-After") || "0");
     error.status = res.status;
     error.requestID = payload.request_id || res.headers.get("X-Request-ID") || "";
-    if (window && window.console && typeof window.console.error === "function") {
+    if (opts.logErrors !== false && window && window.console && typeof window.console.error === "function") {
       console.error("API request failed", {
         path,
         method,
@@ -273,6 +274,27 @@ async function api(path, opts = {}) {
     throw error;
   }
   return payload;
+}
+
+function legacyUpdaterStatus() {
+  return {
+    enabled: false,
+    configured: false,
+    current: {
+      version: "unknown",
+      commit: "",
+      build_time: "",
+      source_repo: "",
+    },
+    latest: null,
+    last_checked_at: "",
+    last_check_error: "",
+    update_available: false,
+    apply: {
+      state: "unsupported",
+    },
+    legacy_backend: true,
+  };
 }
 
 function setupRetrySecondsRemaining() {
@@ -852,7 +874,8 @@ function applyUpdateControls(status) {
   const st = status || state.update.lastStatus || {};
   const applyState = String(st.apply?.state || "idle");
   const busy = applyState === "queued" || applyState === "in_progress";
-  el.btnUpdateCheck.disabled = state.update.checking;
+  const checkSupported = !st.legacy_backend;
+  el.btnUpdateCheck.disabled = state.update.checking || !checkSupported;
   const canApply = !!st.enabled && !!st.configured && !!st.update_available && !busy && !state.update.applying;
   el.btnUpdateApply.disabled = !canApply;
 }
@@ -877,7 +900,9 @@ function renderUpdateStatus(status) {
   if (el.updateLastChecked) el.updateLastChecked.textContent = formatDate(status.last_checked_at) || "-";
   if (el.updateApplyState) el.updateApplyState.textContent = String(status.apply?.state || "idle");
 
-  if (!status.enabled) {
+  if (status.legacy_backend) {
+    setUpdateNote("This server build does not expose updater API endpoints yet (HTTP 404). Upgrade backend binary manually to a newer release, then reopen Admin.", "error");
+  } else if (!status.enabled) {
     setUpdateNote("Software update feature is disabled in configuration (UPDATE_ENABLED=false).", "info");
   } else if (!status.configured) {
     setUpdateNote("Updater is not configured on this host. Install mailclient-updater systemd units to enable one-click updates.", "error");
@@ -906,7 +931,7 @@ function startUpdatePolling() {
   stopUpdatePolling();
   state.update.pollTimer = window.setInterval(async () => {
     try {
-      const status = await api("/api/v1/admin/system/update/status");
+      const status = await api("/api/v1/admin/system/update/status", { logErrors: false });
       renderUpdateStatus(status);
       if (!isUpdateStateBusy(status)) {
         stopUpdatePolling();
@@ -917,6 +942,12 @@ function startUpdatePolling() {
         }
       }
     } catch (err) {
+      if (err.status === 404) {
+        state.update.apiMissing = true;
+        stopUpdatePolling();
+        renderUpdateStatus(legacyUpdaterStatus());
+        return;
+      }
       setUpdateNote(`Failed to refresh update status: ${err.message}`, "error");
     }
   }, 2500);
@@ -926,9 +957,25 @@ async function loadUpdateStatus(forceCheck = false) {
   if (!state.user || state.user.role !== "admin") {
     throw new Error("admin role required");
   }
-  const status = forceCheck
-    ? await api("/api/v1/admin/system/update/check", { method: "POST", json: {} })
-    : await api("/api/v1/admin/system/update/status");
+  if (state.update.apiMissing) {
+    const legacy = legacyUpdaterStatus();
+    renderUpdateStatus(legacy);
+    return legacy;
+  }
+  let status;
+  try {
+    status = forceCheck
+      ? await api("/api/v1/admin/system/update/check", { method: "POST", json: {}, logErrors: false })
+      : await api("/api/v1/admin/system/update/status", { logErrors: false });
+  } catch (err) {
+    if (err.status === 404) {
+      state.update.apiMissing = true;
+      const legacy = legacyUpdaterStatus();
+      renderUpdateStatus(legacy);
+      return legacy;
+    }
+    throw err;
+  }
   renderUpdateStatus(status);
   if (isUpdateStateBusy(status)) {
     startUpdatePolling();
