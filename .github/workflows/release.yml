@@ -44,8 +44,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo install --locked cargo-audit cargo-deny
-          cargo audit --manifest-path rust/Cargo.toml
-          cargo deny check --manifest-path rust/Cargo.toml --config rust/deny.toml advisories bans sources
+          (
+            cd rust
+            cargo audit
+            cargo deny check --config deny.toml advisories bans sources
+          )
 
       - name: Build release archives
         run: |
