@@ -74,6 +74,7 @@
           <section id="auth-pane-reset" class="auth-pane hidden" role="tabpanel" aria-labelledby="auth-mode-reset">
             <form id="form-reset-request" class="stack auth-form auth-group">
               <h3>Request Token</h3>
+              <p id="reset-capability-note" class="hint">Reset token delivery follows current server reset policy.</p>
               <label>Email <input name="email" type="email" required autocomplete="email"></label>
               <button class="cmd-btn" type="submit">Request Token</button>
             </form>
@@ -416,10 +417,26 @@
         <label>Body<textarea name="body" rows="10" required autocomplete="off"></textarea></label>
         <label class="file-field">Attachments<input name="attachments" type="file" multiple></label>
         <div class="actions compose-actions">
-          <button class="cmd-btn" id="btn-compose-cancel" type="button">Cancel</button>
           <button class="cmd-btn cmd-btn--primary" type="submit">Send</button>
         </div>
       </form>
+    </article>
+  </div>
+
+  <div id="ui-modal-overlay" class="ui-modal hidden" aria-hidden="true">
+    <article id="ui-modal-card" class="ui-modal-card panel" role="dialog" aria-modal="true" aria-labelledby="ui-modal-title" aria-describedby="ui-modal-body">
+      <header class="ui-modal-head">
+        <h3 id="ui-modal-title">Action</h3>
+      </header>
+      <p id="ui-modal-body" class="hint"></p>
+      <label id="ui-modal-input-wrap" class="ui-modal-input-wrap hidden">
+        <span id="ui-modal-input-label">Value</span>
+        <input id="ui-modal-input" type="text" autocomplete="off">
+      </label>
+      <div class="actions ui-modal-actions">
+        <button id="ui-modal-cancel" class="cmd-btn" type="button">Cancel</button>
+        <button id="ui-modal-confirm" class="cmd-btn cmd-btn--primary" type="button">Confirm</button>
+      </div>
     </article>
   </div>
 

@@ -7,6 +7,8 @@ const state = {
   auth: {
     lastUnauthorizedAtMs: 0,
     lastUnauthorizedCode: "",
+    resetCapabilities: null,
+    recoveryPromptShownForSession: false,
   },
   setup: {
     required: false,
@@ -44,6 +46,8 @@ const state = {
     activeAuthPane: "login",
     composeOpen: false,
     composeLastTrigger: null,
+    modalOpen: false,
+    modalLastTrigger: null,
     activeMailPane: "mailboxes",
     activeKeyboardPane: "mailboxes",
     activeAdminSection: "update",
@@ -103,6 +107,7 @@ const el = {
   authPaneLogin: document.getElementById("auth-pane-login"),
   authPaneRegister: document.getElementById("auth-pane-register"),
   authPaneReset: document.getElementById("auth-pane-reset"),
+  resetCapabilityNote: document.getElementById("reset-capability-note"),
   mailboxes: document.getElementById("mailboxes"),
   messages: document.getElementById("messages"),
   meta: document.getElementById("message-meta"),
@@ -115,10 +120,18 @@ const el = {
   btnTrash: document.getElementById("btn-trash"),
   btnComposeOpen: document.getElementById("btn-compose-open"),
   btnComposeClose: document.getElementById("btn-compose-close"),
-  btnComposeCancel: document.getElementById("btn-compose-cancel"),
   composeOverlay: document.getElementById("compose-overlay"),
   composeDialog: document.getElementById("compose-dialog"),
   composeForm: document.getElementById("form-compose"),
+  uiModalOverlay: document.getElementById("ui-modal-overlay"),
+  uiModalCard: document.getElementById("ui-modal-card"),
+  uiModalTitle: document.getElementById("ui-modal-title"),
+  uiModalBody: document.getElementById("ui-modal-body"),
+  uiModalInputWrap: document.getElementById("ui-modal-input-wrap"),
+  uiModalInputLabel: document.getElementById("ui-modal-input-label"),
+  uiModalInput: document.getElementById("ui-modal-input"),
+  uiModalCancel: document.getElementById("ui-modal-cancel"),
+  uiModalConfirm: document.getElementById("ui-modal-confirm"),
   registerForm: document.getElementById("form-register"),
   registerSubmit: document.querySelector("#form-register button[type='submit']"),
   captchaShell: document.getElementById("captcha-shell"),
@@ -306,6 +319,9 @@ function setActiveAuthPane(pane) {
     panel.classList.toggle("hidden", hidden);
     panel.setAttribute("aria-hidden", hidden ? "true" : "false");
   });
+  if (next === "reset" && !state.auth.resetCapabilities) {
+    void loadResetCapabilities();
+  }
 }
 
 function safeDomID(prefix, raw, fallback = "item") {
@@ -388,8 +404,10 @@ function routeToAuthWithMessage(message, code = "") {
   const shouldAnnounce = now - state.auth.lastUnauthorizedAtMs > 1800 || state.auth.lastUnauthorizedCode !== code;
   state.auth.lastUnauthorizedAtMs = now;
   state.auth.lastUnauthorizedCode = code;
+  state.auth.recoveryPromptShownForSession = false;
   state.user = null;
   closeComposeOverlay(false);
+  closeUIModal({ confirmed: false, value: "" });
   applyNavVisibility();
   if (!state.setup.required) {
     setActiveTab(el.tabAuth);
@@ -462,7 +480,7 @@ function closeComposeOverlay(restoreFocus = true) {
   state.ui.composeOpen = false;
   el.composeOverlay.classList.add("hidden");
   el.composeOverlay.setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "";
+  document.body.style.overflow = state.ui.modalOpen ? "hidden" : "";
   if (restoreFocus && state.ui.composeLastTrigger && typeof state.ui.composeLastTrigger.focus === "function") {
     state.ui.composeLastTrigger.focus();
   }
@@ -471,6 +489,7 @@ function closeComposeOverlay(restoreFocus = true) {
 
 function handleComposeOverlayKeydown(event) {
   if (!state.ui.composeOpen) return;
+  if (state.ui.modalOpen) return;
   if (event.key === "Escape") {
     event.preventDefault();
     closeComposeOverlay(true);
@@ -478,6 +497,143 @@ function handleComposeOverlayKeydown(event) {
   }
   if (event.key !== "Tab") return;
   const focusables = composeFocusableElements();
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  }
+}
+
+const modalState = {
+  resolver: null,
+  rejecter: null,
+  mode: "",
+};
+
+function modalFocusableElements() {
+  if (!el.uiModalCard) return [];
+  return Array.from(el.uiModalCard.querySelectorAll("button, [href], input, textarea, select, [tabindex]:not([tabindex='-1'])"))
+    .filter((node) => !node.disabled && node.offsetParent !== null);
+}
+
+function closeUIModal(result = null) {
+  if (!el.uiModalOverlay) return;
+  state.ui.modalOpen = false;
+  el.uiModalOverlay.classList.add("hidden");
+  el.uiModalOverlay.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = state.ui.composeOpen ? "hidden" : "";
+  if (modalState.resolver) {
+    modalState.resolver(result);
+  }
+  modalState.resolver = null;
+  modalState.rejecter = null;
+  modalState.mode = "";
+  if (state.ui.modalLastTrigger && typeof state.ui.modalLastTrigger.focus === "function") {
+    state.ui.modalLastTrigger.focus();
+  }
+  state.ui.modalLastTrigger = null;
+}
+
+function openUIModal(options) {
+  if (!el.uiModalOverlay || !el.uiModalCard) {
+    return Promise.resolve({ confirmed: false, value: "" });
+  }
+  if (state.ui.modalOpen) {
+    closeUIModal({ confirmed: false, value: "" });
+  }
+  const {
+    title = "Action",
+    body = "",
+    confirmText = "Confirm",
+    cancelText = "Cancel",
+    inputLabel = "Value",
+    inputType = "text",
+    inputValue = "",
+    mode = "confirm",
+    trigger = null,
+  } = options || {};
+
+  state.ui.modalOpen = true;
+  state.ui.modalLastTrigger = trigger || document.activeElement || null;
+  modalState.mode = mode;
+  el.uiModalTitle.textContent = title;
+  el.uiModalBody.textContent = body;
+  el.uiModalConfirm.textContent = confirmText;
+  el.uiModalCancel.textContent = cancelText;
+  el.uiModalInputLabel.textContent = inputLabel;
+  el.uiModalInput.type = inputType;
+  el.uiModalInput.value = inputValue;
+  const hasInput = mode === "prompt";
+  el.uiModalInputWrap.classList.toggle("hidden", !hasInput);
+  el.uiModalOverlay.classList.remove("hidden");
+  el.uiModalOverlay.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  window.setTimeout(() => {
+    if (hasInput) el.uiModalInput.focus();
+    else el.uiModalConfirm.focus();
+  }, 0);
+
+  return new Promise((resolve, reject) => {
+    modalState.resolver = resolve;
+    modalState.rejecter = reject;
+  });
+}
+
+async function showPromptModal(opts) {
+  const out = await openUIModal({
+    mode: "prompt",
+    title: opts?.title || "Input required",
+    body: opts?.body || "",
+    inputLabel: opts?.label || "Value",
+    inputType: opts?.inputType || "text",
+    inputValue: opts?.defaultValue || "",
+    confirmText: opts?.confirmText || "Confirm",
+    cancelText: opts?.cancelText || "Cancel",
+    trigger: opts?.trigger || null,
+  });
+  if (!out || !out.confirmed) return "";
+  return String(out.value || "");
+}
+
+async function showConfirmModal(opts) {
+  const out = await openUIModal({
+    mode: "confirm",
+    title: opts?.title || "Confirm",
+    body: opts?.body || "",
+    confirmText: opts?.confirmText || "Confirm",
+    cancelText: opts?.cancelText || "Cancel",
+    trigger: opts?.trigger || null,
+  });
+  return !!(out && out.confirmed);
+}
+
+function closeOpenRowMenus(except = null) {
+  const menus = Array.from(document.querySelectorAll(".row-menu[open]"));
+  for (const menu of menus) {
+    if (except && menu === except) continue;
+    menu.removeAttribute("open");
+  }
+}
+
+function handleUIModalKeydown(event) {
+  if (!state.ui.modalOpen) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeUIModal({ confirmed: false, value: "" });
+    return;
+  }
+  if (event.key === "Enter" && modalState.mode !== "prompt") {
+    event.preventDefault();
+    closeUIModal({ confirmed: true, value: "" });
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusables = modalFocusableElements();
   if (focusables.length === 0) return;
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
@@ -760,6 +916,35 @@ async function loadCaptchaConfig() {
     state.captcha.config = null;
   }
   return state.captcha.config;
+}
+
+function renderResetCapabilityNote() {
+  if (!el.resetCapabilityNote) return;
+  const cap = state.auth.resetCapabilities;
+  if (!cap) {
+    el.resetCapabilityNote.textContent = "Reset token delivery follows current server reset policy.";
+    return;
+  }
+  const enabled = !!cap.self_service_enabled;
+  const authMode = String(cap.auth_mode || "sql").toUpperCase();
+  const delivery = String(cap.delivery || "disabled");
+  const ttl = Number(cap.token_ttl_minutes || 30);
+  if (!enabled) {
+    el.resetCapabilityNote.textContent = `Reset is currently unavailable (${authMode} mode, delivery ${delivery}).`;
+    return;
+  }
+  const mappingNote = cap.requires_mapped_login ? "Mapped mailbox login is required." : "Mapped mailbox login is optional.";
+  el.resetCapabilityNote.textContent = `Reset enabled (${authMode}, delivery ${delivery}, token TTL ${ttl} min). ${mappingNote}`;
+}
+
+async function loadResetCapabilities() {
+  try {
+    const data = await api("/api/v1/public/password-reset/capabilities", { logErrors: false });
+    state.auth.resetCapabilities = data || null;
+  } catch {
+    state.auth.resetCapabilities = null;
+  }
+  renderResetCapabilityNote();
 }
 
 async function initCaptchaUI() {
@@ -1400,12 +1585,61 @@ async function refreshSession(opts = {}) {
     state.user = me;
     setStatus(`Signed in as ${me.email}.`, "ok");
     applyNavVisibility();
+    await promptRecoveryEmailIfNeeded();
     return { ok: true, user: me };
   } catch (err) {
+    state.auth.recoveryPromptShownForSession = false;
     state.user = null;
     applyNavVisibility();
     if (opts.throwOnFail) throw err;
     return { ok: false, error: err };
+  }
+}
+
+function userNeedsRecoveryEmail(user) {
+  if (!user || typeof user !== "object") {
+    return false;
+  }
+  if (user.needs_recovery_email === true) {
+    return true;
+  }
+  if (typeof user.recovery_email !== "string") {
+    return true;
+  }
+  return String(user.recovery_email).trim() === "";
+}
+
+async function promptRecoveryEmailIfNeeded() {
+  if (!state.user || state.auth.recoveryPromptShownForSession || !userNeedsRecoveryEmail(state.user)) {
+    return;
+  }
+  state.auth.recoveryPromptShownForSession = true;
+
+  while (state.user && userNeedsRecoveryEmail(state.user)) {
+    const seed = String(state.user.email || "").trim();
+    const input = window.prompt("Set recovery email for password reset tokens:", seed); // allow-native-recovery-email-prompt
+    if (input === null) {
+      setStatus("Recovery email is missing. Password reset delivery stays disabled until it is set.", "info");
+      return;
+    }
+    const candidate = String(input || "").trim();
+    if (!candidate) {
+      setStatus("Recovery email cannot be empty.", "error");
+      continue;
+    }
+    try {
+      const res = await api("/api/v1/me/recovery-email", {
+        method: "POST",
+        json: { recovery_email: candidate },
+      });
+      const next = String(res.recovery_email || candidate).trim().toLowerCase();
+      state.user.recovery_email = next;
+      state.user.needs_recovery_email = false;
+      setStatus("Recovery email saved.", "ok");
+      return;
+    } catch (err) {
+      setStatus(formatAPIError(err, "Failed to save recovery email."), "error");
+    }
   }
 }
 
@@ -1771,9 +2005,9 @@ async function loadAdminRegistrations() {
     const tr = document.createElement("tr");
     tr.dataset.regId = regID;
     tr.innerHTML = `<td class="num"><input class="admin-reg-check" data-id="${escapeHtml(regID)}" type="checkbox" ${checked ? "checked" : ""} aria-label="Select ${escapeHtml(regEmail)}"></td>
-      <td>${escapeHtml(regEmail)}</td>
+      <td><span class="cell-truncate" title="${escapeHtml(regEmail)}">${escapeHtml(regEmail)}</span></td>
       <td><span class="status-chip status-chip--${escapeHtml(String(r.status || "pending").toLowerCase())}">${escapeHtml(r.status || "pending")}</span></td>
-      <td class="num">${formatDate(regCreatedAt)}</td>
+      <td class="num"><span class="cell-truncate" title="${escapeHtml(formatDate(regCreatedAt))}">${escapeHtml(formatDate(regCreatedAt))}</span></td>
       <td></td>`;
     const td = tr.children[4];
     const check = tr.querySelector(".admin-reg-check");
@@ -1787,6 +2021,9 @@ async function loadAdminRegistrations() {
     const menu = document.createElement("details");
     menu.className = "row-menu";
     menu.innerHTML = `<summary>Actions</summary>`;
+    menu.addEventListener("toggle", () => {
+      if (menu.open) closeOpenRowMenus(menu);
+    });
     const menuBody = document.createElement("div");
     menuBody.className = "row-menu-body";
     const approve = document.createElement("button");
@@ -1813,7 +2050,17 @@ async function loadAdminRegistrations() {
         if (!regID) {
           throw new Error("registration id missing from API response");
         }
-        const reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
+        const reasonInput = await showPromptModal({
+          title: "Reject Registration",
+          body: `Provide rejection reason for ${regEmail}.`,
+          label: "Reason",
+          defaultValue: "Rejected by admin",
+          confirmText: "Reject",
+          cancelText: "Cancel",
+          trigger: reject,
+        });
+        if (!reasonInput) return;
+        const reason = reasonInput.trim() || "Rejected";
         await api(`/api/v1/admin/registrations/${encodeURIComponent(regID)}/reject`, { method: "POST", json: { reason } });
         state.admin.registrations.selected.delete(regID);
         await loadAdminRegistrations();
@@ -1861,11 +2108,12 @@ async function loadAdminUsers() {
     const userID = String(u.id || "").trim();
     const checked = state.admin.users.selected.has(userID);
     const userStatus = String(u.status || "").trim().toLowerCase();
+    const userEmail = String(u.email || "");
     const tr = document.createElement("tr");
     tr.dataset.userId = userID;
     tr.innerHTML = `<td class="num"><input class="admin-user-check" data-id="${escapeHtml(userID)}" type="checkbox" ${checked ? "checked" : ""} aria-label="Select ${escapeHtml(String(u.email || ""))}"></td>
-      <td>${escapeHtml(u.email)}</td>
-      <td>${escapeHtml(u.role)}</td>
+      <td><span class="cell-truncate" title="${escapeHtml(userEmail)}">${escapeHtml(userEmail)}</span></td>
+      <td><span class="cell-truncate" title="${escapeHtml(u.role)}">${escapeHtml(u.role)}</span></td>
       <td><span class="status-chip status-chip--${escapeHtml(userStatus)}">${escapeHtml(u.status)}</span></td>
       <td><span class="status-chip">${escapeHtml(u.provision_state || "-")}</span></td>
       <td></td>`;
@@ -1881,6 +2129,9 @@ async function loadAdminUsers() {
     const menu = document.createElement("details");
     menu.className = "row-menu";
     menu.innerHTML = `<summary>Actions</summary>`;
+    menu.addEventListener("toggle", () => {
+      if (menu.open) closeOpenRowMenus(menu);
+    });
     const menuBody = document.createElement("div");
     menuBody.className = "row-menu-body";
     if (userStatus === "active") {
@@ -1920,9 +2171,18 @@ async function loadAdminUsers() {
     reset.textContent = "Reset Password";
     reset.onclick = async () => {
       try {
-        const pw = prompt(`New password for ${u.email}:`);
+        const pw = await showPromptModal({
+          title: "Reset Password",
+          body: `Set a new password for ${userEmail}.`,
+          label: "New password",
+          inputType: "password",
+          defaultValue: "",
+          confirmText: "Apply",
+          cancelText: "Cancel",
+          trigger: reset,
+        });
         if (!pw) return;
-        await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST", json: { new_password: pw } });
+        await api(`/api/v1/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST", json: { new_password: String(pw).trim() } });
         setStatus(`Password reset for ${u.email}.`, "ok");
       } catch (err) {
         presentAPIError(err, "Failed to reset password");
@@ -1982,7 +2242,17 @@ async function runBulkRegistrationDecision(decision) {
   }
   let reason = "";
   if (decision === "reject") {
-    reason = prompt("Reject reason:", "Rejected by admin") || "Rejected";
+    const input = await showPromptModal({
+      title: "Reject Selected Registrations",
+      body: `Provide rejection reason for ${ids.length} selected item(s).`,
+      label: "Reason",
+      defaultValue: "Rejected by admin",
+      confirmText: "Reject",
+      cancelText: "Cancel",
+      trigger: el.btnRegReject,
+    });
+    if (!input) return;
+    reason = input.trim() || "Rejected";
   }
   const payload = {
     ids,
@@ -1993,8 +2263,20 @@ async function runBulkRegistrationDecision(decision) {
   state.admin.registrations.selected.clear();
   await loadAdminRegistrations();
   const appliedCount = Array.isArray(out.applied) ? out.applied.length : 0;
-  const failedCount = Array.isArray(out.failed) ? out.failed.length : 0;
-  setStatus(`${decision === "approve" ? "Approved" : "Rejected"} ${appliedCount} registration(s)${failedCount ? `, ${failedCount} failed` : ""}.`, failedCount ? "error" : "ok");
+  const failed = Array.isArray(out.failed) ? out.failed : [];
+  const failedCount = failed.length;
+  if (failedCount > 0) {
+    const preview = failed
+      .slice(0, 2)
+      .map((item) => `${item.id || "?"}:${item.code || "action_failed"}`)
+      .join(", ");
+    setStatus(
+      `${decision === "approve" ? "Approved" : "Rejected"} ${appliedCount} registration(s), ${failedCount} failed (${preview})`,
+      "error",
+    );
+    return;
+  }
+  setStatus(`${decision === "approve" ? "Approved" : "Rejected"} ${appliedCount} registration(s).`, "ok");
 }
 
 async function runBulkUserAction(action) {
@@ -2010,8 +2292,17 @@ async function runBulkUserAction(action) {
   state.admin.users.selected.clear();
   await loadAdminUsers();
   const appliedCount = Array.isArray(out.applied) ? out.applied.length : 0;
-  const failedCount = Array.isArray(out.failed) ? out.failed.length : 0;
-  setStatus(`${action === "suspend" ? "Suspended" : "Unsuspended"} ${appliedCount} user(s)${failedCount ? `, ${failedCount} failed` : ""}.`, failedCount ? "error" : "ok");
+  const failed = Array.isArray(out.failed) ? out.failed : [];
+  const failedCount = failed.length;
+  if (failedCount > 0) {
+    const preview = failed
+      .slice(0, 2)
+      .map((item) => `${item.id || "?"}:${item.code || "action_failed"}`)
+      .join(", ");
+    setStatus(`${action === "suspend" ? "Suspended" : "Unsuspended"} ${appliedCount} user(s), ${failedCount} failed (${preview})`, "error");
+    return;
+  }
+  setStatus(`${action === "suspend" ? "Suspended" : "Unsuspended"} ${appliedCount} user(s).`, "ok");
 }
 
 function mailboxesButtons() {
@@ -2056,7 +2347,7 @@ async function moveMessageSelection(delta) {
 
 async function handleMailKeyboard(event) {
   if (el.viewMail.classList.contains("hidden")) return;
-  if (state.ui.composeOpen) return;
+  if (state.ui.composeOpen || state.ui.modalOpen) return;
   const target = event.target;
   const isEditable = target && (
     target.tagName === "INPUT"
@@ -2322,7 +2613,10 @@ function bindUI() {
     };
   }
   if (el.authModeReset) {
-    el.authModeReset.onclick = () => setActiveAuthPane("reset");
+    el.authModeReset.onclick = () => {
+      setActiveAuthPane("reset");
+      void loadResetCapabilities();
+    };
   }
   const authModeButtons = [el.authModeLogin, el.authModeRegister, el.authModeReset].filter(Boolean);
   authModeButtons.forEach((button, index) => {
@@ -2573,6 +2867,10 @@ function bindUI() {
   document.addEventListener("keydown", (event) => {
     void handleMailKeyboard(event);
   });
+  document.addEventListener("click", (event) => {
+    if (event.target && event.target.closest && event.target.closest(".row-menu")) return;
+    closeOpenRowMenus(null);
+  });
 
   document.getElementById("form-login").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -2769,9 +3067,6 @@ function bindUI() {
   if (el.btnComposeClose) {
     el.btnComposeClose.onclick = () => closeComposeOverlay(true);
   }
-  if (el.btnComposeCancel) {
-    el.btnComposeCancel.onclick = () => closeComposeOverlay(true);
-  }
   if (el.composeOverlay) {
     el.composeOverlay.addEventListener("click", (event) => {
       if (event.target === el.composeOverlay) {
@@ -2780,6 +3075,23 @@ function bindUI() {
     });
   }
   document.addEventListener("keydown", handleComposeOverlayKeydown);
+  if (el.uiModalCancel) {
+    el.uiModalCancel.onclick = () => closeUIModal({ confirmed: false, value: "" });
+  }
+  if (el.uiModalConfirm) {
+    el.uiModalConfirm.onclick = () => {
+      const value = el.uiModalInput ? el.uiModalInput.value : "";
+      closeUIModal({ confirmed: true, value });
+    };
+  }
+  if (el.uiModalOverlay) {
+    el.uiModalOverlay.addEventListener("click", (event) => {
+      if (event.target === el.uiModalOverlay) {
+        closeUIModal({ confirmed: false, value: "" });
+      }
+    });
+  }
+  document.addEventListener("keydown", handleUIModalKeydown);
 
   el.tabSetup.onclick = () => {
     if (!state.setup.required) return;
@@ -2830,6 +3142,7 @@ function bindUI() {
       // ignore
     }
     stopUpdatePolling();
+    state.auth.recoveryPromptShownForSession = false;
     state.user = null;
     state.selectedMessage = null;
     closeComposeOverlay(false);
@@ -2890,6 +3203,7 @@ async function bootstrap() {
   ThemeController.initTheme();
   bindUI();
   await initCaptchaUI();
+  await loadResetCapabilities();
 
   try {
     if (await enterSetupIfRequired()) {

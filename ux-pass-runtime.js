@@ -5,10 +5,15 @@ async function runDesktop() {
   const context = await browser.newContext({ viewport: { width: 1366, height: 900 } });
   const page = await context.newPage();
   const consoleErrors = [];
+  const dialogs = [];
   page.on('console', (msg) => {
     if (msg.type() === 'error') consoleErrors.push(msg.text());
   });
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.type());
+    await dialog.dismiss();
+  });
 
   await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
   const initialTheme = await page.locator('html').getAttribute('data-theme');
@@ -64,7 +69,7 @@ async function runDesktop() {
   const adminVisible = await page.locator('.admin-layout').count();
 
   await browser.close();
-  return { consoleErrors, composeVisible, statusText, mailVisible, adminVisible, initialTheme };
+  return { consoleErrors, dialogs, composeVisible, statusText, mailVisible, adminVisible, initialTheme };
 }
 
 async function runMobile() {
@@ -72,10 +77,15 @@ async function runMobile() {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const page = await context.newPage();
   const consoleErrors = [];
+  const dialogs = [];
   page.on('console', (msg) => {
     if (msg.type() === 'error') consoleErrors.push(msg.text());
   });
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.type());
+    await dialog.dismiss();
+  });
 
   await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
   const initialTheme = await page.locator('html').getAttribute('data-theme');
@@ -98,7 +108,7 @@ async function runMobile() {
   }
 
   await browser.close();
-  return { consoleErrors, mobilePane, initialTheme };
+  return { consoleErrors, dialogs, mobilePane, initialTheme };
 }
 
 (async () => {

@@ -66,12 +66,37 @@ html[data-theme="paper-light"] {
   --toolbar-track-gap: 8px;
   --tab-active-bg: var(--fg-0);
   --tab-active-fg: var(--bg-0);
+  --scrollbar-size: 11px;
+  --scrollbar-track: var(--bg-1);
+  --scrollbar-thumb: var(--line-1);
+  --scrollbar-thumb-active: var(--line-0);
 
   --font-ui: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border: var(--border-w) solid var(--line-2);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: var(--border-w) solid var(--line-2);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-active);
 }
 
 html,
@@ -274,20 +299,36 @@ input[type="checkbox"] {
 
 input[type="checkbox"]::before {
   content: "";
-  width: calc(var(--ctrl-checkbox-size) - 8px);
-  height: calc(var(--ctrl-checkbox-size) - 8px);
-  background: var(--bg-0);
+  color: var(--bg-0);
+  font-size: 12px;
+  line-height: 1;
   transform: scale(0);
   transition: transform 120ms steps(2, end);
 }
 
-input[type="checkbox"]:checked {
+input[type="checkbox"]:indeterminate::before {
+  content: "−";
+  transform: scale(1);
+}
+
+input[type="checkbox"]:indeterminate {
   background: var(--fg-0);
   border-color: var(--line-0);
 }
 
 input[type="checkbox"]:checked::before {
+  content: "✓";
   transform: scale(1);
+}
+
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  background: var(--fg-0);
+  border-color: var(--line-0);
+}
+
+input[type="checkbox"]:not(:checked):not(:indeterminate)::before {
+  transform: scale(0);
 }
 
 input[type="checkbox"]:disabled {
@@ -642,6 +683,7 @@ a:focus-visible {
   grid-template-columns: 220px minmax(300px, 1fr) minmax(360px, 1.2fr);
   border: var(--border-w) solid var(--line-1);
   min-height: 620px;
+  height: clamp(560px, calc(100vh - 260px), 760px);
 }
 
 .mail-pane {
@@ -658,6 +700,7 @@ a:focus-visible {
 
 .mail-pane--reader {
   grid-template-rows: auto auto minmax(var(--reader-body-min-h), 1fr) auto auto;
+  min-height: 0;
 }
 
 .mail-pane:last-child {
@@ -692,6 +735,7 @@ a:focus-visible {
   padding: 0;
   list-style: none;
   overflow: auto;
+  min-height: 0;
 }
 
 .mailbox-row,
@@ -788,7 +832,8 @@ a:focus-visible {
 }
 
 .message-row.active .message-date,
-.message-row.active .message-subject {
+.message-row.active .message-subject,
+.message-row.active .message-from {
   color: var(--bg-0);
 }
 
@@ -840,8 +885,9 @@ a:focus-visible {
   margin: 0;
   padding: var(--space-3);
   overflow: auto;
-  min-height: var(--reader-body-min-h);
-  max-height: var(--reader-body-max-h);
+  min-height: 0;
+  height: 100%;
+  max-height: none;
   line-height: 1.45;
   border-bottom: var(--border-w) solid var(--line-2);
 }
@@ -869,6 +915,7 @@ a:focus-visible {
   gap: 0;
   padding: 0;
   border-top: var(--border-w) solid var(--line-2);
+  background: var(--bg-2);
 }
 
 .reader-commands .cmd-btn {
@@ -973,15 +1020,11 @@ a:focus-visible {
 }
 
 #admin-section-registrations .section-tools {
-  grid-template-columns: 260px 170px 150px 120px 140px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  grid-template-columns: minmax(200px, 1.7fr) repeat(3, minmax(108px, 1fr)) minmax(112px, 0.9fr);
 }
 
 #admin-section-users .section-tools {
-  grid-template-columns: 220px 150px 150px 170px 150px 120px 140px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  grid-template-columns: minmax(180px, 1.5fr) repeat(5, minmax(108px, 1fr)) minmax(112px, 0.9fr);
 }
 
 #admin-section-registrations .section-tools > *,
@@ -1023,9 +1066,15 @@ a:focus-visible {
   height: var(--row-h-desktop);
   text-align: left;
   vertical-align: middle;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
   white-space: nowrap;
+}
+
+.cell-truncate {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .table th,
@@ -1087,6 +1136,10 @@ a:focus-visible {
   position: relative;
 }
 
+.row-menu[open] {
+  z-index: 30;
+}
+
 .row-menu summary {
   list-style: none;
   min-height: var(--chip-h);
@@ -1119,6 +1172,8 @@ a:focus-visible {
 #admin-section-users td:last-child,
 #admin-section-registrations td:last-child {
   text-align: left;
+  position: relative;
+  overflow: visible;
 }
 
 .file-field {
@@ -1139,7 +1194,7 @@ a:focus-visible {
   gap: var(--space-1);
   padding: var(--space-1);
   min-width: 170px;
-  z-index: 12;
+  z-index: 40;
 }
 
 .machine-grid {
@@ -1184,6 +1239,7 @@ a:focus-visible {
   padding: var(--space-4);
   display: grid;
   place-items: center;
+  z-index: 60;
 }
 
 .compose-dialog {
@@ -1205,6 +1261,37 @@ a:focus-visible {
 }
 
 .compose-actions {
+  justify-content: flex-end;
+}
+
+.ui-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  padding: var(--space-4);
+  display: grid;
+  place-items: center;
+  z-index: 80;
+}
+
+.ui-modal-card {
+  width: min(520px, 100%);
+  border: var(--border-w) solid var(--line-0);
+  background: var(--bg-1);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ui-modal-head {
+  border-bottom: var(--border-w) solid var(--line-1);
+  padding-bottom: var(--space-2);
+}
+
+.ui-modal-input-wrap {
+  gap: var(--space-1);
+}
+
+.ui-modal-actions {
   justify-content: flex-end;
 }
 
@@ -1265,6 +1352,7 @@ a:focus-visible {
   .mail-layout {
     grid-template-columns: 1fr;
     min-height: 0;
+    height: auto;
   }
 
   .mail-pane {

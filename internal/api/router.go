@@ -1,8 +1,12 @@
 package api
 
 import (
+	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +41,7 @@ type Handlers struct {
 	limiter         *rate.Limiter
 	captchaVerifier captcha.Verifier
 	updateMgr       *update.Manager
+	resetKey        []byte
 }
 
 const (
@@ -51,6 +56,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 		limiter:         rate.NewLimiter(),
 		captchaVerifier: captcha.NewVerifier(cfg),
 		updateMgr:       update.NewManager(cfg),
+		resetKey:        util.Derive32ByteKey(cfg.SessionEncryptKey + "|reset-limiter"),
 	}
 	r := chi.NewRouter()
 	r.Use(chimw.Recoverer)
@@ -109,13 +115,14 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/public/captcha/config", h.PublicCaptchaConfig)
+		r.Get("/public/password-reset/capabilities", h.PublicPasswordResetCapabilities)
 		r.Get("/setup/status", h.SetupStatus)
 		r.With(middleware.RateLimit(h.limiter, "setup_complete", 20, time.Minute, h.cfg.TrustProxy)).Post("/setup/complete", h.SetupComplete)
 		r.With(middleware.RateLimit(h.limiter, "register", 10, time.Minute, h.cfg.TrustProxy)).Post("/register", h.Register)
 		r.With(middleware.RateLimit(h.limiter, "login", 20, time.Minute, h.cfg.TrustProxy)).Post("/login", h.Login)
 		r.Post("/logout", h.Logout)
 		r.With(middleware.RateLimit(h.limiter, "reset_request", 10, time.Minute, h.cfg.TrustProxy)).Post("/password/reset/request", h.PasswordResetRequest)
-		r.Post("/password/reset/confirm", h.PasswordResetConfirm)
+		r.With(middleware.RateLimit(h.limiter, "reset_confirm_ip", 20, time.Minute, h.cfg.TrustProxy)).Post("/password/reset/confirm", h.PasswordResetConfirm)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName, h.cfg.TrustProxy))
@@ -128,6 +135,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
+				r.Post("/me/recovery-email", h.MeUpdateRecoveryEmail)
 				r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/send", h.SendMessage)
 				r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/reply", h.ReplyMessage)
 				r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/forward", h.ForwardMessage)
@@ -203,6 +211,11 @@ func (h *Handlers) PublicCaptchaConfig(w http.ResponseWriter, r *http.Request) {
 		"widget_api_url": widgetAPIURL,
 		"mode":           mode,
 	})
+}
+
+func (h *Handlers) PublicPasswordResetCapabilities(w http.ResponseWriter, r *http.Request) {
+	caps := h.svc.PasswordResetCapabilities()
+	util.WriteJSON(w, 200, caps)
 }
 
 func (h *Handlers) SetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -421,15 +434,22 @@ func (h *Handlers) PasswordResetRequest(w http.ResponseWriter, r *http.Request) 
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
-	if err := h.svc.RequestPasswordReset(r.Context(), req.Email); err != nil {
-		if errors.Is(err, service.ErrPAMPasswordManaged) {
-			util.WriteError(w, 400, "unsupported_auth_backend", err.Error(), middleware.RequestID(r.Context()))
-			return
-		}
-		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+	norm := strings.ToLower(strings.TrimSpace(req.Email))
+	if !h.allowResetRateKey(r.Context(), "reset_request_ident", h.resetIdentifierRateKey(norm), 6, 15*time.Minute) {
+		util.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 		return
 	}
-	util.WriteJSON(w, 200, map[string]string{"status": "accepted"})
+	if err := h.svc.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		if errors.Is(err, service.ErrPasswordResetUnavailable) {
+			util.WriteError(w, http.StatusServiceUnavailable, "password_reset_unavailable", "password reset is currently unavailable", middleware.RequestID(r.Context()))
+			return
+		}
+		// Keep request behavior generic for public callers.
+		log.Printf("password_reset_request_soft_error request_id=%s email_hash=%s err=%q", middleware.RequestID(r.Context()), h.resetIdentifierRateKey(norm), err.Error())
+		util.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+		return
+	}
+	util.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (h *Handlers) PasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
@@ -444,9 +464,14 @@ func (h *Handlers) PasswordResetConfirm(w http.ResponseWriter, r *http.Request) 
 		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
 		return
 	}
+	tokenKey := h.resetTokenPrefixRateKey(req.Token)
+	if tokenKey != "" && !h.allowResetRateKey(r.Context(), "reset_confirm_token", tokenKey, 12, 15*time.Minute) {
+		util.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many requests", middleware.RequestID(r.Context()))
+		return
+	}
 	if err := h.svc.ConfirmPasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
-		if errors.Is(err, service.ErrPAMPasswordManaged) {
-			util.WriteError(w, 400, "unsupported_auth_backend", err.Error(), middleware.RequestID(r.Context()))
+		if errors.Is(err, service.ErrPasswordResetUnavailable) {
+			util.WriteError(w, http.StatusServiceUnavailable, "password_reset_unavailable", "password reset is currently unavailable", middleware.RequestID(r.Context()))
 			return
 		}
 		util.WriteError(w, 400, "reset_failed", err.Error(), middleware.RequestID(r.Context()))
@@ -457,7 +482,43 @@ func (h *Handlers) PasswordResetConfirm(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
-	util.WriteJSON(w, 200, map[string]any{"id": u.ID, "email": u.Email, "role": u.Role, "status": u.Status})
+	recoveryEmail := ""
+	if u.RecoveryEmail != nil {
+		recoveryEmail = strings.TrimSpace(*u.RecoveryEmail)
+	}
+	util.WriteJSON(w, 200, map[string]any{
+		"id":                   u.ID,
+		"email":                u.Email,
+		"role":                 u.Role,
+		"status":               u.Status,
+		"recovery_email":       recoveryEmail,
+		"needs_recovery_email": recoveryEmail == "",
+	})
+}
+
+func (h *Handlers) MeUpdateRecoveryEmail(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	var req struct {
+		RecoveryEmail string `json:"recovery_email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	normalized, err := h.svc.UpdateRecoveryEmail(r.Context(), u.ID, req.RecoveryEmail)
+	if err != nil {
+		if errors.Is(err, service.ErrInvalidRecoveryEmail) {
+			util.WriteError(w, 400, "invalid_recovery_email", "valid recovery_email is required", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{
+		"status":               "ok",
+		"recovery_email":       normalized,
+		"needs_recovery_email": false,
+	})
 }
 
 func (h *Handlers) ListMailboxes(w http.ResponseWriter, r *http.Request) {
@@ -712,8 +773,16 @@ func (h *Handlers) AdminRejectRegistration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := h.svc.RejectRegistration(r.Context(), admin.ID, id, req.Reason); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, 404, "registration_not_found", "registration not found", middleware.RequestID(r.Context()))
+			return
+		}
 		if errors.Is(err, store.ErrConflict) {
 			util.WriteError(w, 409, "already_decided", "registration has already been decided", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, store.ErrUserStateConflict) {
+			util.WriteError(w, 409, "registration_user_state_conflict", "registration linked user is not pending", middleware.RequestID(r.Context()))
 			return
 		}
 		util.WriteError(w, 400, "reject_failed", err.Error(), middleware.RequestID(r.Context()))
@@ -757,8 +826,12 @@ func (h *Handlers) AdminBulkRegistrationDecision(w http.ResponseWriter, r *http.
 			continue
 		}
 		code := "action_failed"
-		if errors.Is(err, store.ErrConflict) {
+		if errors.Is(err, store.ErrNotFound) {
+			code = "registration_not_found"
+		} else if errors.Is(err, store.ErrConflict) {
 			code = "already_decided"
+		} else if errors.Is(err, store.ErrUserStateConflict) {
+			code = "registration_user_state_conflict"
 		}
 		failed = append(failed, map[string]string{"id": id, "code": code, "message": err.Error()})
 	}
@@ -876,8 +949,20 @@ func (h *Handlers) AdminResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.AdminResetPassword(r.Context(), admin.ID, id, req.NewPassword); err != nil {
-		if errors.Is(err, service.ErrPAMPasswordManaged) {
-			util.WriteError(w, 400, "unsupported_auth_backend", err.Error(), middleware.RequestID(r.Context()))
+		if errors.Is(err, service.ErrPasswordResetLoginUnmapped) {
+			util.WriteError(w, 400, "password_reset_login_unmapped", "mapped mailbox login is required for PAM password reset", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, service.ErrPasswordResetHelperDown) {
+			util.WriteError(w, 503, "password_reset_helper_unavailable", "password reset helper is unavailable", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, service.ErrPasswordResetHelperFailed) {
+			util.WriteError(w, 502, "password_reset_helper_failed", "password reset helper failed", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, service.ErrPasswordResetUnavailable) {
+			util.WriteError(w, 503, "password_reset_unavailable", "password reset is currently unavailable", middleware.RequestID(r.Context()))
 			return
 		}
 		util.WriteError(w, 400, "reset_failed", err.Error(), middleware.RequestID(r.Context()))
@@ -1161,6 +1246,39 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (h *Handlers) resetIdentifierRateKey(normalizedEmail string) string {
+	value := strings.TrimSpace(strings.ToLower(normalizedEmail))
+	if value == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, h.resetKey)
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))[:20]
+}
+
+func (h *Handlers) resetTokenPrefixRateKey(rawToken string) string {
+	value := strings.TrimSpace(rawToken)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:20]
+}
+
+func (h *Handlers) allowResetRateKey(ctx context.Context, route, key string, limit int, window time.Duration) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || limit <= 0 {
+		return true
+	}
+	windowStart := time.Now().UTC().Truncate(window)
+	count, err := h.svc.Store().IncrementRateEvent(ctx, key, route, windowStart)
+	if err != nil {
+		return true
+	}
+	_ = h.svc.Store().CleanupRateEventsBefore(ctx, time.Now().UTC().Add(-24*time.Hour))
+	return count <= limit
 }
 
 func (h *Handlers) sessionMailPassword(r *http.Request) (string, error) {

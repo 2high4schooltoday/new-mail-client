@@ -14,6 +14,7 @@ const (
 type User struct {
 	ID             string
 	Email          string
+	RecoveryEmail  *string
 	MailLogin      *string
 	PasswordHash   string
 	Role           string

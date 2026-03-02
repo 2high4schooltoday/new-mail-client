@@ -82,13 +82,21 @@ func newPAMTestService(t *testing.T, acceptedPass string, acceptedUsers ...strin
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 
 	st := store.New(sqdb)
 	cfg := config.Config{
-		DovecotAuthMode:     "pam",
-		SessionEncryptKey:   "this_is_a_test_session_key_that_is_long_enough_123456",
-		SessionIdleMinutes:  30,
-		SessionAbsoluteHour: 24,
+		DovecotAuthMode:                 "pam",
+		SessionEncryptKey:               "this_is_a_test_session_key_that_is_long_enough_123456",
+		SessionIdleMinutes:              30,
+		SessionAbsoluteHour:             24,
+		PasswordMinLength:               12,
+		PasswordMaxLength:               128,
+		PasswordResetPublicEnabled:      true,
+		PasswordResetTokenTTLMinutes:    30,
+		PasswordResetRequireMappedLogin: true,
 	}
 	accepted := map[string]bool{}
 	for _, v := range acceptedUsers {
@@ -145,6 +153,9 @@ func TestPAMModeLoginDetectsConnectivityErrors(t *testing.T) {
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 
 	st := store.New(sqdb)
 	cfg := config.Config{
@@ -172,18 +183,46 @@ func TestPAMModeLoginDetectsConnectivityErrors(t *testing.T) {
 	}
 }
 
-func TestPAMModeDisablesPasswordResetOperations(t *testing.T) {
+func TestPAMModeUsesHelperPolicyForPasswordReset(t *testing.T) {
 	ctx := context.Background()
-	svc, _ := newPAMTestService(t, "PamPass123!")
+	svc, st := newPAMTestService(t, "PamPass123!")
 
-	if err := svc.RequestPasswordReset(ctx, "alice@example.com"); !errors.Is(err, ErrPAMPasswordManaged) {
-		t.Fatalf("expected RequestPasswordReset to return ErrPAMPasswordManaged, got: %v", err)
+	pwHash, err := auth.HashPassword("AnyPassword123!")
+	if err != nil {
+		t.Fatalf("hash local: %v", err)
 	}
-	if err := svc.ConfirmPasswordReset(ctx, "token", "NewPassword123!"); !errors.Is(err, ErrPAMPasswordManaged) {
-		t.Fatalf("expected ConfirmPasswordReset to return ErrPAMPasswordManaged, got: %v", err)
+	user, err := st.CreateUser(ctx, "alice@example.com", pwHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
 	}
-	if err := svc.AdminResetPassword(ctx, "admin-id", "user-id", "NewPassword123!"); !errors.Is(err, ErrPAMPasswordManaged) {
-		t.Fatalf("expected AdminResetPassword to return ErrPAMPasswordManaged, got: %v", err)
+	// Public request path remains generic when helper is disabled.
+	if err := svc.RequestPasswordReset(ctx, "alice@example.com"); err != nil {
+		t.Fatalf("expected RequestPasswordReset to stay generic, got: %v", err)
+	}
+	if err := svc.ConfirmPasswordReset(ctx, "token", "NewPassword123!"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ConfirmPasswordReset invalid token, got: %v", err)
+	}
+	if err := svc.AdminResetPassword(ctx, "admin-id", user.ID, "NewPassword123!"); !errors.Is(err, ErrPasswordResetHelperDown) {
+		t.Fatalf("expected AdminResetPassword helper unavailable, got: %v", err)
+	}
+}
+
+func TestPAMAdminResetRequiresMappedLoginWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	svc, st := newPAMTestService(t, "PamPass123!")
+	svc.cfg.PAMResetHelperEnabled = true
+	svc.cfg.PasswordResetRequireMappedLogin = true
+
+	pwHash, err := auth.HashPassword("AnyPassword123!")
+	if err != nil {
+		t.Fatalf("hash local: %v", err)
+	}
+	user, err := st.CreateUser(ctx, "unmapped@example.com", pwHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := svc.AdminResetPassword(ctx, "admin-id", user.ID, "NewPassword123!"); !errors.Is(err, ErrPasswordResetLoginUnmapped) {
+		t.Fatalf("expected ErrPasswordResetLoginUnmapped, got: %v", err)
 	}
 }
 
@@ -208,6 +247,9 @@ func TestPAMSetupDetectsConnectivityErrors(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 

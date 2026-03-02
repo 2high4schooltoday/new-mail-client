@@ -263,6 +263,10 @@ finish_stage_ok
 begin_stage "service" "Service Teardown" "25"
 log "Removing service files..."
 if have_cmd systemctl; then
+  safe_systemctl stop mailclient-pam-reset-helper.socket
+  safe_systemctl disable mailclient-pam-reset-helper.socket
+  safe_systemctl stop mailclient-pam-reset-helper.service
+  safe_systemctl disable mailclient-pam-reset-helper.service
   safe_systemctl stop mailclient-updater.path
   safe_systemctl disable mailclient-updater.path
   safe_systemctl stop mailclient-updater.service
@@ -274,6 +278,18 @@ if have_cmd systemctl; then
   fi
   if [[ -f /etc/systemd/system/mailclient-updater.service ]]; then
     run_as_root rm -f /etc/systemd/system/mailclient-updater.service
+  fi
+  if [[ -f /etc/systemd/system/mailclient-pam-reset-helper.socket ]]; then
+    run_as_root rm -f /etc/systemd/system/mailclient-pam-reset-helper.socket
+  fi
+  if [[ -f /etc/systemd/system/mailclient-pam-reset-helper.service ]]; then
+    run_as_root rm -f /etc/systemd/system/mailclient-pam-reset-helper.service
+  fi
+  if [[ -d /etc/systemd/system/mailclient-pam-reset-helper.service.d ]]; then
+    run_as_root rm -rf /etc/systemd/system/mailclient-pam-reset-helper.service.d
+  fi
+  if [[ -d /etc/systemd/system/mailclient-updater.service.d ]]; then
+    run_as_root rm -rf /etc/systemd/system/mailclient-updater.service.d
   fi
   if [[ -f /etc/systemd/system/mailclient.service ]]; then
     run_as_root rm -f /etc/systemd/system/mailclient.service

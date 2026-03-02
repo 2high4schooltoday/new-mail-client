@@ -28,6 +28,7 @@ func newUpdateTestStore(t *testing.T) *store.Store {
 		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
 		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
 		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
+		filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)

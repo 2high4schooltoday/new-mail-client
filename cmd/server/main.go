@@ -13,6 +13,7 @@ import (
 	"mailclient/internal/db"
 	"mailclient/internal/mail"
 	"mailclient/internal/notify"
+	"mailclient/internal/pamreset"
 	"mailclient/internal/service"
 	"mailclient/internal/store"
 	"mailclient/internal/update"
@@ -26,6 +27,22 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "update-worker" {
 		if err := update.RunWorker(context.Background(), cfg); err != nil {
 			log.Fatalf("update worker: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "pam-reset-helper" {
+		helperCfg := pamreset.HelperConfig{
+			SocketPath:      cfg.PAMResetHelperSocket,
+			SocketGroupID:   cfg.PAMResetAllowedGID,
+			AllowedUID:      cfg.PAMResetAllowedUID,
+			AllowedGID:      cfg.PAMResetAllowedGID,
+			IOTimeout:       time.Duration(cfg.PAMResetHelperTimeoutSec) * time.Second,
+			CommandTimeout:  time.Duration(cfg.PAMResetHelperTimeoutSec) * time.Second,
+			SocketFilePerms: 0660,
+		}
+		log.Printf("starting pam reset helper on %s", cfg.PAMResetHelperSocket)
+		if err := pamreset.RunServer(context.Background(), helperCfg); err != nil {
+			log.Fatalf("pam reset helper: %v", err)
 		}
 		return
 	}
@@ -43,6 +60,7 @@ func main() {
 		"migrations/003_cleanup_rejected_users.sql",
 		"migrations/004_cleanup_rejected_users_casefold.sql",
 		"migrations/005_admin_query_indexes.sql",
+		"migrations/006_users_recovery_email.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)

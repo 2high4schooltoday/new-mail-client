@@ -1,0 +1,24 @@
+[Unit]
+Description=Mailclient PAM Reset Helper
+After=mailclient-pam-reset-helper.socket
+Requires=mailclient-pam-reset-helper.socket
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mailclient
+EnvironmentFile=/opt/mailclient/.env
+ExecStart=/opt/mailclient/mailclient-pam-reset-helper
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+ProtectHome=true
+# Keep /etc writable for chpasswd integration.
+ProtectSystem=off
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

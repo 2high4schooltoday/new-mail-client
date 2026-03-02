@@ -19,17 +19,22 @@ import (
 	"mailclient/internal/mail"
 	"mailclient/internal/models"
 	"mailclient/internal/notify"
+	"mailclient/internal/pamreset"
 	"mailclient/internal/store"
 	"mailclient/internal/util"
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrPendingApproval    = errors.New("pending approval")
-	ErrSuspended          = errors.New("account suspended")
-	ErrForbidden          = errors.New("forbidden")
-	ErrPAMPasswordManaged = errors.New("password is managed by PAM; change it in the system account")
-	ErrPAMVerifierDown    = errors.New("cannot reach Dovecot IMAP for PAM verification")
+	ErrInvalidCredentials         = errors.New("invalid credentials")
+	ErrPendingApproval            = errors.New("pending approval")
+	ErrSuspended                  = errors.New("account suspended")
+	ErrForbidden                  = errors.New("forbidden")
+	ErrPAMVerifierDown            = errors.New("cannot reach Dovecot IMAP for PAM verification")
+	ErrPasswordResetUnavailable   = errors.New("password reset is currently unavailable")
+	ErrPasswordResetLoginUnmapped = errors.New("password_reset_login_unmapped")
+	ErrPasswordResetHelperDown    = errors.New("password_reset_helper_unavailable")
+	ErrPasswordResetHelperFailed  = errors.New("password_reset_helper_failed")
+	ErrInvalidRecoveryEmail       = errors.New("invalid recovery email")
 )
 
 var domainRx = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -70,6 +75,15 @@ type Service struct {
 	provision  mail.AuthProvisioner
 	sender     notify.Sender
 	encryptKey []byte
+}
+
+type PasswordResetCapabilities struct {
+	AuthMode            string `json:"auth_mode"`
+	SelfServiceEnabled  bool   `json:"self_service_enabled"`
+	AdminResetEnabled   bool   `json:"admin_reset_enabled"`
+	Delivery            string `json:"delivery"`
+	TokenTTLMinutes     int    `json:"token_ttl_minutes"`
+	RequiresMappedLogin bool   `json:"requires_mapped_login"`
 }
 
 func New(cfg config.Config, st *store.Store, m mail.Client, p mail.AuthProvisioner, sender notify.Sender) *Service {
@@ -280,8 +294,12 @@ func (s *Service) RejectRegistration(ctx context.Context, adminID, regID, reason
 	if err != nil {
 		return err
 	}
+	target := userID
+	if strings.TrimSpace(target) == "" {
+		target = regID
+	}
 	meta, _ := json.Marshal(map[string]string{"registration_id": regID, "user_id": userID, "reason": reason})
-	return s.st.InsertAudit(ctx, adminID, "registration.reject", userID, string(meta))
+	return s.st.InsertAudit(ctx, adminID, "registration.reject", target, string(meta))
 }
 
 func (s *Service) SuspendUser(ctx context.Context, adminID, userID string) error {
@@ -336,6 +354,30 @@ func (s *Service) ListAudit(ctx context.Context, query models.AuditQuery) ([]mod
 		items[i].TargetLabel = targetLabel
 	}
 	return items, total, nil
+}
+
+func (s *Service) PasswordResetCapabilities() PasswordResetCapabilities {
+	delivery := strings.TrimSpace(strings.ToLower(s.cfg.PasswordResetSender))
+	if delivery == "" {
+		delivery = "log"
+	}
+	if !s.cfg.PasswordResetPublicEnabled {
+		delivery = "disabled"
+	}
+	selfServiceEnabled := s.cfg.PasswordResetPublicEnabled
+	adminResetEnabled := true
+	if s.usesPAMAuth() {
+		selfServiceEnabled = selfServiceEnabled && s.cfg.PAMResetHelperEnabled
+		adminResetEnabled = s.cfg.PAMResetHelperEnabled
+	}
+	return PasswordResetCapabilities{
+		AuthMode:            strings.ToLower(strings.TrimSpace(s.cfg.DovecotAuthMode)),
+		SelfServiceEnabled:  selfServiceEnabled,
+		AdminResetEnabled:   adminResetEnabled,
+		Delivery:            delivery,
+		TokenTTLMinutes:     s.cfg.PasswordResetTokenTTLMinutes,
+		RequiresMappedLogin: s.usesPAMAuth() && s.cfg.PasswordResetRequireMappedLogin,
+	}
 }
 
 func buildAuditSummary(entry models.AuditEntry) (string, string, string, string) {
@@ -423,27 +465,53 @@ func (s *Service) RetryProvisionUser(ctx context.Context, adminID, userID string
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
-	if s.usesPAMAuth() {
-		return ErrPAMPasswordManaged
+	if !s.cfg.PasswordResetPublicEnabled {
+		return ErrPasswordResetUnavailable
 	}
-	u, err := s.st.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
-	if err != nil {
-		// don't leak existence
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
 		return nil
 	}
-	raw, hash, err := auth.NewOpaqueToken()
+	u, err := s.st.GetUserByEmail(ctx, email)
 	if err != nil {
-		return err
+		// don't leak existence
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return nil
 	}
-	if _, err := s.st.CreatePasswordResetToken(ctx, u.ID, hash, time.Now().UTC().Add(30*time.Minute)); err != nil {
-		return err
+	if s.usesPAMAuth() {
+		if !s.cfg.PAMResetHelperEnabled {
+			return nil
+		}
+		if s.cfg.PasswordResetRequireMappedLogin {
+			login := ""
+			if u.MailLogin != nil {
+				login = strings.TrimSpace(*u.MailLogin)
+			}
+			if login == "" {
+				return nil
+			}
+		}
 	}
-	return s.sender.SendPasswordReset(ctx, u.Email, raw)
+	recoveryEmail := ""
+	if u.RecoveryEmail != nil {
+		recoveryEmail = strings.ToLower(strings.TrimSpace(*u.RecoveryEmail))
+	}
+	if recoveryEmail == "" {
+		// Legacy accounts without recovery email are handled by post-login prompt.
+		return nil
+	}
+	if err := s.issuePasswordResetToken(ctx, u, recoveryEmail); err != nil {
+		// Keep public API leak-resistant: treat delivery failures as accepted.
+		return nil
+	}
+	return nil
 }
 
 func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPassword string) error {
-	if s.usesPAMAuth() {
-		return ErrPAMPasswordManaged
+	if !s.cfg.PasswordResetPublicEnabled {
+		return ErrPasswordResetUnavailable
 	}
 	if err := s.ValidatePassword(newPassword); err != nil {
 		return err
@@ -454,6 +522,15 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 	if err != nil {
 		return ErrInvalidCredentials
 	}
+	u, err := s.st.GetUserByID(ctx, t.UserID)
+	if err != nil {
+		return ErrInvalidCredentials
+	}
+	if s.usesPAMAuth() {
+		if err := s.resetPasswordViaPAM(ctx, u, newPassword); err != nil {
+			return err
+		}
+	}
 	h, err := auth.HashPassword(newPassword)
 	if err != nil {
 		return err
@@ -461,8 +538,7 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 	if err := s.st.UpdateUserPasswordHash(ctx, t.UserID, h); err != nil {
 		return err
 	}
-	u, err := s.st.GetUserByID(ctx, t.UserID)
-	if err == nil {
+	if !s.usesPAMAuth() {
 		if err := s.provision.UpsertActiveUser(ctx, u.Email, h); err != nil {
 			msg := err.Error()
 			_ = s.st.UpdateProvisionState(ctx, u.ID, "error", &msg)
@@ -475,11 +551,17 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 }
 
 func (s *Service) AdminResetPassword(ctx context.Context, adminID, userID, newPassword string) error {
-	if s.usesPAMAuth() {
-		return ErrPAMPasswordManaged
-	}
 	if err := s.ValidatePassword(newPassword); err != nil {
 		return err
+	}
+	u, err := s.st.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if s.usesPAMAuth() {
+		if err := s.resetPasswordViaPAM(ctx, u, newPassword); err != nil {
+			return err
+		}
 	}
 	h, err := auth.HashPassword(newPassword)
 	if err != nil {
@@ -488,8 +570,7 @@ func (s *Service) AdminResetPassword(ctx context.Context, adminID, userID, newPa
 	if err := s.st.UpdateUserPasswordHash(ctx, userID, h); err != nil {
 		return err
 	}
-	u, err := s.st.GetUserByID(ctx, userID)
-	if err == nil {
+	if !s.usesPAMAuth() {
 		if err := s.provision.UpsertActiveUser(ctx, u.Email, h); err != nil {
 			msg := err.Error()
 			_ = s.st.UpdateProvisionState(ctx, u.ID, "error", &msg)
@@ -498,8 +579,73 @@ func (s *Service) AdminResetPassword(ctx context.Context, adminID, userID, newPa
 		}
 	}
 	_ = s.st.RevokeUserSessions(ctx, userID)
-	meta, _ := json.Marshal(map[string]string{"user_id": userID})
+	meta, _ := json.Marshal(map[string]string{
+		"user_id": userID,
+		"mode":    strings.ToLower(strings.TrimSpace(s.cfg.DovecotAuthMode)),
+	})
 	return s.st.InsertAudit(ctx, adminID, "user.reset_password", userID, string(meta))
+}
+
+func (s *Service) issuePasswordResetToken(ctx context.Context, u models.User, deliveryEmail string) error {
+	deliveryEmail = strings.ToLower(strings.TrimSpace(deliveryEmail))
+	if deliveryEmail == "" {
+		return ErrInvalidRecoveryEmail
+	}
+	raw, hash, err := auth.NewOpaqueToken()
+	if err != nil {
+		return err
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(s.cfg.PasswordResetTokenTTLMinutes) * time.Minute)
+	if _, err := s.st.CreatePasswordResetToken(ctx, u.ID, hash, expiresAt); err != nil {
+		return err
+	}
+	return s.sender.SendPasswordReset(ctx, deliveryEmail, raw)
+}
+
+func (s *Service) UpdateRecoveryEmail(ctx context.Context, userID, recoveryEmail string) (string, error) {
+	normalized, err := normalizeRecoveryEmail(recoveryEmail)
+	if err != nil {
+		return "", err
+	}
+	if err := s.st.UpdateUserRecoveryEmail(ctx, userID, normalized); err != nil {
+		return "", err
+	}
+	return normalized, nil
+}
+
+func (s *Service) resetPasswordViaPAM(ctx context.Context, u models.User, newPassword string) error {
+	if !s.cfg.PAMResetHelperEnabled {
+		return ErrPasswordResetHelperDown
+	}
+	login := ""
+	if u.MailLogin != nil {
+		login = strings.TrimSpace(*u.MailLogin)
+	}
+	if s.cfg.PasswordResetRequireMappedLogin && login == "" {
+		return ErrPasswordResetLoginUnmapped
+	}
+	if login == "" {
+		login = strings.TrimSpace(u.Email)
+	}
+	client := pamreset.Client{
+		SocketPath: s.cfg.PAMResetHelperSocket,
+		Timeout:    time.Duration(s.cfg.PAMResetHelperTimeoutSec) * time.Second,
+	}
+	_, err := client.ResetPassword(ctx, pamreset.Request{
+		RequestID:   uuid.NewString(),
+		Username:    login,
+		NewPassword: newPassword,
+	})
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pamreset.ErrHelperUnavailable) {
+		return ErrPasswordResetHelperDown
+	}
+	if errors.Is(err, pamreset.ErrHelperRejected) {
+		return ErrPasswordResetHelperFailed
+	}
+	return fmt.Errorf("%w", ErrPasswordResetHelperFailed)
 }
 
 func (s *Service) Mail() mail.Client   { return s.mail }
@@ -648,6 +794,22 @@ func defaultAdminEmail(domain string) string {
 		return "webmaster@example.com"
 	}
 	return "webmaster@" + domain
+}
+
+func normalizeRecoveryEmail(v string) (string, error) {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return "", ErrInvalidRecoveryEmail
+	}
+	parsed, err := netmail.ParseAddress(trimmed)
+	if err != nil {
+		return "", ErrInvalidRecoveryEmail
+	}
+	addr := strings.ToLower(strings.TrimSpace(parsed.Address))
+	if addr == "" || len(addr) > 254 {
+		return "", ErrInvalidRecoveryEmail
+	}
+	return addr, nil
 }
 
 func (s *Service) ValidatePassword(pw string) error {

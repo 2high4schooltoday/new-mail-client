@@ -1,0 +1,17 @@
+[workspace]
+members = [
+  "contracts",
+  "pam_reset_helper",
+  "update_worker",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

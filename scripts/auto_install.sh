@@ -1225,7 +1225,7 @@ fallback_to_direct_mode() {
   set_env_var "$OUT_ENV" "PROXY_SERVER_NAME" ""
   set_env_var "$OUT_ENV" "PROXY_TLS" "0"
 
-  "${PREFIX[@]}" install -m 0644 "$OUT_ENV" /opt/mailclient/.env || return 1
+  "${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/mailclient/.env || return 1
   "${PREFIX[@]}" chown mailclient:mailclient /opt/mailclient/.env || return 1
   "${PREFIX[@]}" systemctl restart mailclient || return 1
 
@@ -1264,6 +1264,10 @@ ensure_service_dependencies() {
   if ! have_cmd go; then
     missing+=("go")
     install_pkgs+=("golang-go")
+  fi
+  if ! have_cmd cargo; then
+    missing+=("cargo")
+    install_pkgs+=("cargo" "rustc")
   fi
   if ! have_cmd gcc; then
     missing+=("gcc")
@@ -1935,6 +1939,20 @@ set_env_var "$OUT_ENV" "DOVECOT_AUTH_EMAIL_COL" "$DOVECOT_EMAIL_COL"
 set_env_var "$OUT_ENV" "DOVECOT_AUTH_PASS_COL" "$DOVECOT_PASS_COL"
 set_env_var "$OUT_ENV" "DOVECOT_AUTH_ACTIVE_COL" "$DOVECOT_ACTIVE_COL"
 set_env_var "$OUT_ENV" "DOVECOT_AUTH_MAILDIR_COL" "$DOVECOT_MAILDIR_COL"
+set_env_var "$OUT_ENV" "PASSWORD_RESET_TOKEN_TTL_MINUTES" "30"
+set_env_var "$OUT_ENV" "PASSWORD_RESET_PUBLIC_ENABLED" "true"
+set_env_var "$OUT_ENV" "PASSWORD_RESET_REQUIRE_MAPPED_LOGIN" "true"
+set_env_var "$OUT_ENV" "PASSWORD_RESET_SENDER" "smtp"
+set_env_var "$OUT_ENV" "PASSWORD_RESET_FROM" "recovery@${BASE_DOMAIN}"
+if [[ "$DOVECOT_AUTH_MODE" == "pam" && "$INSTALL_SERVICE" -eq 1 ]]; then
+ set_env_var "$OUT_ENV" "PAM_RESET_HELPER_ENABLED" "true"
+else
+ set_env_var "$OUT_ENV" "PAM_RESET_HELPER_ENABLED" "false"
+fi
+set_env_var "$OUT_ENV" "PAM_RESET_HELPER_SOCKET" "/run/mailclient/pam-reset-helper.sock"
+set_env_var "$OUT_ENV" "PAM_RESET_HELPER_TIMEOUT_SEC" "5"
+set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_UID" "-1"
+set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "-1"
 
 log "Generated $OUT_ENV"
 log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
@@ -1987,6 +2005,11 @@ if ! have_cmd go; then
   err "Go toolchain is still unavailable after dependency checks."
   exit 1
 fi
+if ! have_cmd cargo; then
+  err "Rust toolchain (cargo) is required to build privileged helper binaries."
+  err "Install rustup/cargo and rerun installer, or deploy from prebuilt release archives."
+  exit 1
+fi
 finish_stage_ok
 
 if [[ "$OS_ID" != "ubuntu" ]]; then
@@ -2018,6 +2041,30 @@ BUILD_LDFLAGS="-X 'mailclient/internal/version.Version=${BUILD_VERSION}' -X 'mai
   cd "$ROOT_DIR"
   GOOS=linux GOARCH="$GOARCH" go build -ldflags "$BUILD_LDFLAGS" -o "$ROOT_DIR/mailclient" ./cmd/server
 )
+case "$GOARCH" in
+  amd64|x86_64)
+    RUST_TARGET="x86_64-unknown-linux-gnu"
+    ;;
+  arm64|aarch64)
+    RUST_TARGET="aarch64-unknown-linux-gnu"
+    ;;
+  *)
+    err "Unsupported GOARCH for Rust privileged binaries: $GOARCH"
+    exit 1
+    ;;
+esac
+log "Building privileged Rust binaries for ${RUST_TARGET}"
+(
+  cd "$ROOT_DIR/rust"
+  MAILCLIENT_BUILD_VERSION="$BUILD_VERSION" \
+  MAILCLIENT_BUILD_COMMIT="$BUILD_COMMIT" \
+  cargo build --release --target "$RUST_TARGET" -p pam_reset_helper -p update_worker
+)
+RUST_BIN_DIR="$ROOT_DIR/rust/target/$RUST_TARGET/release"
+if [[ ! -x "$RUST_BIN_DIR/pam_reset_helper" || ! -x "$RUST_BIN_DIR/update_worker" ]]; then
+  err "Rust privileged binaries were not produced in $RUST_BIN_DIR"
+  exit 1
+fi
 finish_stage_ok
 
 begin_stage "filesystem_and_user" "Filesystem and User Setup" "10"
@@ -2025,17 +2072,30 @@ begin_stage "filesystem_and_user" "Filesystem and User Setup" "10"
 if ! id -u mailclient >/dev/null 2>&1; then
   "${PREFIX[@]}" useradd --system --home /var/lib/mailclient --shell /usr/sbin/nologin mailclient
 fi
+MAILCLIENT_UID="$(id -u mailclient)"
+MAILCLIENT_GID="$(id -g mailclient)"
+set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_UID" "$MAILCLIENT_UID"
+set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "$MAILCLIENT_GID"
 "${PREFIX[@]}" mkdir -p /var/lib/mailclient/update/request /var/lib/mailclient/update/status /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 
 "${PREFIX[@]}" install -m 0755 "$ROOT_DIR/mailclient" /opt/mailclient/mailclient
-"${PREFIX[@]}" install -m 0644 "$OUT_ENV" /opt/mailclient/.env
+"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/pam_reset_helper" /opt/mailclient/mailclient-pam-reset-helper
+"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/update_worker" /opt/mailclient/mailclient-update-worker
+"${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/mailclient/.env
 "${PREFIX[@]}" rm -rf /opt/mailclient/web /opt/mailclient/migrations
 "${PREFIX[@]}" cp -R "$ROOT_DIR/web" /opt/mailclient/web
 "${PREFIX[@]}" cp -R "$ROOT_DIR/migrations" /opt/mailclient/migrations
+"${PREFIX[@]}" mkdir -p /opt/mailclient/deploy/fallback
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/fallback/mailclient-pam-reset-helper-go.override.conf" /opt/mailclient/deploy/fallback/mailclient-pam-reset-helper-go.override.conf
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/fallback/mailclient-updater-go.override.conf" /opt/mailclient/deploy/fallback/mailclient-updater-go.override.conf
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient.service" /etc/systemd/system/mailclient.service
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.service" /etc/systemd/system/mailclient-updater.service
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.path" /etc/systemd/system/mailclient-updater.path
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-pam-reset-helper.service" /etc/systemd/system/mailclient-pam-reset-helper.service
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-pam-reset-helper.socket" /etc/systemd/system/mailclient-pam-reset-helper.socket
 "${PREFIX[@]}" chown -R mailclient:mailclient /opt/mailclient /var/lib/mailclient
+"${PREFIX[@]}" chown root:root /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker
+"${PREFIX[@]}" chmod 0755 /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker
 "${PREFIX[@]}" chown root:root /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 "${PREFIX[@]}" chmod 0750 /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 "${PREFIX[@]}" chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
@@ -2047,6 +2107,7 @@ begin_stage "service_install_start" "Service Install and Start" "10"
 "${PREFIX[@]}" systemctl daemon-reload
 "${PREFIX[@]}" systemctl enable --now mailclient
 "${PREFIX[@]}" systemctl enable --now mailclient-updater.path
+"${PREFIX[@]}" systemctl enable --now mailclient-pam-reset-helper.socket
 
 log "Service installed and started: mailclient"
 finish_stage_ok

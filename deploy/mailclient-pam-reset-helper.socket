@@ -1,0 +1,13 @@
+[Unit]
+Description=Mailclient PAM Reset Helper Socket
+PartOf=mailclient-pam-reset-helper.service
+
+[Socket]
+ListenStream=/run/mailclient/pam-reset-helper.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=mailclient
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

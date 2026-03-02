@@ -32,6 +32,7 @@ func newAdminRegistrationRouter(t *testing.T) (http.Handler, *store.Store) {
 		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
 		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
 		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
+		filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -326,5 +327,54 @@ func TestAdminBulkUserActionSuspendUnsuspend(t *testing.T) {
 	}
 	if afterUnsuspend.Status != models.UserActive {
 		t.Fatalf("expected active status, got %q", afterUnsuspend.Status)
+	}
+}
+
+func TestAdminRejectRegistrationWorksWhenPendingUserMissing(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	reg, err := st.CreateRegistration(t.Context(), "missing-user@example.com", "127.0.0.1", "ua", true)
+	if err != nil {
+		t.Fatalf("create registration: %v", err)
+	}
+	sess, csrf := loginForSend(t, router)
+
+	rec := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/registrations/"+reg.ID+"/reject", []byte(`{"reason":"No account row"}`), sess, csrf)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	updated, err := st.GetRegistrationByID(t.Context(), reg.ID)
+	if err != nil {
+		t.Fatalf("load registration: %v", err)
+	}
+	if updated.Status != "rejected" {
+		t.Fatalf("expected rejected status, got %q", updated.Status)
+	}
+}
+
+func TestAdminRejectRegistrationReturnsUserStateConflict(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	pwHash, err := auth.HashPassword("UserPass123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateUser(t.Context(), "conflict@example.com", pwHash, "user", models.UserActive); err != nil {
+		t.Fatalf("create active user: %v", err)
+	}
+	reg, err := st.CreateRegistration(t.Context(), "conflict@example.com", "127.0.0.1", "ua", true)
+	if err != nil {
+		t.Fatalf("create registration: %v", err)
+	}
+	sess, csrf := loginForSend(t, router)
+
+	rec := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/registrations/"+reg.ID+"/reject", []byte(`{"reason":"Nope"}`), sess, csrf)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload["code"] != "registration_user_state_conflict" {
+		t.Fatalf("expected registration_user_state_conflict, got %v", payload["code"])
 	}
 }

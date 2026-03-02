@@ -20,6 +20,33 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - name: Install Rust cross-linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          go test ./...
+          cargo test --manifest-path rust/Cargo.toml --workspace
+          ./scripts/check_warm_palette.sh
+          ./scripts/check_ui_contract.sh
+          ./scripts/check_surface_depth.sh
+          ./scripts/check_no_native_dialogs.sh
+
+      - name: Rust dependency audit
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-audit cargo-deny
+          cargo audit --manifest-path rust/Cargo.toml
+          cargo deny check --manifest-path rust/Cargo.toml --config rust/deny.toml advisories bans sources
+
       - name: Build release archives
         run: |
           set -euo pipefail
@@ -31,11 +58,28 @@ jobs:
           for ARCH in amd64 arm64; do
             PKG_DIR="dist/pkg-${ARCH}"
             mkdir -p "${PKG_DIR}"
+            case "${ARCH}" in
+              amd64) RUST_TARGET="x86_64-unknown-linux-gnu" ;;
+              arm64) RUST_TARGET="aarch64-unknown-linux-gnu" ;;
+              *) echo "Unsupported ARCH=${ARCH}" >&2; exit 1 ;;
+            esac
             LDFLAGS="-X 'mailclient/internal/version.Version=${VERSION}' -X 'mailclient/internal/version.Commit=${COMMIT}' -X 'mailclient/internal/version.BuildTime=${BUILD_TIME}' -X 'mailclient/internal/version.SourceRepo=${SOURCE_REPO}'"
             GOOS=linux GOARCH="${ARCH}" go build -ldflags "${LDFLAGS}" -o "${PKG_DIR}/mailclient" ./cmd/server
+            (
+              cd rust
+              export MAILCLIENT_BUILD_VERSION="${VERSION}"
+              export MAILCLIENT_BUILD_COMMIT="${COMMIT}"
+              export MAILCLIENT_BUILD_TIME="${BUILD_TIME}"
+              if [[ "${RUST_TARGET}" == "aarch64-unknown-linux-gnu" ]]; then
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+              fi
+              cargo build --release --target "${RUST_TARGET}" -p pam_reset_helper -p update_worker
+            )
+            cp "rust/target/${RUST_TARGET}/release/pam_reset_helper" "${PKG_DIR}/mailclient-pam-reset-helper"
+            cp "rust/target/${RUST_TARGET}/release/update_worker" "${PKG_DIR}/mailclient-update-worker"
             cp -R web "${PKG_DIR}/web"
             cp -R migrations "${PKG_DIR}/migrations"
-            tar -C "${PKG_DIR}" -czf "dist/mailclient-linux-${ARCH}.tar.gz" mailclient web migrations
+            tar -C "${PKG_DIR}" -czf "dist/mailclient-linux-${ARCH}.tar.gz" mailclient mailclient-pam-reset-helper mailclient-update-worker web migrations
           done
           (
             cd dist

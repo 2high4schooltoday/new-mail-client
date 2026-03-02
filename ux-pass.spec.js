@@ -2,8 +2,13 @@ const { test, expect } = require('@playwright/test');
 
 test('desktop ux pass', async ({ page }) => {
   const consoleErrors = [];
+  const dialogs = [];
   page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.type());
+    await dialog.dismiss();
+  });
 
   await page.setViewportSize({ width: 1366, height: 900 });
   await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
@@ -48,6 +53,7 @@ test('desktop ux pass', async ({ page }) => {
   await page.click('#btn-admin-user-apply');
   await page.waitForTimeout(500);
   await page.screenshot({ path: '/tmp/ux-desktop-admin-users.png', fullPage: true });
+  await expect(dialogs.length).toBe(0);
 
   await page.click('#admin-nav-audit');
   await page.selectOption('#admin-audit-action', 'registration.approve');
@@ -62,8 +68,13 @@ test('mobile ux pass', async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const page = await context.newPage();
   const consoleErrors = [];
+  const dialogs = [];
   page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.type());
+    await dialog.dismiss();
+  });
 
   await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'machine-dark');
@@ -84,6 +95,7 @@ test('mobile ux pass', async ({ browser }) => {
     await page.click('#mail-mobile-back');
     await page.waitForTimeout(250);
   }
+  await expect(dialogs.length).toBe(0);
 
   console.log('MOBILE_CONSOLE_ERRORS=' + JSON.stringify(consoleErrors));
   await context.close();

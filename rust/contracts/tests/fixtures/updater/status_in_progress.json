@@ -1,0 +1,8 @@
+{
+  "state": "in_progress",
+  "request_id": "req-upd-001",
+  "requested_at": "2026-03-02T00:00:00Z",
+  "started_at": "2026-03-02T00:00:05Z",
+  "target_version": "v1.0.2-alpha.1_02",
+  "from_version": "v1.0.2-alpha.1_01"
+}

@@ -15,6 +15,7 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
+var ErrUserStateConflict = errors.New("registration user state conflict")
 
 type Store struct {
 	db *sql.DB
@@ -24,10 +25,14 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 
 func (s *Store) CreateUser(ctx context.Context, email, passwordHash, role string, status models.UserStatus) (models.User, error) {
 	now := time.Now().UTC()
+	recovery := strings.ToLower(strings.TrimSpace(email))
 	u := models.User{ID: uuid.NewString(), Email: email, PasswordHash: passwordHash, Role: role, Status: status, ProvisionState: "pending", CreatedAt: now}
+	if recovery != "" {
+		u.RecoveryEmail = &recovery
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users(id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Email, nil, u.PasswordHash, u.Role, u.Status, u.ProvisionState, nil, u.CreatedAt,
+		`INSERT INTO users(id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Email, u.RecoveryEmail, nil, u.PasswordHash, u.Role, u.Status, u.ProvisionState, nil, u.CreatedAt,
 	)
 	return u, err
 }
@@ -41,8 +46,8 @@ func (s *Store) EnsureAdmin(ctx context.Context, email, passwordHash string) err
 	if err == ErrNotFound {
 		now := time.Now().UTC()
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO users(id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			uuid.NewString(), email, nil, passwordHash, "admin", models.UserActive, "ok", nil, now, now,
+			`INSERT INTO users(id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			uuid.NewString(), email, email, nil, passwordHash, "admin", models.UserActive, "ok", nil, now, now,
 		)
 		return err
 	}
@@ -50,7 +55,7 @@ func (s *Store) EnsureAdmin(ctx context.Context, email, passwordHash string) err
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE users SET role='admin', status='active', password_hash=?, provision_state='ok', provision_error=NULL WHERE id=?`,
+		`UPDATE users SET role='admin', status='active', password_hash=?, provision_state='ok', provision_error=NULL, recovery_email=COALESCE(NULLIF(trim(recovery_email),''), email) WHERE id=?`,
 		passwordHash, u.ID,
 	)
 	return err
@@ -87,11 +92,11 @@ func (s *Store) UpsertSetting(ctx context.Context, key, value string) error {
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, error) {
 	var u models.User
 	var approvedAt, lastLogin sql.NullTime
-	var approvedBy, provisionErr, mailLogin sql.NullString
+	var approvedBy, provisionErr, recoveryEmail, mailLogin sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE email=?`,
+		`SELECT id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE email=?`,
 		email,
-	).Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
+	).Scan(&u.ID, &u.Email, &recoveryEmail, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
 	if err == sql.ErrNoRows {
 		return models.User{}, ErrNotFound
 	}
@@ -113,6 +118,12 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, 
 	if provisionErr.Valid {
 		v := provisionErr.String
 		u.ProvisionError = &v
+	}
+	if recoveryEmail.Valid {
+		v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
+		if v != "" {
+			u.RecoveryEmail = &v
+		}
 	}
 	if mailLogin.Valid {
 		v := strings.TrimSpace(mailLogin.String)
@@ -126,11 +137,11 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, 
 func (s *Store) GetUserByID(ctx context.Context, id string) (models.User, error) {
 	var u models.User
 	var approvedAt, lastLogin sql.NullTime
-	var approvedBy, provisionErr, mailLogin sql.NullString
+	var approvedBy, provisionErr, recoveryEmail, mailLogin sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE id=?`,
+		`SELECT id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE id=?`,
 		id,
-	).Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
+	).Scan(&u.ID, &u.Email, &recoveryEmail, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
 	if err == sql.ErrNoRows {
 		return models.User{}, ErrNotFound
 	}
@@ -152,6 +163,12 @@ func (s *Store) GetUserByID(ctx context.Context, id string) (models.User, error)
 	if provisionErr.Valid {
 		v := provisionErr.String
 		u.ProvisionError = &v
+	}
+	if recoveryEmail.Valid {
+		v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
+		if v != "" {
+			u.RecoveryEmail = &v
+		}
 	}
 	if mailLogin.Valid {
 		v := strings.TrimSpace(mailLogin.String)
@@ -187,6 +204,16 @@ func (s *Store) UpdateUserMailLogin(ctx context.Context, userID, mailLogin strin
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET mail_login=? WHERE id=?`, mailLogin, userID)
+	return err
+}
+
+func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, userID, recoveryEmail string) error {
+	recoveryEmail = strings.ToLower(strings.TrimSpace(recoveryEmail))
+	if recoveryEmail == "" {
+		_, err := s.db.ExecContext(ctx, `UPDATE users SET recovery_email=NULL WHERE id=?`, userID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET recovery_email=? WHERE id=?`, recoveryEmail, userID)
 	return err
 }
 
@@ -238,7 +265,7 @@ func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models
 	offset := clampOffset(query.Offset)
 
 	listSQL := fmt.Sprintf(
-		`SELECT id,email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
+		`SELECT id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
 		 FROM users
 		 WHERE %s
 		 ORDER BY %s %s
@@ -258,8 +285,8 @@ func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models
 	for rows.Next() {
 		var u models.User
 		var approvedAt, lastLogin sql.NullTime
-		var approvedBy, provisionErr, mailLogin sql.NullString
-		if err := rows.Scan(&u.ID, &u.Email, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin); err != nil {
+		var approvedBy, provisionErr, recoveryEmail, mailLogin sql.NullString
+		if err := rows.Scan(&u.ID, &u.Email, &recoveryEmail, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin); err != nil {
 			return nil, 0, err
 		}
 		if approvedAt.Valid {
@@ -277,6 +304,12 @@ func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models
 		if provisionErr.Valid {
 			v := provisionErr.String
 			u.ProvisionError = &v
+		}
+		if recoveryEmail.Valid {
+			v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
+			if v != "" {
+				u.RecoveryEmail = &v
+			}
 		}
 		if mailLogin.Valid {
 			v := strings.TrimSpace(mailLogin.String)
@@ -458,14 +491,12 @@ func (s *Store) RejectRegistrationAndDeletePendingUser(ctx context.Context, regI
 
 	var userID string
 	var userStatus models.UserStatus
-	if err := tx.QueryRowContext(ctx, `SELECT id,status FROM users WHERE email=?`, email).Scan(&userID, &userStatus); err != nil {
-		if err == sql.ErrNoRows {
-			return "", ErrNotFound
-		}
-		return "", err
+	userLookupErr := tx.QueryRowContext(ctx, `SELECT id,status FROM users WHERE lower(email)=lower(?) ORDER BY id LIMIT 1`, email).Scan(&userID, &userStatus)
+	if userLookupErr != nil && userLookupErr != sql.ErrNoRows {
+		return "", userLookupErr
 	}
-	if userStatus != models.UserPending {
-		return "", ErrConflict
+	if userLookupErr == nil && userStatus != models.UserPending {
+		return "", ErrUserStateConflict
 	}
 
 	now := time.Now().UTC()
@@ -484,22 +515,24 @@ func (s *Store) RejectRegistrationAndDeletePendingUser(ctx context.Context, regI
 		return "", ErrConflict
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
-		return "", err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
-		return "", err
-	}
-	res, err = tx.ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID)
-	if err != nil {
-		return "", err
-	}
-	rows, err = res.RowsAffected()
-	if err != nil {
-		return "", err
-	}
-	if rows == 0 {
-		return "", ErrNotFound
+	if strings.TrimSpace(userID) != "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
+			return "", err
+		}
+		res, err = tx.ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID)
+		if err != nil {
+			return "", err
+		}
+		rows, err = res.RowsAffected()
+		if err != nil {
+			return "", err
+		}
+		if rows == 0 {
+			return "", ErrNotFound
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

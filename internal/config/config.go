@@ -71,9 +71,18 @@ type Config struct {
 	BootstrapAdminEmail    string
 	BootstrapAdminPassword string
 
-	PasswordResetSender  string
-	PasswordResetFrom    string
-	PasswordResetBaseURL string
+	PasswordResetSender             string
+	PasswordResetFrom               string
+	PasswordResetBaseURL            string
+	PasswordResetTokenTTLMinutes    int
+	PasswordResetPublicEnabled      bool
+	PasswordResetRequireMappedLogin bool
+
+	PAMResetHelperEnabled    bool
+	PAMResetHelperSocket     string
+	PAMResetHelperTimeoutSec int
+	PAMResetAllowedUID       int
+	PAMResetAllowedGID       int
 
 	UpdateEnabled          bool
 	UpdateRepoOwner        string
@@ -103,68 +112,76 @@ func Load() (Config, error) {
 		}
 	}
 	cfg := Config{
-		ListenAddr:               env("LISTEN_ADDR", ":8080"),
-		BaseDomain:               env("BASE_DOMAIN", "example.com"),
-		DBPath:                   env("APP_DB_PATH", "./data/app.db"),
-		DBMaxOpenConns:           envInt("APP_DB_MAX_OPEN_CONNS", 4),
-		DBMaxIdleConns:           envInt("APP_DB_MAX_IDLE_CONNS", 2),
-		DBConnMaxLifetime:        time.Duration(envInt("APP_DB_CONN_MAX_LIFETIME_MIN", 30)) * time.Minute,
-		SessionCookieName:        env("SESSION_COOKIE_NAME", "mailclient_session"),
-		SessionIdleMinutes:       envInt("SESSION_IDLE_MINUTES", 30),
-		SessionAbsoluteHour:      envInt("SESSION_ABSOLUTE_HOURS", 24),
-		SessionEncryptKey:        env("SESSION_ENCRYPT_KEY", "CHANGE_ME_PRODUCTION_SESSION_KEY"),
-		CSRFCookieName:           env("CSRF_COOKIE_NAME", "mailclient_csrf"),
-		CookieSecure:             cookieSecureLegacy,
-		CookieSecureMode:         cookieSecureMode,
-		TrustProxy:               envBool("TRUST_PROXY", false),
-		CORSAllowedOrigins:       envCSV("CORS_ALLOWED_ORIGINS"),
-		CaptchaEnabled:           envBool("CAPTCHA_ENABLED", false),
-		CaptchaProvider:          strings.ToLower(env("CAPTCHA_PROVIDER", "turnstile")),
-		CaptchaSiteKey:           strings.TrimSpace(env("CAPTCHA_SITE_KEY", "")),
-		CaptchaWidgetURL:         strings.TrimSpace(env("CAPTCHA_WIDGET_API_URL", "")),
-		CaptchaVerifyURL:         strings.TrimSpace(env("CAPTCHA_VERIFY_URL", "")),
-		CaptchaSecret:            env("CAPTCHA_SECRET", ""),
-		PasswordMinLength:        envInt("PASSWORD_MIN_LENGTH", 12),
-		PasswordMaxLength:        envInt("PASSWORD_MAX_LENGTH", 128),
-		IMAPHost:                 env("IMAP_HOST", "127.0.0.1"),
-		IMAPPort:                 envInt("IMAP_PORT", 993),
-		IMAPTLS:                  envBool("IMAP_TLS", true),
-		IMAPStartTLS:             envBool("IMAP_STARTTLS", false),
-		IMAPInsecureSkipVerify:   envBool("IMAP_INSECURE_SKIP_VERIFY", false),
-		SMTPHost:                 env("SMTP_HOST", "127.0.0.1"),
-		SMTPPort:                 envInt("SMTP_PORT", 587),
-		SMTPTLS:                  envBool("SMTP_TLS", false),
-		SMTPStartTLS:             envBool("SMTP_STARTTLS", true),
-		SMTPInsecureSkipVerify:   envBool("SMTP_INSECURE_SKIP_VERIFY", false),
-		DovecotAuthMode:          strings.ToLower(env("DOVECOT_AUTH_MODE", "sql")),
-		DovecotAuthDBDriver:      env("DOVECOT_AUTH_DB_DRIVER", ""),
-		DovecotAuthDBDSN:         env("DOVECOT_AUTH_DB_DSN", ""),
-		DovecotAuthTable:         env("DOVECOT_AUTH_TABLE", "users"),
-		DovecotEmailColumn:       env("DOVECOT_AUTH_EMAIL_COL", "email"),
-		DovecotPassColumn:        env("DOVECOT_AUTH_PASS_COL", "password_hash"),
-		DovecotActiveColumn:      env("DOVECOT_AUTH_ACTIVE_COL", "active"),
-		DovecotMaildirColumn:     env("DOVECOT_AUTH_MAILDIR_COL", "maildir"),
-		DovecotMaildirBase:       env("DOVECOT_MAILDIR_BASE", "/var/mail/vhosts"),
-		HTTPReadTimeoutSec:       envInt("HTTP_READ_TIMEOUT_SEC", 10),
-		HTTPReadHeaderTimeoutSec: envInt("HTTP_READ_HEADER_TIMEOUT_SEC", 5),
-		HTTPWriteTimeoutSec:      envInt("HTTP_WRITE_TIMEOUT_SEC", 30),
-		HTTPIdleTimeoutSec:       envInt("HTTP_IDLE_TIMEOUT_SEC", 60),
-		BootstrapAdminEmail:      env("BOOTSTRAP_ADMIN_EMAIL", ""),
-		BootstrapAdminPassword:   env("BOOTSTRAP_ADMIN_PASSWORD", ""),
-		PasswordResetSender:      strings.ToLower(env("PASSWORD_RESET_SENDER", "log")),
-		PasswordResetFrom:        env("PASSWORD_RESET_FROM", "webmaster@example.com"),
-		PasswordResetBaseURL:     env("PASSWORD_RESET_BASE_URL", ""),
-		UpdateEnabled:            envBool("UPDATE_ENABLED", true),
-		UpdateRepoOwner:          env("UPDATE_REPO_OWNER", "2high4schooltoday"),
-		UpdateRepoName:           env("UPDATE_REPO_NAME", "new-mail-client"),
-		UpdateCheckIntervalMin:   envInt("UPDATE_CHECK_INTERVAL_MIN", 60),
-		UpdateHTTPTimeoutSec:     envInt("UPDATE_HTTP_TIMEOUT_SEC", 10),
-		UpdateGitHubToken:        env("UPDATE_GITHUB_TOKEN", ""),
-		UpdateBackupKeep:         envInt("UPDATE_BACKUP_KEEP", 3),
-		UpdateBaseDir:            env("UPDATE_BASE_DIR", "/var/lib/mailclient/update"),
-		UpdateInstallDir:         env("UPDATE_INSTALL_DIR", "/opt/mailclient"),
-		UpdateServiceName:        env("UPDATE_SERVICE_NAME", "mailclient"),
-		UpdateSystemdUnitDir:     env("UPDATE_SYSTEMD_UNIT_DIR", "/etc/systemd/system"),
+		ListenAddr:                      env("LISTEN_ADDR", ":8080"),
+		BaseDomain:                      env("BASE_DOMAIN", "example.com"),
+		DBPath:                          env("APP_DB_PATH", "./data/app.db"),
+		DBMaxOpenConns:                  envInt("APP_DB_MAX_OPEN_CONNS", 4),
+		DBMaxIdleConns:                  envInt("APP_DB_MAX_IDLE_CONNS", 2),
+		DBConnMaxLifetime:               time.Duration(envInt("APP_DB_CONN_MAX_LIFETIME_MIN", 30)) * time.Minute,
+		SessionCookieName:               env("SESSION_COOKIE_NAME", "mailclient_session"),
+		SessionIdleMinutes:              envInt("SESSION_IDLE_MINUTES", 30),
+		SessionAbsoluteHour:             envInt("SESSION_ABSOLUTE_HOURS", 24),
+		SessionEncryptKey:               env("SESSION_ENCRYPT_KEY", "CHANGE_ME_PRODUCTION_SESSION_KEY"),
+		CSRFCookieName:                  env("CSRF_COOKIE_NAME", "mailclient_csrf"),
+		CookieSecure:                    cookieSecureLegacy,
+		CookieSecureMode:                cookieSecureMode,
+		TrustProxy:                      envBool("TRUST_PROXY", false),
+		CORSAllowedOrigins:              envCSV("CORS_ALLOWED_ORIGINS"),
+		CaptchaEnabled:                  envBool("CAPTCHA_ENABLED", false),
+		CaptchaProvider:                 strings.ToLower(env("CAPTCHA_PROVIDER", "turnstile")),
+		CaptchaSiteKey:                  strings.TrimSpace(env("CAPTCHA_SITE_KEY", "")),
+		CaptchaWidgetURL:                strings.TrimSpace(env("CAPTCHA_WIDGET_API_URL", "")),
+		CaptchaVerifyURL:                strings.TrimSpace(env("CAPTCHA_VERIFY_URL", "")),
+		CaptchaSecret:                   env("CAPTCHA_SECRET", ""),
+		PasswordMinLength:               envInt("PASSWORD_MIN_LENGTH", 12),
+		PasswordMaxLength:               envInt("PASSWORD_MAX_LENGTH", 128),
+		IMAPHost:                        env("IMAP_HOST", "127.0.0.1"),
+		IMAPPort:                        envInt("IMAP_PORT", 993),
+		IMAPTLS:                         envBool("IMAP_TLS", true),
+		IMAPStartTLS:                    envBool("IMAP_STARTTLS", false),
+		IMAPInsecureSkipVerify:          envBool("IMAP_INSECURE_SKIP_VERIFY", false),
+		SMTPHost:                        env("SMTP_HOST", "127.0.0.1"),
+		SMTPPort:                        envInt("SMTP_PORT", 587),
+		SMTPTLS:                         envBool("SMTP_TLS", false),
+		SMTPStartTLS:                    envBool("SMTP_STARTTLS", true),
+		SMTPInsecureSkipVerify:          envBool("SMTP_INSECURE_SKIP_VERIFY", false),
+		DovecotAuthMode:                 strings.ToLower(env("DOVECOT_AUTH_MODE", "sql")),
+		DovecotAuthDBDriver:             env("DOVECOT_AUTH_DB_DRIVER", ""),
+		DovecotAuthDBDSN:                env("DOVECOT_AUTH_DB_DSN", ""),
+		DovecotAuthTable:                env("DOVECOT_AUTH_TABLE", "users"),
+		DovecotEmailColumn:              env("DOVECOT_AUTH_EMAIL_COL", "email"),
+		DovecotPassColumn:               env("DOVECOT_AUTH_PASS_COL", "password_hash"),
+		DovecotActiveColumn:             env("DOVECOT_AUTH_ACTIVE_COL", "active"),
+		DovecotMaildirColumn:            env("DOVECOT_AUTH_MAILDIR_COL", "maildir"),
+		DovecotMaildirBase:              env("DOVECOT_MAILDIR_BASE", "/var/mail/vhosts"),
+		HTTPReadTimeoutSec:              envInt("HTTP_READ_TIMEOUT_SEC", 10),
+		HTTPReadHeaderTimeoutSec:        envInt("HTTP_READ_HEADER_TIMEOUT_SEC", 5),
+		HTTPWriteTimeoutSec:             envInt("HTTP_WRITE_TIMEOUT_SEC", 30),
+		HTTPIdleTimeoutSec:              envInt("HTTP_IDLE_TIMEOUT_SEC", 60),
+		BootstrapAdminEmail:             env("BOOTSTRAP_ADMIN_EMAIL", ""),
+		BootstrapAdminPassword:          env("BOOTSTRAP_ADMIN_PASSWORD", ""),
+		PasswordResetSender:             strings.ToLower(env("PASSWORD_RESET_SENDER", "log")),
+		PasswordResetFrom:               env("PASSWORD_RESET_FROM", "webmaster@example.com"),
+		PasswordResetBaseURL:            env("PASSWORD_RESET_BASE_URL", ""),
+		PasswordResetTokenTTLMinutes:    envInt("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30),
+		PasswordResetPublicEnabled:      envBool("PASSWORD_RESET_PUBLIC_ENABLED", true),
+		PasswordResetRequireMappedLogin: envBool("PASSWORD_RESET_REQUIRE_MAPPED_LOGIN", true),
+		PAMResetHelperEnabled:           envBool("PAM_RESET_HELPER_ENABLED", false),
+		PAMResetHelperSocket:            strings.TrimSpace(env("PAM_RESET_HELPER_SOCKET", "/run/mailclient/pam-reset-helper.sock")),
+		PAMResetHelperTimeoutSec:        envInt("PAM_RESET_HELPER_TIMEOUT_SEC", 5),
+		PAMResetAllowedUID:              envInt("PAM_RESET_ALLOWED_UID", -1),
+		PAMResetAllowedGID:              envInt("PAM_RESET_ALLOWED_GID", -1),
+		UpdateEnabled:                   envBool("UPDATE_ENABLED", true),
+		UpdateRepoOwner:                 env("UPDATE_REPO_OWNER", "2high4schooltoday"),
+		UpdateRepoName:                  env("UPDATE_REPO_NAME", "new-mail-client"),
+		UpdateCheckIntervalMin:          envInt("UPDATE_CHECK_INTERVAL_MIN", 60),
+		UpdateHTTPTimeoutSec:            envInt("UPDATE_HTTP_TIMEOUT_SEC", 10),
+		UpdateGitHubToken:               env("UPDATE_GITHUB_TOKEN", ""),
+		UpdateBackupKeep:                envInt("UPDATE_BACKUP_KEEP", 3),
+		UpdateBaseDir:                   env("UPDATE_BASE_DIR", "/var/lib/mailclient/update"),
+		UpdateInstallDir:                env("UPDATE_INSTALL_DIR", "/opt/mailclient"),
+		UpdateServiceName:               env("UPDATE_SERVICE_NAME", "mailclient"),
+		UpdateSystemdUnitDir:            env("UPDATE_SYSTEMD_UNIT_DIR", "/etc/systemd/system"),
 	}
 
 	if cfg.SessionIdleMinutes <= 0 || cfg.SessionAbsoluteHour <= 0 {
@@ -181,6 +198,21 @@ func Load() (Config, error) {
 	}
 	if cfg.PasswordMaxLength < cfg.PasswordMinLength {
 		return Config{}, fmt.Errorf("password max length must be >= min length")
+	}
+	if cfg.PasswordResetTokenTTLMinutes <= 0 {
+		return Config{}, fmt.Errorf("PASSWORD_RESET_TOKEN_TTL_MINUTES must be positive")
+	}
+	if cfg.PAMResetHelperTimeoutSec <= 0 {
+		return Config{}, fmt.Errorf("PAM_RESET_HELPER_TIMEOUT_SEC must be positive")
+	}
+	if cfg.PAMResetHelperEnabled && strings.TrimSpace(cfg.PAMResetHelperSocket) == "" {
+		return Config{}, fmt.Errorf("PAM_RESET_HELPER_SOCKET is required when PAM_RESET_HELPER_ENABLED=true")
+	}
+	if cfg.PAMResetHelperEnabled && cfg.PAMResetAllowedUID < 0 {
+		return Config{}, fmt.Errorf("PAM_RESET_ALLOWED_UID must be set when PAM_RESET_HELPER_ENABLED=true")
+	}
+	if cfg.PAMResetHelperEnabled && cfg.PAMResetAllowedGID < 0 {
+		return Config{}, fmt.Errorf("PAM_RESET_ALLOWED_GID must be set when PAM_RESET_HELPER_ENABLED=true")
 	}
 	switch cfg.DovecotAuthMode {
 	case "", "sql", "pam":

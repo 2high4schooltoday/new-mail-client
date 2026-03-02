@@ -1,4 +1,4 @@
-# Despatch (Go)
+# Despatch (Go + Rust privileged helpers)
 
 Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot + Maildir infrastructure.
 
@@ -33,6 +33,9 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 ## UI release gates
 Run these before packaging a release:
 - `go test ./...`
+- `cargo test --manifest-path rust/Cargo.toml --workspace`
+- `cargo audit --manifest-path rust/Cargo.toml`
+- `cargo deny check --manifest-path rust/Cargo.toml --config rust/deny.toml advisories bans sources`
 - `./scripts/check_warm_palette.sh`
 - `./scripts/check_ui_contract.sh`
 - `./scripts/check_surface_depth.sh`
@@ -108,7 +111,8 @@ Note: fully custom SQL/auth setups may still need manual `.env` tweaks.
 PAM mode notes:
 - Set `DOVECOT_AUTH_MODE=pam` (installer now prompts and writes this automatically).
 - In PAM mode, web login is validated against IMAP credentials (Dovecot/PAM), not local hash only.
-- Password reset endpoints for users/admin are disabled in PAM mode. Change passwords via system/PAM tooling.
+- Password reset endpoints use the local privileged helper (`mailclient-pam-reset-helper`) when `PAM_RESET_HELPER_ENABLED=true`.
+- Public reset request endpoint remains account-enumeration safe (generic acceptance response when enabled).
 - In PAM mode, mailbox account creation/provisioning remains external to this app (system/PAM side).
 
 Installer troubleshooting:
@@ -144,6 +148,10 @@ Requires updater units:
 - `mailclient-updater.path`
 - `mailclient-updater.service`
 
+Privileged binaries installed by current releases:
+- `/opt/mailclient/mailclient-pam-reset-helper`
+- `/opt/mailclient/mailclient-update-worker`
+
 Default runtime paths:
 - request: `/var/lib/mailclient/update/request/update-request.json`
 - status: `/var/lib/mailclient/update/status/update-status.json`
@@ -167,6 +175,23 @@ Relevant `.env` options:
 - `UPDATE_HTTP_TIMEOUT_SEC`
 - `UPDATE_GITHUB_TOKEN` (optional)
 - `UPDATE_BACKUP_KEEP`
+
+PAM helper options:
+- `PAM_RESET_HELPER_ENABLED`
+- `PAM_RESET_HELPER_SOCKET`
+- `PAM_RESET_HELPER_TIMEOUT_SEC`
+- `PAM_RESET_ALLOWED_UID`
+- `PAM_RESET_ALLOWED_GID`
+
+Emergency fallback to Go privileged paths (single host rollback):
+
+```bash
+sudo install -D -m 0644 /opt/mailclient/deploy/fallback/mailclient-pam-reset-helper-go.override.conf /etc/systemd/system/mailclient-pam-reset-helper.service.d/override.conf
+sudo install -D -m 0644 /opt/mailclient/deploy/fallback/mailclient-updater-go.override.conf /etc/systemd/system/mailclient-updater.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mailclient-pam-reset-helper.socket mailclient-pam-reset-helper.service
+sudo systemctl restart mailclient-updater.path
+```
 
 ## CAPTCHA with CAP standalone (Ubuntu)
 Registration supports `turnstile`, `hcaptcha`, and self-hosted [`tiagozip/cap`](https://github.com/tiagozip/cap).

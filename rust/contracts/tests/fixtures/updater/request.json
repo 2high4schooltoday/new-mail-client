@@ -1,0 +1,6 @@
+{
+  "request_id": "req-upd-001",
+  "requested_at": "2026-03-02T00:00:00Z",
+  "requested_by": "admin@example.com",
+  "target_version": "v1.0.2-alpha.1_02"
+}
