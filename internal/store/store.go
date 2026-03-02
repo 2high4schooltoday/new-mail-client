@@ -451,8 +451,36 @@ func (s *Store) ListRegistrations(ctx context.Context, query models.Registration
 }
 
 func (s *Store) SetRegistrationDecision(ctx context.Context, regID, status, decidedBy, reason string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var email, currentStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT email,status FROM registrations WHERE id=?`, regID).Scan(&email, &currentStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrConflict
+		}
+		return err
+	}
+	if currentStatus != "pending" {
+		return ErrConflict
+	}
+	// Keep one decided row per normalized email+status to avoid UNIQUE(email,status)
+	// collisions when a new pending registration is decided again for the same account.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM registrations
+		  WHERE id<>?
+		    AND status=?
+		    AND lower(trim(email))=lower(trim(?))`,
+		regID, status, email,
+	); err != nil {
+		return err
+	}
+
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE registrations SET status=?,decided_at=?,decided_by=?,reason=? WHERE id=? AND status='pending'`,
 		status, now, decidedBy, reason, regID,
 	)
@@ -465,6 +493,9 @@ func (s *Store) SetRegistrationDecision(ctx context.Context, regID, status, deci
 	}
 	if rows == 0 {
 		return ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -500,6 +531,17 @@ func (s *Store) RejectRegistrationAndDeletePendingUser(ctx context.Context, regI
 	}
 
 	now := time.Now().UTC()
+	// If a previous rejection exists for the same normalized email, remove it
+	// before deciding this pending row to avoid UNIQUE(email,status) conflicts.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM registrations
+		  WHERE id<>?
+		    AND status='rejected'
+		    AND lower(trim(email))=lower(trim(?))`,
+		regID, email,
+	); err != nil {
+		return "", err
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE registrations SET status=?,decided_at=?,decided_by=?,reason=? WHERE id=? AND status='pending'`,
 		"rejected", now, decidedBy, reason, regID,

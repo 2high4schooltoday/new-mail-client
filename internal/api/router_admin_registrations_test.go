@@ -386,6 +386,37 @@ func TestAdminRejectRegistrationReturnsUserStateConflict(t *testing.T) {
 	}
 }
 
+func TestAdminRejectRegistrationSucceedsWhenPreviousRejectedExistsForSameEmail(t *testing.T) {
+	router, st := newAdminRegistrationRouter(t)
+	sess, csrf := loginForSend(t, router)
+	email := "repeat-reject@example.com"
+
+	firstID := addPendingRegistration(t, st, email)
+	firstReject := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/registrations/"+firstID+"/reject", []byte(`{"reason":"first pass"}`), sess, csrf)
+	if firstReject.Code != http.StatusOK {
+		t.Fatalf("first reject failed: %d body=%s", firstReject.Code, firstReject.Body.String())
+	}
+
+	secondID := addPendingRegistration(t, st, email)
+	secondReject := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/registrations/"+secondID+"/reject", []byte(`{"reason":"second pass"}`), sess, csrf)
+	if secondReject.Code != http.StatusOK {
+		t.Fatalf("second reject failed: %d body=%s", secondReject.Code, secondReject.Body.String())
+	}
+
+	updated, err := st.GetRegistrationByID(context.Background(), secondID)
+	if err != nil {
+		t.Fatalf("load second registration: %v", err)
+	}
+	if updated.Status != "rejected" {
+		t.Fatalf("expected second registration rejected, got %q", updated.Status)
+	}
+
+	_, err = st.GetRegistrationByID(context.Background(), firstID)
+	if err != store.ErrNotFound {
+		t.Fatalf("expected first rejected row to be replaced, got err=%v", err)
+	}
+}
+
 func TestAdminBulkRejectRegistrationSucceedsWhenAuditInsertFails(t *testing.T) {
 	router, st, sqdb := newAdminRegistrationRouterWithDB(t)
 	regID := addPendingRegistration(t, st, "audit-failure@example.com")
