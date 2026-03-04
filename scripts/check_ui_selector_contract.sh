@@ -28,11 +28,23 @@ required_selectors=(
 )
 
 missing=0
+have_rg=0
+if command -v rg >/dev/null 2>&1; then
+  have_rg=1
+fi
+
 for selector in "${required_selectors[@]}"; do
-  if ! rg -q --fixed-strings "$selector" "$STYLE_FILE"; then
-    echo "UI selector contract violation: missing selector '$selector' in $STYLE_FILE"
-    missing=1
+  if [[ "$have_rg" -eq 1 ]]; then
+    if rg -q --fixed-strings "$selector" "$STYLE_FILE"; then
+      continue
+    fi
+  else
+    if grep -Fq "$selector" "$STYLE_FILE"; then
+      continue
+    fi
   fi
+  echo "UI selector contract violation: missing selector '$selector' in $STYLE_FILE"
+  missing=1
 done
 
 if [[ "$missing" -ne 0 ]]; then
