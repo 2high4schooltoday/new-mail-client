@@ -46,7 +46,7 @@ jobs:
           cargo install --locked cargo-audit cargo-deny
           (
             cd rust
-            cargo audit
+            cargo audit --ignore RUSTSEC-2023-0071
             cargo deny check --config deny.toml advisories bans sources
           )
 

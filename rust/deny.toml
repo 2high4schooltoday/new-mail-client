@@ -2,7 +2,10 @@
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+  # No upstream fix yet for rsa used via pgp; tracked until patched release exists.
+  "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "allow"
