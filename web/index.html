@@ -129,43 +129,45 @@
       </section>
 
       <section id="view-account" class="account-shell hidden">
-        <article class="panel account-panel" aria-labelledby="account-title">
-          <header class="account-header">
-            <h2 id="account-title">Account Security</h2>
-            <p class="hint">Manage passkeys, trusted devices, and signed-in sessions after authentication.</p>
-          </header>
-          <div class="account-security-grid">
-            <section class="account-security-block" aria-labelledby="account-passkeys-title">
-              <h3 id="account-passkeys-title">Passkeys</h3>
-              <p id="passkeys-note" class="hint">Passkey capability status is loading.</p>
-              <div id="passkeys-list" class="passkeys-list"></div>
-              <div class="actions">
-                <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Passkeys</button>
-                <button id="btn-passkeys-add" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Add Passkey</button>
-              </div>
-            </section>
+        <article class="oobe-window auth-window account-window" aria-labelledby="account-title">
+          <div class="oobe-content auth-content account-panel">
+            <header class="account-header">
+              <h2 id="account-title">Account Security</h2>
+              <p class="hint">Manage passkeys, trusted devices, and signed-in sessions after authentication.</p>
+            </header>
+            <div class="account-security-grid">
+              <section class="account-security-block" aria-labelledby="account-passkeys-title">
+                <h3 id="account-passkeys-title">Passkeys</h3>
+                <p id="passkeys-note" class="hint">Passkey capability status is loading.</p>
+                <div id="passkeys-list" class="passkeys-list"></div>
+                <div class="actions">
+                  <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Passkeys</button>
+                  <button id="btn-passkeys-add" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Add Passkey</button>
+                </div>
+              </section>
 
-            <section class="account-security-block" aria-labelledby="account-trusted-title">
-              <h3 id="account-trusted-title">Trusted Devices</h3>
-              <p class="hint">Trusted devices skip MFA for 30 days on this account.</p>
-              <div id="trusted-devices-list" class="trusted-devices-list"></div>
-              <div class="actions">
-                <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
-              </div>
-              <div class="account-danger-block">
-                <p class="hint">Revoking all trusted devices will require MFA on each device at next sign-in.</p>
-                <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
-              </div>
-            </section>
+              <section class="account-security-block" aria-labelledby="account-trusted-title">
+                <h3 id="account-trusted-title">Trusted Devices</h3>
+                <p class="hint">Trusted devices skip MFA for 30 days on this account.</p>
+                <div id="trusted-devices-list" class="trusted-devices-list"></div>
+                <div class="actions">
+                  <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
+                </div>
+                <div class="account-danger-block">
+                  <p class="hint">Revoking all trusted devices will require MFA on each device at next sign-in.</p>
+                  <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
+                </div>
+              </section>
 
-            <section class="account-security-block" aria-labelledby="account-sessions-title">
-              <h3 id="account-sessions-title">Sessions</h3>
-              <p class="hint">Review active sessions and revoke stale access.</p>
-              <div id="sessions-list" class="sessions-list"></div>
-              <div class="actions">
-                <button id="btn-sessions-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Sessions</button>
-              </div>
-            </section>
+              <section class="account-security-block" aria-labelledby="account-sessions-title">
+                <h3 id="account-sessions-title">Sessions</h3>
+                <p class="hint">Review active sessions and revoke stale access.</p>
+                <div id="sessions-list" class="sessions-list"></div>
+                <div class="actions">
+                  <button id="btn-sessions-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Sessions</button>
+                </div>
+              </section>
+            </div>
           </div>
         </article>
       </section>

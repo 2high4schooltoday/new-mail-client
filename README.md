@@ -38,6 +38,7 @@ Run these before packaging a release:
 - `cargo deny check --manifest-path rust/Cargo.toml --config rust/deny.toml advisories bans sources`
 - `./scripts/check_warm_palette.sh`
 - `./scripts/check_ui_contract.sh`
+- `./scripts/check_ui_selector_contract.sh`
 - `./scripts/check_surface_depth.sh`
 
 ## Quick start
@@ -61,6 +62,7 @@ Run these before packaging a release:
   - Back and discard controls are inside the setup window.
   - Primary action stays anchored at the bottom-right.
   - Global topbar is hidden while setup is required.
+- Selector-contract CI gate protects critical Setup/Auth/Account style selectors from shipping out-of-sync with markup.
 - Auth uses the same calm OOBE-style template with task selectors (not tabs):
   - `Sign In`
   - `Register` (with CAPTCHA when enabled, recovery email required)

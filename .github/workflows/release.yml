@@ -37,6 +37,7 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --workspace
           ./scripts/check_warm_palette.sh
           ./scripts/check_ui_contract.sh
+          ./scripts/check_ui_selector_contract.sh
           ./scripts/check_surface_depth.sh
           ./scripts/check_no_native_dialogs.sh
 
