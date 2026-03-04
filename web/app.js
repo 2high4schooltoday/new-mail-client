@@ -2811,9 +2811,17 @@ const OOBEController = {
     const isFirst = state.setup.step === 0;
     const isReview = state.setup.step === 4;
     const isComplete = state.setup.step === 5;
+    const showFooterBack = state.setup.step >= 1 && state.setup.step <= 4;
+    const showDiscard = state.setup.step >= 2 && state.setup.step <= 4;
 
-    el.setupBack.disabled = isFirst || isComplete || state.setup.submitting;
-    el.setupBackIcon.disabled = isFirst || isComplete || state.setup.submitting;
+    el.setupBack.classList.toggle("hidden", !showFooterBack);
+    el.setupClose.classList.toggle("hidden", !showDiscard);
+    // Footer-only back navigation: keep top-left control hidden for DOM compatibility only.
+    el.setupBackIcon.classList.add("hidden");
+
+    el.setupBack.disabled = !showFooterBack || isComplete || state.setup.submitting;
+    el.setupBackIcon.disabled = true;
+    el.setupClose.disabled = !showDiscard || state.setup.submitting;
     el.setupNext.disabled = isComplete || state.setup.submitting;
     const retryRemaining = setupRetrySecondsRemaining();
     if (retryRemaining > 0) {
@@ -2882,20 +2890,32 @@ const OOBEController = {
   },
 
   refreshNavState() {
+    const showFooterBack = state.setup.step >= 1 && state.setup.step <= 4;
+    const showDiscard = state.setup.step >= 2 && state.setup.step <= 4;
+    el.setupBack.classList.toggle("hidden", !showFooterBack);
+    el.setupClose.classList.toggle("hidden", !showDiscard);
+    el.setupBackIcon.classList.add("hidden");
+
     if (state.setup.step === 5) {
       el.setupNext.disabled = true;
+      el.setupBack.disabled = true;
+      el.setupClose.disabled = true;
       return;
     }
     if (setupRetrySecondsRemaining() > 0) {
       el.setupNext.disabled = true;
       el.setupBack.disabled = true;
+      el.setupClose.disabled = true;
       return;
     }
     if (state.setup.submitting) {
       el.setupNext.disabled = true;
       el.setupBack.disabled = true;
+      el.setupClose.disabled = true;
       return;
     }
+    el.setupBack.disabled = !showFooterBack;
+    el.setupClose.disabled = !showDiscard;
     el.setupNext.disabled = !this.isStepValid(state.setup.step);
   },
 
@@ -3011,6 +3031,9 @@ const OOBEController = {
   },
 
   openConfirm(type) {
+    if (type === "cancel" && (state.setup.step < 2 || state.setup.step >= 5)) {
+      return;
+    }
     state.setup.modalType = type;
     if (type === "cancel") {
       el.setupModalTitle.textContent = "Discard Setup Progress?";
@@ -3029,10 +3052,10 @@ const OOBEController = {
   closeConfirm() {
     el.setupModalOverlay.classList.add("hidden");
     el.setupModalOverlay.setAttribute("aria-hidden", "true");
-    if (!el.setupNext.disabled) {
-      el.setupNext.focus();
-    } else {
+    if (!el.setupBack.classList.contains("hidden") && !el.setupBack.disabled) {
       el.setupBack.focus();
+    } else {
+      el.setupNext.focus();
     }
   },
 
@@ -4174,7 +4197,7 @@ function bindSetupUI() {
       return;
     }
 
-    if (event.key === "Escape" && state.setup.step > 0 && state.setup.step < 5) {
+    if (event.key === "Escape" && state.setup.step >= 2 && state.setup.step < 5) {
       event.preventDefault();
       OOBEController.openConfirm("cancel");
     }

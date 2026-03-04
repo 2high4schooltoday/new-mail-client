@@ -454,8 +454,8 @@ a:focus-visible {
 }
 
 .app-shell.page-oobe-assistant {
-  background: var(--bg-1);
-  border: 0;
+  background: var(--bg-0);
+  border: var(--border-w) solid var(--line-1);
   padding: clamp(14px, 2vw, 24px);
 }
 
@@ -486,8 +486,8 @@ a:focus-visible {
 .auth-window {
   width: min(100%, 1100px);
   min-height: min(740px, 82vh);
-  border: 1px solid color-mix(in srgb, var(--line-1) 48%, transparent);
-  background: color-mix(in srgb, var(--bg-2) 78%, white 22%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
   overflow: hidden;
 }
 
@@ -513,37 +513,22 @@ a:focus-visible {
 .oobe-control-rail {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: var(--space-2);
   min-height: 44px;
 }
 
 .oobe-icon-btn {
-  width: 44px;
-  height: 44px;
-  border: 1px solid color-mix(in srgb, var(--line-1) 68%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 80%, white 20%);
-  color: var(--fg-0);
-  font: inherit;
-  font-size: 1.2rem;
-  line-height: 1;
-  cursor: pointer;
+  width: var(--ctrl-h-dense);
+  min-width: var(--ctrl-h-dense);
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
 }
 
 .oobe-link-btn {
-  border: 0;
-  background: transparent;
-  color: var(--fg-muted);
-  font: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  line-height: 1.2;
-  padding: 6px 8px;
-  cursor: pointer;
-}
-
-.oobe-link-btn:hover {
-  color: var(--fg-0);
-  background: color-mix(in srgb, var(--line-2) 75%, transparent);
+  min-height: var(--ctrl-h-dense);
+  padding: 0 var(--space-2);
 }
 
 .oobe-step {
@@ -553,14 +538,13 @@ a:focus-visible {
 
 .oobe-step h2 {
   font-size: clamp(1.6rem, 3vw, 2.2rem);
-  letter-spacing: 0;
+  letter-spacing: 0.01em;
   line-height: 1.1;
   font-weight: 700;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
 
 .oobe-step p {
-  color: color-mix(in srgb, var(--fg-1) 84%, white 16%);
+  color: var(--fg-1);
   max-width: 66ch;
   font-size: 1rem;
   line-height: 1.5;
@@ -606,11 +590,11 @@ a:focus-visible {
 
 .oobe-summary-card,
 .setup-summary {
-  border: 1px solid color-mix(in srgb, var(--line-1) 64%, transparent);
+  border: var(--border-w) solid var(--line-1);
   padding: var(--space-4);
   display: grid;
   gap: var(--space-2);
-  background: color-mix(in srgb, var(--bg-1) 84%, white 16%);
+  background: var(--bg-2);
 }
 
 .oobe-footer {
@@ -632,15 +616,12 @@ a:focus-visible {
 #setup-next,
 #setup-open-mail,
 #setup-open-admin {
-  min-height: 44px;
+  min-height: var(--ctrl-h-std);
   min-width: 140px;
-  text-transform: none;
-  letter-spacing: 0.01em;
-  font-size: 0.96rem;
 }
 
 #setup-back {
-  min-height: 44px;
+  min-height: var(--ctrl-h-dense);
 }
 
 #setup-inline-status {
@@ -659,13 +640,12 @@ a:focus-visible {
 }
 
 .auth-header h2 {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   font-size: clamp(1.6rem, 3vw, 2.15rem);
-  letter-spacing: 0;
+  letter-spacing: 0.01em;
 }
 
 .auth-header p {
-  color: color-mix(in srgb, var(--fg-1) 84%, white 16%);
+  color: var(--fg-1);
   max-width: 60ch;
   line-height: 1.45;
 }
@@ -678,29 +658,30 @@ a:focus-visible {
 }
 
 .auth-task {
-  min-height: 40px;
-  border: 1px solid color-mix(in srgb, var(--line-1) 66%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 82%, white 18%);
+  min-height: var(--ctrl-h-std);
+  border: var(--border-w) solid var(--line-1);
+  background: transparent;
   color: var(--fg-1);
   font: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0.01em;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   cursor: pointer;
   text-align: center;
-  padding: 0 var(--space-4);
+  padding: 0 var(--space-3);
 }
 
 .auth-task:hover {
-  border-color: color-mix(in srgb, var(--line-0) 40%, var(--line-1));
+  border-color: var(--line-0);
   color: var(--fg-0);
+  background: var(--line-2);
 }
 
 .auth-task.is-active {
-  border-color: color-mix(in srgb, var(--sig-accent) 55%, var(--line-0));
+  border-color: var(--line-0);
   color: var(--fg-0);
-  background: color-mix(in srgb, var(--sig-accent) 18%, var(--bg-1));
+  background: var(--line-2);
 }
 
 .auth-pane {
@@ -740,8 +721,8 @@ a:focus-visible {
 .auth-method-card,
 .auth-group,
 .auth-form--single {
-  border: 1px solid color-mix(in srgb, var(--line-1) 64%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 84%, white 16%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-2);
   padding: clamp(14px, 2vw, 20px);
 }
 
@@ -755,17 +736,14 @@ a:focus-visible {
 }
 
 .auth-pane-actions .cmd-btn {
-  min-height: 42px;
+  min-height: var(--ctrl-h-std);
   min-width: 180px;
-  text-transform: none;
-  letter-spacing: 0.01em;
-  font-size: 0.95rem;
 }
 
 .captcha-shell,
 .captcha-widget-container {
-  border: 1px solid color-mix(in srgb, var(--line-1) 64%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 82%, white 18%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
   padding: var(--space-3);
   display: grid;
   gap: var(--space-2);
@@ -787,8 +765,8 @@ a:focus-visible {
 
 .oobe-modal-card {
   width: min(500px, 100%);
-  border: 1px solid color-mix(in srgb, var(--line-1) 76%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 90%, white 10%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
   padding: clamp(16px, 2vw, 24px);
   display: grid;
   gap: var(--space-3);
@@ -1517,13 +1495,12 @@ a:focus-visible {
 }
 
 .account-header h2 {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   font-size: clamp(1.5rem, 2.4vw, 2rem);
-  letter-spacing: 0;
+  letter-spacing: 0.01em;
 }
 
 .account-header p {
-  color: color-mix(in srgb, var(--fg-1) 84%, white 16%);
+  color: var(--fg-1);
   max-width: 62ch;
   line-height: 1.45;
 }
@@ -1535,8 +1512,8 @@ a:focus-visible {
 }
 
 .account-security-block {
-  border: 1px solid color-mix(in srgb, var(--line-1) 64%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 84%, white 16%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-2);
   padding: clamp(12px, 1.8vw, 18px);
   display: grid;
   gap: var(--space-2);
@@ -1552,7 +1529,7 @@ a:focus-visible {
 }
 
 .account-danger-block {
-  border-top: 1px solid color-mix(in srgb, var(--sig-err) 34%, var(--line-1));
+  border-top: var(--border-w) solid var(--line-1);
   padding-top: var(--space-2);
   display: grid;
   gap: var(--space-2);
@@ -1565,8 +1542,8 @@ a:focus-visible {
 }
 
 .passkey-item {
-  border: 1px solid color-mix(in srgb, var(--line-1) 70%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 90%, white 10%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
   padding: var(--space-2);
   display: grid;
   gap: 8px;
@@ -1583,8 +1560,8 @@ a:focus-visible {
 }
 
 .trusted-device-item {
-  border: 1px solid color-mix(in srgb, var(--line-1) 70%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 90%, white 10%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
   padding: var(--space-2);
   display: grid;
   gap: 8px;
@@ -1602,7 +1579,7 @@ a:focus-visible {
 }
 
 .security-badge {
-  border: 1px solid color-mix(in srgb, var(--line-1) 76%, transparent);
+  border: var(--border-w) solid var(--line-1);
   padding: 2px 8px;
   font-size: 0.74rem;
   text-transform: uppercase;
@@ -1621,8 +1598,8 @@ a:focus-visible {
 }
 
 .session-item {
-  border: 1px solid color-mix(in srgb, var(--line-1) 70%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 90%, white 10%);
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
   padding: var(--space-2);
   display: grid;
   gap: 8px;
