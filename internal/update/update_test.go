@@ -2,11 +2,13 @@ package update
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -250,5 +252,53 @@ func TestResolveArchiveAssetMissing(t *testing.T) {
 	}
 	if _, _, ok := resolveArchiveAsset(release, "arm64"); ok {
 		t.Fatalf("expected missing archive lookup to fail")
+	}
+}
+
+func TestIsReadOnlyOrPermissionError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "permission", err: os.ErrPermission, want: true},
+		{name: "read_only_fs", err: &os.PathError{Op: "open", Path: "/etc/systemd/system/mailclient-mailsec.service", Err: syscall.EROFS}, want: true},
+		{name: "other", err: errors.New("boom"), want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isReadOnlyOrPermissionError(tt.err)
+			if got != tt.want {
+				t.Fatalf("isReadOnlyOrPermissionError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSystemdLoadStateKnown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		state string
+		want  bool
+	}{
+		{state: "", want: false},
+		{state: "not-found", want: false},
+		{state: "error", want: false},
+		{state: "bad-setting", want: false},
+		{state: "loaded", want: true},
+		{state: "masked", want: true},
+		{state: "generated", want: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.state, func(t *testing.T) {
+			t.Parallel()
+			if got := isSystemdLoadStateKnown(tt.state); got != tt.want {
+				t.Fatalf("isSystemdLoadStateKnown(%q) = %v, want %v", tt.state, got, tt.want)
+			}
+		})
 	}
 }

@@ -485,6 +485,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         .join("deploy")
         .join("mailclient-mailsec.service");
     let install_deploy_mailsec_unit_present = install_deploy_mailsec_unit.exists();
+    let mailsec_unit_known_to_systemd = systemd_unit_known("mailclient-mailsec.service");
 
     if cfg.mailsec_enabled && !mailsec_payload_present && !current_mailsec_present {
         return Err(WorkerError::Message(
@@ -495,6 +496,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         && !mailsec_unit_present
         && !installed_mailsec_unit_present
         && !install_deploy_mailsec_unit_present
+        && !mailsec_unit_known_to_systemd
     {
         return Err(WorkerError::Message(
             "mailsec is enabled but mailclient-mailsec.service is missing in payload, install deploy/, and systemd unit directory".to_string(),
@@ -581,19 +583,25 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         .join("mailclient-mailsec.service");
     if let Some(src) = mailsec_unit_source {
         if let Err(err) = copy_file(&src, &mailsec_unit_dst, 0o644) {
-            rollback_paths(&swapped)?;
-            return Err(WorkerError::Message(format!(
-                "mailsec unit install failed: {err}"
-            )));
-        }
-        if let Err(err) = run_cmd("systemctl", &["daemon-reload"], Duration::from_secs(60)) {
+            if is_read_only_or_permission_error(&err)
+                && (installed_mailsec_unit_present || mailsec_unit_known_to_systemd)
+            {
+                // Keep using existing unit when systemd unit dir is read-only.
+            } else {
+                rollback_paths(&swapped)?;
+                return Err(WorkerError::Message(format!(
+                    "mailsec unit install failed: {err}"
+                )));
+            }
+        } else if let Err(err) = run_cmd("systemctl", &["daemon-reload"], Duration::from_secs(60)) {
             rollback_paths(&swapped)?;
             return Err(WorkerError::Message(format!(
                 "mailsec daemon-reload failed: {err}"
             )));
         }
     }
-    let mailsec_unit_now_present = mailsec_unit_dst.exists();
+    let mailsec_unit_now_present =
+        mailsec_unit_dst.exists() || systemd_unit_known("mailclient-mailsec.service");
     if cfg.mailsec_enabled && !mailsec_unit_now_present {
         rollback_paths(&swapped)?;
         return Err(WorkerError::Message(
@@ -1167,7 +1175,44 @@ fn chown_recursive(path: &Path, uid: Uid, gid: Gid) -> Result<(), WorkerError> {
     Ok(())
 }
 
+fn is_read_only_or_permission_error(err: &WorkerError) -> bool {
+    match err {
+        WorkerError::Io(io_err) => {
+            io_err.kind() == io::ErrorKind::PermissionDenied || io_err.raw_os_error() == Some(30)
+        }
+        WorkerError::Message(msg) => {
+            let lower = msg.to_ascii_lowercase();
+            lower.contains("read-only file system") || lower.contains("permission denied")
+        }
+        _ => false,
+    }
+}
+
+fn systemd_unit_known(unit_name: &str) -> bool {
+    let unit = unit_name.trim();
+    if unit.is_empty() {
+        return false;
+    }
+    match run_cmd_output(
+        "systemctl",
+        &["show", "--property=LoadState", "--value", unit],
+        Duration::from_secs(5),
+    ) {
+        Ok(state) => is_systemd_load_state_known(&state),
+        Err(_) => false,
+    }
+}
+
+fn is_systemd_load_state_known(raw: &str) -> bool {
+    let state = raw.trim().to_ascii_lowercase();
+    !state.is_empty() && state != "not-found" && state != "error" && state != "bad-setting"
+}
+
 fn run_cmd(cmd: &str, args: &[&str], timeout: Duration) -> Result<(), WorkerError> {
+    run_cmd_output(cmd, args, timeout).map(|_| ())
+}
+
+fn run_cmd_output(cmd: &str, args: &[&str], timeout: Duration) -> Result<String, WorkerError> {
     let mut child = Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
@@ -1176,7 +1221,10 @@ fn run_cmd(cmd: &str, args: &[&str], timeout: Duration) -> Result<(), WorkerErro
         .spawn()?;
 
     match child.wait_timeout(timeout)? {
-        Some(status) if status.success() => Ok(()),
+        Some(status) if status.success() => {
+            let out = child.wait_with_output()?;
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
         Some(status) => {
             let out = child.wait_with_output()?;
             Err(WorkerError::Message(format!(
@@ -1280,5 +1328,27 @@ mod tests {
     fn local_base_url_maps_unspecified_hosts() {
         assert_eq!(local_base_url(":8080"), "http://127.0.0.1:8080");
         assert_eq!(local_base_url("0.0.0.0:9090"), "http://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn systemd_load_state_known_filters_not_found() {
+        assert!(!is_systemd_load_state_known(""));
+        assert!(!is_systemd_load_state_known("not-found"));
+        assert!(!is_systemd_load_state_known("error"));
+        assert!(is_systemd_load_state_known("loaded"));
+        assert!(is_systemd_load_state_known("masked"));
+    }
+
+    #[test]
+    fn read_only_or_permission_error_detection() {
+        assert!(is_read_only_or_permission_error(&WorkerError::Io(
+            io::Error::from_raw_os_error(30)
+        )));
+        assert!(is_read_only_or_permission_error(&WorkerError::Io(
+            io::Error::new(io::ErrorKind::PermissionDenied, "nope")
+        )));
+        assert!(!is_read_only_or_permission_error(&WorkerError::Message(
+            "random failure".to_string()
+        )));
     }
 }

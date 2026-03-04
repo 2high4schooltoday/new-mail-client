@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"mailclient/internal/config"
@@ -234,10 +235,11 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
+	mailSecUnitKnownToSystemd := systemdUnitKnown(ctx, "mailclient-mailsec.service")
 	if m.cfg.MailSecEnabled && !mailSecPayloadPresent && !currentMailSecPresent {
 		return "", false, fmt.Errorf("mailsec is enabled but mailclient-mailsec-service is missing in both current install and release payload")
 	}
-	if m.cfg.MailSecEnabled && !mailSecUnitPresent && !systemMailSecUnitPresent && !installDeployMailSecUnitPresent {
+	if m.cfg.MailSecEnabled && !mailSecUnitPresent && !systemMailSecUnitPresent && !installDeployMailSecUnitPresent && !mailSecUnitKnownToSystemd {
 		return "", false, fmt.Errorf("mailsec is enabled but mailclient-mailsec.service is missing in payload, install deploy/, and systemd unit directory")
 	}
 
@@ -329,16 +331,21 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	mailSecUnitDst := filepath.Join(m.cfg.UpdateSystemdUnitDir, "mailclient-mailsec.service")
 	if mailSecUnitSource != "" {
 		if err := copyFile(mailSecUnitSource, mailSecUnitDst, 0o644); err != nil {
-			if rbErr := rollback(); rbErr != nil {
-				return "", false, fmt.Errorf("mailsec unit install failed: %v; rollback failed: %v", err, rbErr)
+			if isReadOnlyOrPermissionError(err) && (systemMailSecUnitPresent || mailSecUnitKnownToSystemd) {
+				// Keep using the existing unit when systemd unit dir cannot be modified (e.g. read-only host rootfs).
+			} else {
+				if rbErr := rollback(); rbErr != nil {
+					return "", false, fmt.Errorf("mailsec unit install failed: %v; rollback failed: %v", err, rbErr)
+				}
+				return "", true, err
 			}
-			return "", true, err
-		}
-		if err := runCmd(ctx, "systemctl", "daemon-reload"); err != nil {
-			if rbErr := rollback(); rbErr != nil {
-				return "", false, fmt.Errorf("mailsec daemon-reload failed: %v; rollback failed: %v", err, rbErr)
+		} else {
+			if err := runCmd(ctx, "systemctl", "daemon-reload"); err != nil {
+				if rbErr := rollback(); rbErr != nil {
+					return "", false, fmt.Errorf("mailsec daemon-reload failed: %v; rollback failed: %v", err, rbErr)
+				}
+				return "", true, err
 			}
-			return "", true, err
 		}
 	}
 	mailSecUnitNowPresent := false
@@ -349,6 +356,9 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 			return "", false, fmt.Errorf("mailsec unit stat failed: %v; rollback failed: %v", err, rbErr)
 		}
 		return "", true, err
+	}
+	if !mailSecUnitNowPresent {
+		mailSecUnitNowPresent = systemdUnitKnown(ctx, "mailclient-mailsec.service")
 	}
 	if m.cfg.MailSecEnabled && !mailSecUnitNowPresent {
 		if rbErr := rollback(); rbErr != nil {
@@ -710,6 +720,35 @@ func runCmd(ctx context.Context, name string, args ...string) error {
 		return fmt.Errorf("%s %s failed: %v (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func systemdUnitKnown(ctx context.Context, unitName string) bool {
+	unit := strings.TrimSpace(unitName)
+	if unit == "" {
+		return false
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(checkCtx, "systemctl", "show", "--property=LoadState", "--value", unit)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return isSystemdLoadStateKnown(string(out))
+}
+
+func isSystemdLoadStateKnown(raw string) bool {
+	state := strings.ToLower(strings.TrimSpace(raw))
+	switch state {
+	case "", "not-found", "error", "bad-setting":
+		return false
+	default:
+		return true
+	}
+}
+
+func isReadOnlyOrPermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
 }
 
 func checkServiceHealth(ctx context.Context, listenAddr string) error {
