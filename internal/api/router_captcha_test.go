@@ -127,9 +127,10 @@ func TestRegisterCaptchaMissingTokenReturnsCaptchaRequired(t *testing.T) {
 	router := newCaptchaRouter(t, cfg)
 
 	body, _ := json.Marshal(map[string]string{
-		"email":         "new-user@example.com",
-		"password":      "SecretPass123!",
-		"captcha_token": "",
+		"email":          "new-user@example.com",
+		"recovery_email": "new-user-recovery@example.net",
+		"password":       "SecretPass123!",
+		"captcha_token":  "",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -165,9 +166,10 @@ func TestRegisterCaptchaVerifierUnavailableReturns503(t *testing.T) {
 	router := newCaptchaRouter(t, cfg)
 
 	body, _ := json.Marshal(map[string]string{
-		"email":         "new-user2@example.com",
-		"password":      "SecretPass123!",
-		"captcha_token": "token-ok",
+		"email":          "new-user2@example.com",
+		"recovery_email": "new-user2-recovery@example.net",
+		"password":       "SecretPass123!",
+		"captcha_token":  "token-ok",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

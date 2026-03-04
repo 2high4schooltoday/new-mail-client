@@ -101,10 +101,10 @@ type Config struct {
 	MailSecSocket    string
 	MailSecTimeoutMS int
 
-	WebAuthnRPID                 string
-	WebAuthnAllowedOrigins       []string
-	PasskeyPasswordlessEnabled   bool
-	PasskeyUsernamelessEnabled   bool
+	WebAuthnRPID               string
+	WebAuthnAllowedOrigins     []string
+	PasskeyPasswordlessEnabled bool
+	PasskeyUsernamelessEnabled bool
 }
 
 func Load() (Config, error) {
@@ -172,7 +172,7 @@ func Load() (Config, error) {
 		BootstrapAdminEmail:             env("BOOTSTRAP_ADMIN_EMAIL", ""),
 		BootstrapAdminPassword:          env("BOOTSTRAP_ADMIN_PASSWORD", ""),
 		PasswordResetSender:             strings.ToLower(env("PASSWORD_RESET_SENDER", "log")),
-		PasswordResetFrom:               env("PASSWORD_RESET_FROM", "webmaster@example.com"),
+		PasswordResetFrom:               env("PASSWORD_RESET_FROM", "no-reply@example.com"),
 		PasswordResetBaseURL:            env("PASSWORD_RESET_BASE_URL", ""),
 		PasswordResetTokenTTLMinutes:    envInt("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30),
 		PasswordResetPublicEnabled:      envBool("PASSWORD_RESET_PUBLIC_ENABLED", true),

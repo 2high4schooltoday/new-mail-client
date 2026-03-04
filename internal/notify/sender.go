@@ -43,14 +43,14 @@ type SMTPSender struct {
 	baseURL string
 }
 
-func passwordResetFromAddress(cfg config.Config) string {
+func PasswordResetFromAddress(cfg config.Config) string {
 	candidate := strings.ToLower(strings.TrimSpace(cfg.PasswordResetFrom))
 	if candidate == "" || strings.HasSuffix(candidate, "@example.com") {
 		domain := strings.ToLower(strings.TrimSpace(cfg.BaseDomain))
 		if domain == "" {
 			domain = "example.com"
 		}
-		candidate = "recovery@" + domain
+		candidate = "no-reply@" + domain
 	}
 	return candidate
 }
@@ -61,7 +61,7 @@ func NewSender(cfg config.Config) Sender {
 		return SMTPSender{
 			host:    cfg.SMTPHost,
 			port:    cfg.SMTPPort,
-			from:    passwordResetFromAddress(cfg),
+			from:    PasswordResetFromAddress(cfg),
 			baseURL: cfg.PasswordResetBaseURL,
 		}
 	default:

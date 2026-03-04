@@ -2018,7 +2018,7 @@ set_env_var "$OUT_ENV" "PASSWORD_RESET_TOKEN_TTL_MINUTES" "30"
 set_env_var "$OUT_ENV" "PASSWORD_RESET_PUBLIC_ENABLED" "true"
 set_env_var "$OUT_ENV" "PASSWORD_RESET_REQUIRE_MAPPED_LOGIN" "true"
 set_env_var "$OUT_ENV" "PASSWORD_RESET_SENDER" "smtp"
-set_env_var "$OUT_ENV" "PASSWORD_RESET_FROM" "recovery@${BASE_DOMAIN}"
+set_env_var "$OUT_ENV" "PASSWORD_RESET_FROM" "no-reply@${BASE_DOMAIN}"
 if [[ "$DOVECOT_AUTH_MODE" == "pam" && "$INSTALL_SERVICE" -eq 1 ]]; then
  set_env_var "$OUT_ENV" "PAM_RESET_HELPER_ENABLED" "true"
 else

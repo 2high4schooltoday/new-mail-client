@@ -103,8 +103,12 @@ func scanUserCore(scanner interface{ Scan(dest ...any) error }) (models.User, er
 }
 
 func (s *Store) CreateUserWithMFA(ctx context.Context, email, passwordHash, role string, status models.UserStatus, mfaPreference string) (models.User, error) {
+	return s.CreateUserWithMFARecovery(ctx, email, passwordHash, role, status, mfaPreference, email)
+}
+
+func (s *Store) CreateUserWithMFARecovery(ctx context.Context, email, passwordHash, role string, status models.UserStatus, mfaPreference, recoveryEmail string) (models.User, error) {
 	now := time.Now().UTC()
-	recovery := strings.ToLower(strings.TrimSpace(email))
+	recovery := strings.ToLower(strings.TrimSpace(recoveryEmail))
 	preference := normalizeMFAPreference(mfaPreference)
 	u := models.User{
 		ID:                     uuid.NewString(),

@@ -95,17 +95,24 @@ func TestPublicPasswordResetCapabilities(t *testing.T) {
 		Delivery            string `json:"delivery"`
 		TokenTTLMinutes     int    `json:"token_ttl_minutes"`
 		RequiresMappedLogin bool   `json:"requires_mapped_login"`
+		SenderAddress       string `json:"sender_address"`
+		SenderStatus        string `json:"sender_status"`
+		SenderReason        string `json:"sender_reason"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode payload: %v body=%s", err, rec.Body.String())
 	}
-	if payload.AuthMode != "pam" || !payload.SelfServiceEnabled || !payload.AdminResetEnabled || payload.Delivery != "log" || payload.TokenTTLMinutes != 30 || !payload.RequiresMappedLogin {
+	if payload.AuthMode != "pam" || !payload.SelfServiceEnabled || !payload.AdminResetEnabled || payload.Delivery != "log" || payload.TokenTTLMinutes != 30 || payload.RequiresMappedLogin {
 		t.Fatalf("unexpected capabilities payload: %+v", payload)
+	}
+	if payload.SenderStatus != "ready" || payload.SenderAddress == "" || payload.SenderReason != "" {
+		t.Fatalf("unexpected sender diagnostics payload: %+v", payload)
 	}
 }
 
 func TestPasswordResetRequestReturnsGenericAcceptedWhenEnabled(t *testing.T) {
 	cfg := defaultResetTestConfig()
+	cfg.PAMResetHelperEnabled = true
 	router, _ := newResetRouter(t, cfg)
 
 	body, _ := json.Marshal(map[string]string{"email": "unknown@example.com"})
@@ -135,7 +142,23 @@ func TestPasswordResetRequestReturnsUnavailableWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestAdminResetPasswordReturnsMappedLoginErrorInPAMMode(t *testing.T) {
+func TestPasswordResetRequestReturnsUnavailableWhenSenderIsDegraded(t *testing.T) {
+	cfg := defaultResetTestConfig()
+	cfg.DovecotAuthMode = "sql"
+	cfg.PasswordResetSender = "smtp"
+	router, _ := newResetRouter(t, cfg)
+
+	body, _ := json.Marshal(map[string]string{"email": "unknown@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/password/reset/request", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when sender is degraded, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminResetPasswordFallsBackToEmailInPAMMode(t *testing.T) {
 	cfg := defaultResetTestConfig()
 	cfg.PAMResetHelperEnabled = true
 	router, st := newResetRouter(t, cfg)
@@ -151,15 +174,15 @@ func TestAdminResetPasswordReturnsMappedLoginErrorInPAMMode(t *testing.T) {
 	sess, csrf := loginForSend(t, router)
 	body, _ := json.Marshal(map[string]string{"new_password": "NewPassword123!"})
 	rec := doAdminRequest(t, router, http.MethodPost, "/api/v1/admin/users/"+user.ID+"/reset-password", body, sess, csrf)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (helper unavailable), got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode payload: %v", err)
 	}
-	if payload["code"] != "password_reset_login_unmapped" {
-		t.Fatalf("expected password_reset_login_unmapped, got %v", payload["code"])
+	if payload["code"] != "password_reset_helper_unavailable" {
+		t.Fatalf("expected password_reset_helper_unavailable, got %v", payload["code"])
 	}
 }
 
@@ -227,6 +250,38 @@ func TestMeReturnsNeedsRecoveryEmailWhenMissing(t *testing.T) {
 	}
 }
 
+func TestMeReturnsNeedsRecoveryEmailWhenSameAsLogin(t *testing.T) {
+	cfg := defaultResetTestConfig()
+	cfg.DovecotAuthMode = "sql"
+	router, st := newResetRouter(t, cfg)
+
+	pwHash, err := auth.HashPassword("SameRecovery123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	_, err = st.CreateUser(context.Background(), "same@example.com", pwHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	sessionCookie, _ := loginForResetTest(t, router, "same@example.com", "SameRecovery123!")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.AddCookie(sessionCookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected /me 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload["needs_recovery_email"] != true {
+		t.Fatalf("expected needs_recovery_email=true for same-as-login recovery, got %+v", payload)
+	}
+}
+
 func TestMeUpdateRecoveryEmail(t *testing.T) {
 	cfg := defaultResetTestConfig()
 	cfg.DovecotAuthMode = "sql"
@@ -291,5 +346,40 @@ func TestMeUpdateRecoveryEmailRejectsInvalidAddress(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected update 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMeUpdateRecoveryEmailRejectsLoginAddress(t *testing.T) {
+	cfg := defaultResetTestConfig()
+	cfg.DovecotAuthMode = "sql"
+	router, st := newResetRouter(t, cfg)
+
+	pwHash, err := auth.HashPassword("RecoverMe123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	_, err = st.CreateUser(context.Background(), "recover3@example.com", pwHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	sessionCookie, csrfCookie := loginForResetTest(t, router, "recover3@example.com", "RecoverMe123!")
+
+	body, _ := json.Marshal(map[string]string{"recovery_email": "recover3@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/me/recovery-email", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfCookie.Value)
+	req.AddCookie(sessionCookie)
+	req.AddCookie(csrfCookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected update 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload["code"] != "recovery_email_matches_login" {
+		t.Fatalf("expected recovery_email_matches_login, got %+v", payload)
 	}
 }

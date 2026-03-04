@@ -36,9 +36,23 @@ var (
 	ErrPasswordResetHelperDown    = errors.New("password_reset_helper_unavailable")
 	ErrPasswordResetHelperFailed  = errors.New("password_reset_helper_failed")
 	ErrInvalidRecoveryEmail       = errors.New("invalid recovery email")
+	ErrRecoveryEmailRequired      = errors.New("recovery email is required")
+	ErrRecoveryEmailMatchesLogin  = errors.New("recovery email must differ from login email")
 )
 
 var domainRx = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+const (
+	passwordResetSenderSettingAddress = "password_reset_sender.address"
+	passwordResetSenderSettingStatus  = "password_reset_sender.status"
+	passwordResetSenderSettingReason  = "password_reset_sender.reason"
+	passwordResetSenderSettingHash    = "password_reset_sender.password_hash"
+	passwordResetSenderSettingManaged = "password_reset_sender.managed_by"
+
+	passwordResetSenderStatusReady    = "ready"
+	passwordResetSenderStatusDegraded = "degraded"
+	passwordResetSenderStatusExternal = "external"
+)
 
 type SetupStatus struct {
 	Required          bool   `json:"required"`
@@ -85,6 +99,16 @@ type PasswordResetCapabilities struct {
 	Delivery            string `json:"delivery"`
 	TokenTTLMinutes     int    `json:"token_ttl_minutes"`
 	RequiresMappedLogin bool   `json:"requires_mapped_login"`
+	SenderAddress       string `json:"sender_address"`
+	SenderStatus        string `json:"sender_status"`
+	SenderReason        string `json:"sender_reason,omitempty"`
+}
+
+type passwordResetSenderState struct {
+	Address string
+	Status  string
+	Reason  string
+	Ready   bool
 }
 
 func New(cfg config.Config, st *store.Store, m mail.Client, p mail.AuthProvisioner, sender notify.Sender) *Service {
@@ -99,7 +123,7 @@ func hashUA(ua string) string {
 	return hex.EncodeToString(s[:])
 }
 
-func (s *Service) Register(ctx context.Context, email, password, ip, userAgent string, captchaOK bool, mfaPreference string) error {
+func (s *Service) Register(ctx context.Context, email, password, recoveryEmail, ip, userAgent string, captchaOK bool, mfaPreference string) error {
 	status, err := s.SetupStatus(ctx)
 	if err != nil {
 		return err
@@ -118,13 +142,17 @@ func (s *Service) Register(ctx context.Context, email, password, ip, userAgent s
 	if !strings.HasSuffix(email, "@"+status.BaseDomain) {
 		return fmt.Errorf("email must use @%s", status.BaseDomain)
 	}
+	normalizedRecovery, err := normalizeDistinctRecoveryEmail(email, recoveryEmail)
+	if err != nil {
+		return err
+	}
 
 	hash, err := auth.HashPassword(password)
 	if err != nil {
 		return err
 	}
 	preference := NormalizeMFAPreference(mfaPreference)
-	if _, err := s.st.CreateUserWithMFA(ctx, email, hash, "user", models.UserPending, preference); err != nil {
+	if _, err := s.st.CreateUserWithMFARecovery(ctx, email, hash, "user", models.UserPending, preference, normalizedRecovery); err != nil {
 		return err
 	}
 	_, err = s.st.CreateRegistrationWithMFA(ctx, email, ip, hashUA(userAgent), captchaOK, preference)
@@ -452,7 +480,7 @@ func (s *Service) ListAudit(ctx context.Context, query models.AuditQuery) ([]mod
 	return items, total, nil
 }
 
-func (s *Service) PasswordResetCapabilities() PasswordResetCapabilities {
+func (s *Service) PasswordResetCapabilities(ctx context.Context) PasswordResetCapabilities {
 	delivery := strings.TrimSpace(strings.ToLower(s.cfg.PasswordResetSender))
 	if delivery == "" {
 		delivery = "log"
@@ -460,20 +488,174 @@ func (s *Service) PasswordResetCapabilities() PasswordResetCapabilities {
 	if !s.cfg.PasswordResetPublicEnabled {
 		delivery = "disabled"
 	}
+
+	senderState, err := s.passwordResetSenderState(ctx)
+	if err != nil {
+		senderState = passwordResetSenderState{
+			Address: notify.PasswordResetFromAddress(s.cfg),
+			Status:  passwordResetSenderStatusDegraded,
+			Reason:  "sender_state_read_failed",
+			Ready:   false,
+		}
+	}
 	selfServiceEnabled := s.cfg.PasswordResetPublicEnabled
 	adminResetEnabled := true
 	if s.usesPAMAuth() {
 		selfServiceEnabled = selfServiceEnabled && s.cfg.PAMResetHelperEnabled
 		adminResetEnabled = s.cfg.PAMResetHelperEnabled
 	}
+	selfServiceEnabled = selfServiceEnabled && senderState.Ready
 	return PasswordResetCapabilities{
 		AuthMode:            strings.ToLower(strings.TrimSpace(s.cfg.DovecotAuthMode)),
 		SelfServiceEnabled:  selfServiceEnabled,
 		AdminResetEnabled:   adminResetEnabled,
 		Delivery:            delivery,
 		TokenTTLMinutes:     s.cfg.PasswordResetTokenTTLMinutes,
-		RequiresMappedLogin: s.usesPAMAuth() && s.cfg.PasswordResetRequireMappedLogin,
+		RequiresMappedLogin: false,
+		SenderAddress:       senderState.Address,
+		SenderStatus:        senderState.Status,
+		SenderReason:        senderState.Reason,
 	}
+}
+
+func (s *Service) EnsurePasswordResetSenderIdentity(ctx context.Context) (passwordResetSenderState, error) {
+	state := passwordResetSenderState{
+		Address: notify.PasswordResetFromAddress(s.cfg),
+		Status:  passwordResetSenderStatusReady,
+		Reason:  "",
+		Ready:   true,
+	}
+	delivery := strings.TrimSpace(strings.ToLower(s.cfg.PasswordResetSender))
+	if delivery == "" {
+		delivery = "log"
+	}
+	if delivery != "smtp" {
+		return state, s.persistPasswordResetSenderState(ctx, state, "app")
+	}
+	if s.usesPAMAuth() {
+		state.Status = passwordResetSenderStatusExternal
+		state.Reason = "external_mailbox_required"
+		state.Ready = true
+		return state, s.persistPasswordResetSenderState(ctx, state, "external")
+	}
+	if !s.hasProvisioner() {
+		state.Status = passwordResetSenderStatusDegraded
+		state.Reason = "sql_provisioner_unconfigured"
+		state.Ready = false
+		return state, s.persistPasswordResetSenderState(ctx, state, "app")
+	}
+
+	hash, ok, err := s.st.GetSetting(ctx, passwordResetSenderSettingHash)
+	if err != nil {
+		return state, err
+	}
+	hash = strings.TrimSpace(hash)
+	if !ok || hash == "" {
+		raw, _, tokenErr := auth.NewOpaqueToken()
+		if tokenErr != nil {
+			return state, tokenErr
+		}
+		hash, err = auth.HashPassword(raw + "|password-reset-sender")
+		if err != nil {
+			return state, err
+		}
+		if err := s.st.UpsertSetting(ctx, passwordResetSenderSettingHash, hash); err != nil {
+			return state, err
+		}
+	}
+
+	if err := s.provision.UpsertActiveUser(ctx, state.Address, hash); err != nil {
+		state.Status = passwordResetSenderStatusDegraded
+		state.Reason = "sender_provision_failed"
+		state.Ready = false
+		if persistErr := s.persistPasswordResetSenderState(ctx, state, "app"); persistErr != nil {
+			return state, persistErr
+		}
+		return state, nil
+	}
+	state.Status = passwordResetSenderStatusReady
+	state.Reason = ""
+	state.Ready = true
+	return state, s.persistPasswordResetSenderState(ctx, state, "app")
+}
+
+func (s *Service) hasProvisioner() bool {
+	switch s.provision.(type) {
+	case mail.NoopProvisioner, *mail.NoopProvisioner:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *Service) persistPasswordResetSenderState(ctx context.Context, state passwordResetSenderState, managedBy string) error {
+	if err := s.st.UpsertSetting(ctx, passwordResetSenderSettingAddress, strings.TrimSpace(state.Address)); err != nil {
+		return err
+	}
+	if err := s.st.UpsertSetting(ctx, passwordResetSenderSettingStatus, strings.TrimSpace(state.Status)); err != nil {
+		return err
+	}
+	if err := s.st.UpsertSetting(ctx, passwordResetSenderSettingReason, strings.TrimSpace(state.Reason)); err != nil {
+		return err
+	}
+	if err := s.st.UpsertSetting(ctx, passwordResetSenderSettingManaged, strings.TrimSpace(managedBy)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) passwordResetSenderState(ctx context.Context) (passwordResetSenderState, error) {
+	state := passwordResetSenderState{
+		Address: notify.PasswordResetFromAddress(s.cfg),
+		Status:  passwordResetSenderStatusReady,
+		Reason:  "",
+		Ready:   true,
+	}
+	status, ok, err := s.st.GetSetting(ctx, passwordResetSenderSettingStatus)
+	if err != nil {
+		return state, err
+	}
+	if ok {
+		state.Status = strings.TrimSpace(status)
+		if reason, reasonOK, reasonErr := s.st.GetSetting(ctx, passwordResetSenderSettingReason); reasonErr == nil && reasonOK {
+			state.Reason = strings.TrimSpace(reason)
+		}
+		state.Ready = state.Status == passwordResetSenderStatusReady || state.Status == passwordResetSenderStatusExternal
+		return state, nil
+	}
+
+	delivery := strings.TrimSpace(strings.ToLower(s.cfg.PasswordResetSender))
+	if delivery == "" {
+		delivery = "log"
+	}
+	if delivery != "smtp" {
+		state.Status = passwordResetSenderStatusReady
+		state.Ready = true
+		return state, nil
+	}
+	if s.usesPAMAuth() {
+		state.Status = passwordResetSenderStatusExternal
+		state.Reason = "external_mailbox_required"
+		state.Ready = true
+		return state, nil
+	}
+	if !s.hasProvisioner() {
+		state.Status = passwordResetSenderStatusDegraded
+		state.Reason = "sql_provisioner_unconfigured"
+		state.Ready = false
+		return state, nil
+	}
+	hash, hashOK, hashErr := s.st.GetSetting(ctx, passwordResetSenderSettingHash)
+	if hashErr != nil {
+		return state, hashErr
+	}
+	if !hashOK || strings.TrimSpace(hash) == "" {
+		state.Status = passwordResetSenderStatusDegraded
+		state.Reason = "sender_not_initialized"
+		state.Ready = false
+		return state, nil
+	}
+	return state, nil
 }
 
 func (s *Service) insertAuditBestEffort(ctx context.Context, actorID, action, target, metadata string) {
@@ -567,7 +749,11 @@ func (s *Service) RetryProvisionUser(ctx context.Context, adminID, userID string
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
-	if !s.cfg.PasswordResetPublicEnabled {
+	caps := s.PasswordResetCapabilities(ctx)
+	if !caps.SelfServiceEnabled {
+		return ErrPasswordResetUnavailable
+	}
+	if state, err := s.EnsurePasswordResetSenderIdentity(ctx); err != nil || !state.Ready {
 		return ErrPasswordResetUnavailable
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -582,29 +768,10 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 		}
 		return nil
 	}
-	if s.usesPAMAuth() {
-		if !s.cfg.PAMResetHelperEnabled {
-			return nil
-		}
-		if s.cfg.PasswordResetRequireMappedLogin {
-			login := ""
-			if u.MailLogin != nil {
-				login = strings.TrimSpace(*u.MailLogin)
-			}
-			if login == "" {
-				return nil
-			}
-		}
-	}
-	recoveryEmail := ""
-	if u.RecoveryEmail != nil {
-		recoveryEmail = strings.ToLower(strings.TrimSpace(*u.RecoveryEmail))
-	}
-	if recoveryEmail == "" {
-		// Legacy accounts without recovery email are handled by post-login prompt.
+	if RecoveryEmailNeedsSetup(u.Email, u.RecoveryEmail) {
 		return nil
 	}
-	if err := s.issuePasswordResetToken(ctx, u, recoveryEmail); err != nil {
+	if err := s.issuePasswordResetToken(ctx, u, strings.ToLower(strings.TrimSpace(*u.RecoveryEmail))); err != nil {
 		// Keep public API leak-resistant: treat delivery failures as accepted.
 		return nil
 	}
@@ -713,7 +880,11 @@ func (s *Service) issuePasswordResetToken(ctx context.Context, u models.User, de
 }
 
 func (s *Service) UpdateRecoveryEmail(ctx context.Context, userID, recoveryEmail string) (string, error) {
-	normalized, err := normalizeRecoveryEmail(recoveryEmail)
+	u, err := s.st.GetUserByID(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	normalized, err := normalizeDistinctRecoveryEmail(u.Email, recoveryEmail)
 	if err != nil {
 		return "", err
 	}
@@ -730,9 +901,6 @@ func (s *Service) resetPasswordViaPAM(ctx context.Context, u models.User, newPas
 	login := ""
 	if u.MailLogin != nil {
 		login = strings.TrimSpace(*u.MailLogin)
-	}
-	if s.cfg.PasswordResetRequireMappedLogin && login == "" {
-		return ErrPasswordResetLoginUnmapped
 	}
 	if login == "" {
 		login = strings.TrimSpace(u.Email)
@@ -923,6 +1091,37 @@ func defaultAdminEmail(domain string) string {
 		return "webmaster@example.com"
 	}
 	return "webmaster@" + domain
+}
+
+func normalizeDistinctRecoveryEmail(loginEmail, recoveryEmail string) (string, error) {
+	if strings.TrimSpace(recoveryEmail) == "" {
+		return "", ErrRecoveryEmailRequired
+	}
+	addr, err := normalizeRecoveryEmail(recoveryEmail)
+	if err != nil {
+		return "", err
+	}
+	login := strings.ToLower(strings.TrimSpace(loginEmail))
+	if login != "" && strings.EqualFold(addr, login) {
+		return "", ErrRecoveryEmailMatchesLogin
+	}
+	return addr, nil
+}
+
+func RecoveryEmailNeedsSetup(loginEmail string, recoveryEmail *string) bool {
+	if recoveryEmail == nil || strings.TrimSpace(*recoveryEmail) == "" {
+		return true
+	}
+	addr, err := normalizeRecoveryEmail(*recoveryEmail)
+	if err != nil {
+		return true
+	}
+	login := strings.ToLower(strings.TrimSpace(loginEmail))
+	return login == "" || strings.EqualFold(addr, login)
+}
+
+func (s *Service) RecoveryEmailNeedsSetup(user models.User) bool {
+	return RecoveryEmailNeedsSetup(user.Email, user.RecoveryEmail)
 }
 
 func normalizeRecoveryEmail(v string) (string, error) {

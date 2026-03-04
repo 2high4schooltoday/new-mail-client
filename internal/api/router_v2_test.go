@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -390,6 +392,27 @@ func setTestLoopbackOrigin(req *http.Request) {
 	req.URL.Host = "localhost"
 }
 
+func extractCredentialIDsFromAllowList(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := row["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 func TestV2PreferencesFlow(t *testing.T) {
 	router := newV2Router(t)
 	sess, csrf := loginV2(t, router)
@@ -588,7 +611,13 @@ func TestV2TrustedDeviceRememberAndRevokeFlow(t *testing.T) {
 		t.Fatalf("expected rotated trusted + session cookies after trusted-device login")
 	}
 
-	listTrusted := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/security/mfa/trusted-devices", nil, sess3, csrf3)
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v2/security/mfa/trusted-devices", nil)
+	setTestLoopbackOrigin(listReq)
+	listReq.AddCookie(sess3)
+	listReq.AddCookie(csrf3)
+	listReq.AddCookie(rotatedTrusted)
+	listTrusted := httptest.NewRecorder()
+	router.ServeHTTP(listTrusted, listReq)
 	if listTrusted.Code != http.StatusOK {
 		t.Fatalf("expected trusted devices list 200, got %d body=%s", listTrusted.Code, listTrusted.Body.String())
 	}
@@ -600,6 +629,27 @@ func TestV2TrustedDeviceRememberAndRevokeFlow(t *testing.T) {
 	}
 	if len(trustedPayload.Items) == 0 {
 		t.Fatalf("expected at least one trusted device after remember flow")
+	}
+	currentFound := false
+	for _, item := range trustedPayload.Items {
+		if isCurrent, _ := item["is_current"].(bool); isCurrent {
+			currentFound = true
+		}
+		if _, ok := item["display_label"].(string); !ok {
+			t.Fatalf("expected display_label in trusted device payload item=%v", item)
+		}
+		if _, ok := item["browser"].(string); !ok {
+			t.Fatalf("expected browser in trusted device payload item=%v", item)
+		}
+		if _, ok := item["os"].(string); !ok {
+			t.Fatalf("expected os in trusted device payload item=%v", item)
+		}
+		if _, ok := item["device_type"].(string); !ok {
+			t.Fatalf("expected device_type in trusted device payload item=%v", item)
+		}
+	}
+	if !currentFound {
+		t.Fatalf("expected one trusted device marked is_current=true payload=%v", trustedPayload.Items)
 	}
 
 	revokeAll := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/trusted-devices/revoke-all", map[string]any{}, sess3, csrf3)
@@ -621,6 +671,34 @@ func TestV2TrustedDeviceRememberAndRevokeFlow(t *testing.T) {
 	}
 	if stage, _ := loginPayload2["auth_stage"].(string); stage != "mfa_required" {
 		t.Fatalf("expected mfa_required stage after trusted devices revoked, got %v payload=%v", stage, loginPayload2)
+	}
+}
+
+func TestV2SessionsListMarksCurrentSession(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf, _ := loginV2WithResponse(t, router)
+
+	rec := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/security/sessions", nil, sess, csrf)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected sessions list 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode sessions payload: %v", err)
+	}
+	if len(payload.Items) == 0 {
+		t.Fatalf("expected at least one session in list")
+	}
+	currentFound := false
+	for _, item := range payload.Items {
+		if isCurrent, _ := item["is_current"].(bool); isCurrent {
+			currentFound = true
+		}
+	}
+	if !currentFound {
+		t.Fatalf("expected is_current=true in sessions payload=%v", payload.Items)
 	}
 }
 
@@ -854,6 +932,151 @@ func TestV2PasskeyLoginAndMailSecretUnlockFlow(t *testing.T) {
 	}
 }
 
+func TestV2PasskeyLoginAcceptsLegacyHexCredentialIDs(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router, st := newV2RouterWithConfigAndStore(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+		cfg.PasskeyPasswordlessEnabled = true
+		cfg.PasskeyUsernamelessEnabled = true
+	})
+	admin, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	credentialBytes := []byte("legacy-passkey-cred")
+	credentialIDHex := hex.EncodeToString(credentialBytes)
+	credentialIDB64 := base64.RawURLEncoding.EncodeToString(credentialBytes)
+	if _, err := st.UpsertMFAWebAuthnCredential(context.Background(), models.MFAWebAuthnCredential{
+		UserID:         admin.ID,
+		CredentialID:   credentialIDHex,
+		PublicKey:      "Y29zZS1wdWJrZXk",
+		SignCount:      1,
+		TransportsJSON: `["internal"]`,
+		Name:           "Legacy Hex Passkey",
+	}); err != nil {
+		t.Fatalf("seed passkey credential: %v", err)
+	}
+
+	beginReq := httptest.NewRequest(http.MethodPost, "/api/v2/login/passkey/begin", bytes.NewReader([]byte(`{"email":"admin@example.com"}`)))
+	setTestLoopbackOrigin(beginReq)
+	beginReq.Header.Set("Content-Type", "application/json")
+	beginRec := httptest.NewRecorder()
+	router.ServeHTTP(beginRec, beginReq)
+	if beginRec.Code != http.StatusOK {
+		t.Fatalf("expected passkey begin 200, got %d body=%s", beginRec.Code, beginRec.Body.String())
+	}
+	var beginPayload map[string]any
+	if err := json.Unmarshal(beginRec.Body.Bytes(), &beginPayload); err != nil {
+		t.Fatalf("decode passkey begin payload: %v", err)
+	}
+	allowList := extractCredentialIDsFromAllowList(beginPayload["allow_credentials"])
+	if len(allowList) == 0 {
+		t.Fatalf("expected allow_credentials to include seeded credential")
+	}
+	if allowList[0] != credentialIDB64 {
+		t.Fatalf("expected allow credential id %q, got %q", credentialIDB64, allowList[0])
+	}
+	challengeID, _ := beginPayload["challenge_id"].(string)
+	challenge, _ := beginPayload["challenge"].(string)
+	if strings.TrimSpace(challengeID) == "" || strings.TrimSpace(challenge) == "" {
+		t.Fatalf("expected challenge_id and challenge in begin payload: %v", beginPayload)
+	}
+	var challengeCookie *http.Cookie
+	for _, c := range beginRec.Result().Cookies() {
+		if c.Name == "mailclient_passkey_challenge" {
+			challengeCookie = c
+			break
+		}
+	}
+	if challengeCookie == nil {
+		t.Fatalf("expected passkey challenge cookie to be set")
+	}
+
+	finishBody, _ := json.Marshal(map[string]any{
+		"challenge_id": challengeID,
+		"challenge":    challenge,
+		"id":           credentialIDB64,
+		"rawId":        credentialIDB64,
+		"response": map[string]any{
+			"clientDataJSON":    "Y2xpZW50LWRhdGE",
+			"authenticatorData": "YXV0aGVudGljYXRvci1kYXRh",
+			"signature":         "c2lnbmF0dXJl",
+		},
+	})
+	finishReq := httptest.NewRequest(http.MethodPost, "/api/v2/login/passkey/finish", bytes.NewReader(finishBody))
+	setTestLoopbackOrigin(finishReq)
+	finishReq.Header.Set("Content-Type", "application/json")
+	finishReq.AddCookie(challengeCookie)
+	finishRec := httptest.NewRecorder()
+	router.ServeHTTP(finishRec, finishReq)
+	if finishRec.Code != http.StatusOK {
+		t.Fatalf("expected passkey finish 200 for legacy hex credential, got %d body=%s", finishRec.Code, finishRec.Body.String())
+	}
+}
+
+func TestV2MFAWebAuthnFinishAcceptsLegacyHexCredentialIDs(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router, st := newV2RouterWithConfigAndStore(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+	sess, csrf := loginV2(t, router)
+	admin, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	credentialBytes := []byte("legacy-mfa-passkey")
+	credentialIDHex := hex.EncodeToString(credentialBytes)
+	credentialIDB64 := base64.RawURLEncoding.EncodeToString(credentialBytes)
+	if _, err := st.UpsertMFAWebAuthnCredential(context.Background(), models.MFAWebAuthnCredential{
+		UserID:         admin.ID,
+		CredentialID:   credentialIDHex,
+		PublicKey:      "Y29zZS1wdWJrZXk",
+		SignCount:      1,
+		TransportsJSON: `["internal"]`,
+		Name:           "Legacy Hex MFA Passkey",
+	}); err != nil {
+		t.Fatalf("seed passkey credential: %v", err)
+	}
+
+	begin := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/webauthn/begin", map[string]any{}, sess, csrf)
+	if begin.Code != http.StatusOK {
+		t.Fatalf("expected mfa webauthn begin 200, got %d body=%s", begin.Code, begin.Body.String())
+	}
+	var beginPayload map[string]any
+	if err := json.Unmarshal(begin.Body.Bytes(), &beginPayload); err != nil {
+		t.Fatalf("decode begin payload: %v", err)
+	}
+	challenge, _ := beginPayload["challenge"].(string)
+	if strings.TrimSpace(challenge) == "" {
+		t.Fatalf("expected non-empty challenge")
+	}
+	allowList := extractCredentialIDsFromAllowList(beginPayload["allow_credentials"])
+	if len(allowList) == 0 {
+		t.Fatalf("expected allow_credentials to include seeded credential")
+	}
+	if allowList[0] != credentialIDB64 {
+		t.Fatalf("expected allow credential id %q, got %q", credentialIDB64, allowList[0])
+	}
+
+	finish := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/webauthn/finish", map[string]any{
+		"challenge": challenge,
+		"id":        credentialIDB64,
+		"rawId":     credentialIDB64,
+		"response": map[string]any{
+			"clientDataJSON":    "Y2xpZW50LWRhdGE",
+			"authenticatorData": "YXV0aGVudGljYXRvci1kYXRh",
+			"signature":         "c2lnbmF0dXJl",
+		},
+	}, sess, csrf)
+	if finish.Code != http.StatusOK {
+		t.Fatalf("expected mfa webauthn finish 200 for legacy hex credential, got %d body=%s", finish.Code, finish.Body.String())
+	}
+}
+
 func TestV2PasskeyBeginRejectsInsecureOrigin(t *testing.T) {
 	socketPath := startFakeMailSecServer(t)
 	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
@@ -950,6 +1173,7 @@ func TestRegisterPersistsMFAPreference(t *testing.T) {
 	router, st := newV2RouterWithConfigAndStore(t, nil)
 	body, _ := json.Marshal(map[string]any{
 		"email":          "newuser@example.com",
+		"recovery_email": "newuser-recovery@example.net",
 		"password":       "StrongPass123!",
 		"mfa_preference": "totp",
 	})
@@ -987,6 +1211,53 @@ func TestRegisterPersistsMFAPreference(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected pending registration for newuser@example.com")
+	}
+}
+
+func TestRegisterRequiresRecoveryEmail(t *testing.T) {
+	router, _ := newV2RouterWithConfigAndStore(t, nil)
+	body, _ := json.Marshal(map[string]any{
+		"email":          "norecovery@example.com",
+		"password":       "StrongPass123!",
+		"mfa_preference": "none",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected register 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode register payload: %v body=%s", err, rec.Body.String())
+	}
+	if payload["code"] != "recovery_email_required" {
+		t.Fatalf("expected recovery_email_required, got=%v body=%s", payload["code"], rec.Body.String())
+	}
+}
+
+func TestRegisterRejectsRecoveryEmailMatchingLogin(t *testing.T) {
+	router, _ := newV2RouterWithConfigAndStore(t, nil)
+	body, _ := json.Marshal(map[string]any{
+		"email":          "same-recovery@example.com",
+		"recovery_email": "same-recovery@example.com",
+		"password":       "StrongPass123!",
+		"mfa_preference": "none",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected register 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode register payload: %v body=%s", err, rec.Body.String())
+	}
+	if payload["code"] != "recovery_email_matches_login" {
+		t.Fatalf("expected recovery_email_matches_login, got=%v body=%s", payload["code"], rec.Body.String())
 	}
 }
 
@@ -1061,6 +1332,9 @@ func TestLegacyMFAPromptDismissFlow(t *testing.T) {
 	var mePayload map[string]any
 	if err := json.Unmarshal(me.Body.Bytes(), &mePayload); err != nil {
 		t.Fatalf("decode me payload: %v", err)
+	}
+	if sessionID, _ := mePayload["session_id"].(string); strings.TrimSpace(sessionID) == "" {
+		t.Fatalf("expected non-empty session_id in /api/v1/me payload=%v", mePayload)
 	}
 	if prompt, _ := mePayload["legacy_mfa_prompt"].(bool); prompt {
 		t.Fatalf("expected legacy_mfa_prompt=false after dismiss, payload=%v", mePayload)

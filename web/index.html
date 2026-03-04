@@ -23,6 +23,7 @@
           <button id="tab-setup" class="tab" type="button">Setup</button>
           <button id="tab-auth" class="tab active" type="button">Auth</button>
           <button id="tab-mail" class="tab" type="button">Mail</button>
+          <button id="tab-account" class="tab" type="button">Account</button>
           <button id="tab-admin" class="tab" type="button">Admin</button>
         </nav>
         <div class="topbar-tools">
@@ -36,109 +37,146 @@
       <section id="status-line" class="status-line" aria-live="polite">Ready</section>
 
       <section id="view-auth" class="auth-shell">
-        <article class="panel auth-panel" aria-labelledby="auth-title">
-          <header class="auth-header">
-            <h2 id="auth-title">Account Access</h2>
-            <p class="hint">Select one action at a time: sign in, request approval, or reset credentials.</p>
-          </header>
+        <article class="oobe-window auth-window" role="region" aria-labelledby="auth-title">
+          <div class="oobe-content auth-content">
+            <header class="auth-header">
+              <h2 id="auth-title">Account Access</h2>
+              <p>Choose one task and complete it in a single, focused flow.</p>
+            </header>
 
-          <div class="auth-segments" role="tablist" aria-label="Authentication actions">
-            <button id="auth-mode-login" class="auth-segment is-active" type="button" role="tab" aria-selected="true" aria-controls="auth-pane-login">Login</button>
-            <button id="auth-mode-register" class="auth-segment" type="button" role="tab" aria-selected="false" aria-controls="auth-pane-register">Register</button>
-            <button id="auth-mode-reset" class="auth-segment" type="button" role="tab" aria-selected="false" aria-controls="auth-pane-reset">Password Reset</button>
+            <div class="auth-task-selector" aria-label="Authentication actions">
+              <button id="auth-mode-login" class="auth-task is-active" type="button" data-auth-task="login">Sign In</button>
+              <button id="auth-mode-register" class="auth-task" type="button" data-auth-task="register">Register</button>
+              <button id="auth-mode-reset" class="auth-task" type="button" data-auth-task="reset">Password Reset</button>
+            </div>
+
+            <section id="auth-pane-login" class="auth-pane">
+              <p class="hint auth-pane-intro">Use either password sign-in or passkey sign-in. Each method completes login independently.</p>
+              <div class="auth-method-stack">
+                <form id="form-login" class="stack auth-form auth-method-card auth-method-card--password">
+                  <h3>Password Sign-In</h3>
+                  <label>Email <input name="email" type="email" required autocomplete="username"></label>
+                  <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+                  <div class="auth-pane-actions">
+                    <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
+                  </div>
+                </form>
+                <section class="stack auth-method-card auth-method-card--passkey" aria-labelledby="auth-passkey-title">
+                  <h3 id="auth-passkey-title">Passkey Sign-In</h3>
+                  <label>Email (optional)
+                    <input id="passkey-email" name="passkey_email" type="email" autocomplete="username webauthn">
+                  </label>
+                  <p id="passkey-login-hint" class="hint">Passkey login availability is being checked.</p>
+                  <div class="auth-pane-actions">
+                    <button id="btn-passkey-login" class="cmd-btn cmd-btn--primary" type="button">Sign In With Passkey</button>
+                  </div>
+                </section>
+              </div>
+            </section>
+
+            <section id="auth-pane-register" class="auth-pane hidden">
+              <form id="form-register" class="stack auth-form auth-form--single">
+                <h3>Request Account Approval</h3>
+                <p class="hint auth-pane-intro">Create credentials and submit your account for administrator review.</p>
+                <label>Email <input name="email" type="email" required autocomplete="email"></label>
+                <label>Recovery Email <input name="recovery_email" type="email" required autocomplete="email"></label>
+                <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
+                <label>MFA Preference
+                  <select name="mfa_preference" id="register-mfa-preference">
+                    <option value="none">None</option>
+                    <option value="totp">TOTP App</option>
+                    <option value="webauthn">Passkey (WebAuthn)</option>
+                  </select>
+                </label>
+                <p id="register-mfa-help" class="hint">You can enable MFA later in Account Security.</p>
+                <p class="hint">Use a recovery email different from your login email.</p>
+                <div id="captcha-shell" class="captcha-shell hidden">
+                  <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
+                  <div id="captcha-widget-container" class="captcha-widget-container"></div>
+                  <label id="captcha-manual-wrap" class="hidden">Captcha Token (manual fallback)<input id="captcha-token-manual" type="text" autocomplete="off"></label>
+                  <p id="captcha-error" class="hint"></p>
+                </div>
+                <input id="captcha-token-hidden" name="captcha_token" type="hidden" value="">
+                <div class="auth-pane-actions">
+                  <button class="cmd-btn cmd-btn--primary" type="submit">Submit For Approval</button>
+                </div>
+              </form>
+            </section>
+
+            <section id="auth-pane-reset" class="auth-pane hidden">
+              <p class="hint auth-pane-intro">Request a reset token first, then apply a new password with the issued token.</p>
+              <div class="auth-reset-stack">
+                <form id="form-reset-request" class="stack auth-form auth-group">
+                  <h3>Request Token</h3>
+                  <p id="reset-capability-note" class="hint">Reset token delivery follows current server reset policy.</p>
+                  <label>Email <input name="email" type="email" required autocomplete="email"></label>
+                  <div class="auth-pane-actions">
+                    <button class="cmd-btn" type="submit">Request Token</button>
+                  </div>
+                </form>
+                <form id="form-reset-confirm" class="stack auth-form auth-group">
+                  <h3>Apply New Password</h3>
+                  <label>Reset Token <input name="token" type="text" required autocomplete="one-time-code"></label>
+                  <label>New Password <input name="new_password" type="password" required autocomplete="new-password"></label>
+                  <div class="auth-pane-actions">
+                    <button class="cmd-btn cmd-btn--primary" type="submit">Apply New Password</button>
+                  </div>
+                </form>
+              </div>
+            </section>
           </div>
+        </article>
+      </section>
 
-          <section id="auth-pane-login" class="auth-pane" role="tabpanel" aria-labelledby="auth-mode-login">
-            <form id="form-login" class="stack auth-form">
-              <label>Email <input name="email" type="email" required autocomplete="username"></label>
-              <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
-              <div class="auth-login-actions">
-                <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
-                <button id="btn-passkey-login" class="cmd-btn" type="button">Sign In With Passkey</button>
-              </div>
-              <p id="passkey-login-hint" class="hint">Passkey login availability is being checked.</p>
-            </form>
-          </section>
-
-          <section id="auth-pane-register" class="auth-pane hidden" role="tabpanel" aria-labelledby="auth-mode-register">
-            <form id="form-register" class="stack auth-form">
-              <label>Email <input name="email" type="email" required autocomplete="email"></label>
-              <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
-              <label>MFA Preference
-                <select name="mfa_preference" id="register-mfa-preference">
-                  <option value="none">None</option>
-                  <option value="totp">TOTP App</option>
-                  <option value="webauthn">Passkey (WebAuthn)</option>
-                </select>
-              </label>
-              <p id="register-mfa-help" class="hint">You can enable MFA later in Security settings.</p>
-              <div id="captcha-shell" class="captcha-shell hidden">
-                <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
-                <div id="captcha-widget-container" class="captcha-widget-container"></div>
-                <label id="captcha-manual-wrap" class="hidden">Captcha Token (manual fallback)<input id="captcha-token-manual" type="text" autocomplete="off"></label>
-                <p id="captcha-error" class="hint"></p>
-              </div>
-              <input id="captcha-token-hidden" name="captcha_token" type="hidden" value="">
-              <button class="cmd-btn cmd-btn--primary" type="submit">Submit For Approval</button>
-            </form>
-          </section>
-
-          <section id="auth-pane-reset" class="auth-pane hidden" role="tabpanel" aria-labelledby="auth-mode-reset">
-            <form id="form-reset-request" class="stack auth-form auth-group">
-              <h3>Request Token</h3>
-              <p id="reset-capability-note" class="hint">Reset token delivery follows current server reset policy.</p>
-              <label>Email <input name="email" type="email" required autocomplete="email"></label>
-              <button class="cmd-btn" type="submit">Request Token</button>
-            </form>
-            <form id="form-reset-confirm" class="stack auth-form auth-group">
-              <h3>Apply New Password</h3>
-              <label>Reset Token <input name="token" type="text" required autocomplete="one-time-code"></label>
-              <label>New Password <input name="new_password" type="password" required autocomplete="new-password"></label>
-              <button class="cmd-btn cmd-btn--primary" type="submit">Apply New Password</button>
-            </form>
-          </section>
-
-          <section id="auth-security-panel" class="auth-security hidden" aria-labelledby="auth-security-title">
-            <h3 id="auth-security-title">Security Settings</h3>
-            <div class="auth-security-block">
-              <h4>Passkeys</h4>
-              <p id="passkeys-note" class="hint">Manage passkeys enrolled for MFA and passkey sign-in.</p>
+      <section id="view-account" class="account-shell hidden">
+        <article class="panel account-panel" aria-labelledby="account-title">
+          <header class="account-header">
+            <h2 id="account-title">Account Security</h2>
+            <p class="hint">Manage passkeys, trusted devices, and signed-in sessions after authentication.</p>
+          </header>
+          <div class="account-security-grid">
+            <section class="account-security-block" aria-labelledby="account-passkeys-title">
+              <h3 id="account-passkeys-title">Passkeys</h3>
+              <p id="passkeys-note" class="hint">Passkey capability status is loading.</p>
               <div id="passkeys-list" class="passkeys-list"></div>
               <div class="actions">
                 <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Passkeys</button>
                 <button id="btn-passkeys-add" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Add Passkey</button>
               </div>
-            </div>
-            <div class="auth-security-block">
-              <h4>Trusted Devices</h4>
+            </section>
+
+            <section class="account-security-block" aria-labelledby="account-trusted-title">
+              <h3 id="account-trusted-title">Trusted Devices</h3>
               <p class="hint">Trusted devices skip MFA for 30 days on this account.</p>
-            <div id="trusted-devices-list" class="trusted-devices-list"></div>
-            <div class="actions">
-              <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
-              <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
-            </div>
-            </div>
-          </section>
+              <div id="trusted-devices-list" class="trusted-devices-list"></div>
+              <div class="actions">
+                <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
+              </div>
+              <div class="account-danger-block">
+                <p class="hint">Revoking all trusted devices will require MFA on each device at next sign-in.</p>
+                <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
+              </div>
+            </section>
+
+            <section class="account-security-block" aria-labelledby="account-sessions-title">
+              <h3 id="account-sessions-title">Sessions</h3>
+              <p class="hint">Review active sessions and revoke stale access.</p>
+              <div id="sessions-list" class="sessions-list"></div>
+              <div class="actions">
+                <button id="btn-sessions-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Sessions</button>
+              </div>
+            </section>
+          </div>
         </article>
       </section>
 
       <section id="view-setup" class="setup-shell hidden page-oobe-assistant">
         <article class="oobe-window" role="region" aria-label="Setup Assistant">
-          <header class="oobe-chrome">
-            <button id="setup-back-icon" class="oobe-icon-btn" type="button" aria-label="Go to previous step">←</button>
-            <p class="oobe-chrome-title">Despatch Setup Assistant</p>
-            <button id="setup-close" class="oobe-icon-btn" type="button" aria-label="Cancel setup">×</button>
-          </header>
-
           <form id="form-setup" class="oobe-form" novalidate>
             <div class="oobe-content">
-              <div class="oobe-step-indicator" aria-label="Setup progress">
-                <span class="oobe-dot active" data-dot="0"></span>
-                <span class="oobe-dot" data-dot="1"></span>
-                <span class="oobe-dot" data-dot="2"></span>
-                <span class="oobe-dot" data-dot="3"></span>
-                <span class="oobe-dot" data-dot="4"></span>
-                <span class="oobe-dot" data-dot="5"></span>
+              <div class="oobe-control-rail">
+                <button id="setup-back-icon" class="oobe-icon-btn" type="button" aria-label="Go to previous step">←</button>
+                <button id="setup-close" class="oobe-link-btn" type="button" aria-label="Discard setup progress">Discard Changes</button>
               </div>
 
               <div id="setup-step-0" class="oobe-step">
@@ -219,8 +257,10 @@
 
             <footer class="oobe-footer">
               <p id="setup-inline-status" class="hint" aria-live="polite"></p>
-              <button id="setup-back" class="cmd-btn" type="button">Back</button>
-              <button id="setup-next" class="cmd-btn cmd-btn--primary" type="submit">Continue</button>
+              <div class="oobe-footer-actions">
+                <button id="setup-back" class="oobe-link-btn" type="button">Back</button>
+                <button id="setup-next" class="cmd-btn cmd-btn--primary" type="submit">Continue</button>
+              </div>
             </footer>
           </form>
         </article>

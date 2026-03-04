@@ -52,11 +52,27 @@ Run these before packaging a release:
    - Create admin account (default suggestion: `webmaster@{domain}`)
 
 ## Web UI model
-- Single top-level navigation flow: `Auth`, `Mail`, `Admin` (plus `Setup` when required).
-- Auth is segmented into one centered surface with three modes:
-  - `Login`
-  - `Register` (with CAPTCHA when enabled)
+- Navigation state is context-aware:
+  - Pre-auth: `Auth` only.
+  - Authenticated: `Mail`, `Account`, and `Admin` (admin role only).
+  - Setup-required: `Setup` only.
+- Setup Assistant (OOBE) follows a linear, single-decision-per-screen template:
+  - No inner title bar/chrome.
+  - Back and discard controls are inside the setup window.
+  - Primary action stays anchored at the bottom-right.
+  - Global topbar is hidden while setup is required.
+- Auth uses the same calm OOBE-style template with task selectors (not tabs):
+  - `Sign In`
+  - `Register` (with CAPTCHA when enabled, recovery email required)
   - `Password Reset`
+- Account security is isolated from pre-auth flows:
+  - Passkey management (MFA + passkey sign-in capability context)
+  - Trusted device management (with current-device marker)
+  - Session management (with current-session marker)
+- Passkey sign-in UX:
+  - single passkey action button
+  - username-less account discovery when enabled
+  - email-scoped fallback when email is provided
 - Mail and Compose are unified:
   - mailbox + message list + viewer stay in one Mail workspace
   - compose opens as an elevated modal panel from `New Message`
@@ -113,7 +129,14 @@ PAM mode notes:
 - In PAM mode, web login is validated against IMAP credentials (Dovecot/PAM), not local hash only.
 - Password reset endpoints use the local privileged helper (`mailclient-pam-reset-helper`) when `PAM_RESET_HELPER_ENABLED=true`.
 - Public reset request endpoint remains account-enumeration safe (generic acceptance response when enabled).
+- Recovery email must be different from login email. Existing users with missing/invalid recovery email are prompted after sign-in (soft prompt, skippable per session).
+- PAM password reset now falls back to account email when `mail_login` is unset.
 - In PAM mode, mailbox account creation/provisioning remains external to this app (system/PAM side).
+
+Password reset sender identity:
+- Default sender is `no-reply@<base_domain>` when `PASSWORD_RESET_FROM` is unset or placeholder.
+- SQL auth mode auto-provisions sender mailbox identity through the configured auth provisioner.
+- PAM mode marks sender identity as externally managed and reports diagnostics in readiness/capabilities.
 
 Installer troubleshooting:
 - Installer now prints exact failing line/command on errors.
@@ -298,6 +321,7 @@ Base: `/api/v1`
 - Auth/registration:
   - `GET /public/captcha/config`
   - `GET /public/auth/capabilities`
+  - `GET /public/password-reset/capabilities` (includes sender diagnostics: `sender_address`, `sender_status`, `sender_reason`)
   - `GET /setup/status`
   - `POST /setup/complete`
   - `POST /register`
@@ -308,7 +332,7 @@ Base: `/api/v1`
   - `POST /password/reset/request`
   - `POST /password/reset/confirm`
 - User mail:
-  - `GET /me`
+  - `GET /me` (includes `session_id`, MFA stage fields, and `mail_secret_required`)
   - `POST /session/mail-secret/unlock`
   - `GET /mailboxes`
   - `GET /messages`
@@ -406,8 +430,11 @@ This release adds a new v2 surface while keeping `/api/v1` unchanged.
   - `POST /security/mfa/webauthn/register/finish`
   - `PATCH /security/mfa/webauthn/{id}`
   - `DELETE /security/mfa/webauthn/{id}`
+  - `GET /security/mfa/trusted-devices` (includes `is_current`, `display_label`, `browser`, `os`, `device_type`)
+  - `POST /security/mfa/trusted-devices/{id}/revoke`
+  - `POST /security/mfa/trusted-devices/revoke-all`
   - `GET /security/sessions`
-  - `POST /security/sessions/{id}/revoke`
+  - `POST /security/sessions/{id}/revoke` (`GET /security/sessions` includes `is_current`)
   - `GET /security/crypto/keyrings`
   - `POST /security/crypto/keyrings`
   - `PATCH /security/crypto/keyrings/{id}`

@@ -113,6 +113,17 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 			"passkey_passwordless_available": authCaps["passkey_passwordless_available"],
 			"reason":                         authCaps["reason"],
 		}
+		resetCaps := h.svc.PasswordResetCapabilities(r.Context())
+		resetSenderOK := resetCaps.SenderStatus == "ready" || resetCaps.SenderStatus == "external"
+		comps["password_reset_sender"] = map[string]any{
+			"ok":      resetSenderOK,
+			"status":  resetCaps.SenderStatus,
+			"reason":  resetCaps.SenderReason,
+			"address": resetCaps.SenderAddress,
+		}
+		if h.cfg.PasswordResetPublicEnabled && !resetSenderOK {
+			sqliteOK = false
+		}
 
 		if sqliteOK {
 			ready["status"] = "ready"
@@ -306,6 +317,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 type registerRequest struct {
 	Email         string `json:"email"`
 	Password      string `json:"password"`
+	RecoveryEmail string `json:"recovery_email"`
 	CaptchaToken  string `json:"captcha_token"`
 	MFAPreference string `json:"mfa_preference"`
 }
@@ -333,7 +345,7 @@ func (h *Handlers) PublicCaptchaConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) PublicPasswordResetCapabilities(w http.ResponseWriter, r *http.Request) {
-	caps := h.svc.PasswordResetCapabilities()
+	caps := h.svc.PasswordResetCapabilities(r.Context())
 	util.WriteJSON(w, 200, caps)
 }
 
@@ -476,8 +488,17 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		}
 		captchaOK = true
 	}
-	if err := h.svc.Register(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent(), captchaOK, req.MFAPreference); err != nil {
-		util.WriteError(w, 400, "register_failed", err.Error(), middleware.RequestID(r.Context()))
+	if err := h.svc.Register(r.Context(), req.Email, req.Password, req.RecoveryEmail, r.RemoteAddr, r.UserAgent(), captchaOK, req.MFAPreference); err != nil {
+		switch {
+		case errors.Is(err, service.ErrRecoveryEmailRequired):
+			util.WriteError(w, 400, "recovery_email_required", "recovery_email is required", middleware.RequestID(r.Context()))
+		case errors.Is(err, service.ErrRecoveryEmailMatchesLogin):
+			util.WriteError(w, 400, "recovery_email_matches_login", "recovery_email must differ from email", middleware.RequestID(r.Context()))
+		case errors.Is(err, service.ErrInvalidRecoveryEmail):
+			util.WriteError(w, 400, "invalid_recovery_email", "valid recovery_email is required", middleware.RequestID(r.Context()))
+		default:
+			util.WriteError(w, 400, "register_failed", err.Error(), middleware.RequestID(r.Context()))
+		}
 		return
 	}
 	util.WriteJSON(w, 201, map[string]string{"status": "pending_approval"})
@@ -695,11 +716,12 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"id":                   u.ID,
+		"session_id":           sess.ID,
 		"email":                u.Email,
 		"role":                 u.Role,
 		"status":               u.Status,
 		"recovery_email":       recoveryEmail,
-		"needs_recovery_email": recoveryEmail == "",
+		"needs_recovery_email": h.svc.RecoveryEmailNeedsSetup(u),
 		"mail_secret_required": strings.TrimSpace(sess.MailSecret) == "",
 	}
 	applyAuthStageFields(out, stage)
@@ -717,8 +739,12 @@ func (h *Handlers) MeUpdateRecoveryEmail(w http.ResponseWriter, r *http.Request)
 	}
 	normalized, err := h.svc.UpdateRecoveryEmail(r.Context(), u.ID, req.RecoveryEmail)
 	if err != nil {
-		if errors.Is(err, service.ErrInvalidRecoveryEmail) {
+		if errors.Is(err, service.ErrInvalidRecoveryEmail) || errors.Is(err, service.ErrRecoveryEmailRequired) {
 			util.WriteError(w, 400, "invalid_recovery_email", "valid recovery_email is required", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, service.ErrRecoveryEmailMatchesLogin) {
+			util.WriteError(w, 400, "recovery_email_matches_login", "recovery_email must differ from email", middleware.RequestID(r.Context()))
 			return
 		}
 		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))

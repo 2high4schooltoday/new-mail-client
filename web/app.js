@@ -46,7 +46,7 @@ const state = {
     widgetError: "",
   },
   ui: {
-    activeAuthPane: "login",
+    activeAuthTask: "login",
     composeOpen: false,
     composeLastTrigger: null,
     modalOpen: false,
@@ -94,10 +94,12 @@ const el = {
   tabSetup: document.getElementById("tab-setup"),
   tabAuth: document.getElementById("tab-auth"),
   tabMail: document.getElementById("tab-mail"),
+  tabAccount: document.getElementById("tab-account"),
   tabAdmin: document.getElementById("tab-admin"),
   btnLogout: document.getElementById("btn-logout"),
   viewSetup: document.getElementById("view-setup"),
   viewAuth: document.getElementById("view-auth"),
+  viewAccount: document.getElementById("view-account"),
   viewMail: document.getElementById("view-mail"),
   viewAdmin: document.getElementById("view-admin"),
   mailPaneMailboxes: document.getElementById("mail-pane-mailboxes"),
@@ -113,6 +115,7 @@ const el = {
   authPaneRegister: document.getElementById("auth-pane-register"),
   authPaneReset: document.getElementById("auth-pane-reset"),
   loginForm: document.getElementById("form-login"),
+  passkeyEmailInput: document.getElementById("passkey-email"),
   btnPasskeyLogin: document.getElementById("btn-passkey-login"),
   passkeyLoginHint: document.getElementById("passkey-login-hint"),
   resetCapabilityNote: document.getElementById("reset-capability-note"),
@@ -154,7 +157,6 @@ const el = {
   registerMFAPreference: document.getElementById("register-mfa-preference"),
   registerMFAHelp: document.getElementById("register-mfa-help"),
   registerSubmit: document.querySelector("#form-register button[type='submit']"),
-  authSecurityPanel: document.getElementById("auth-security-panel"),
   passkeysNote: document.getElementById("passkeys-note"),
   passkeysList: document.getElementById("passkeys-list"),
   btnPasskeysRefresh: document.getElementById("btn-passkeys-refresh"),
@@ -162,6 +164,8 @@ const el = {
   trustedDevicesList: document.getElementById("trusted-devices-list"),
   btnTrustedDevicesRefresh: document.getElementById("btn-trusted-devices-refresh"),
   btnTrustedDevicesRevokeAll: document.getElementById("btn-trusted-devices-revoke-all"),
+  sessionsList: document.getElementById("sessions-list"),
+  btnSessionsRefresh: document.getElementById("btn-sessions-refresh"),
   captchaShell: document.getElementById("captcha-shell"),
   captchaNote: document.getElementById("captcha-note"),
   captchaError: document.getElementById("captcha-error"),
@@ -256,8 +260,6 @@ const setupSteps = [
   document.getElementById("setup-step-5"),
 ];
 
-const setupDots = Array.from(document.querySelectorAll(".oobe-dot"));
-
 const ThemeController = {
   getTheme() {
     return state.theme;
@@ -298,6 +300,10 @@ function setSetupInlineStatus(text, type = "info") {
   else el.setupInlineStatus.style.color = "var(--fg-muted)";
 }
 
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 function apiRequestRef(err) {
   return err && err.requestID ? ` (request ${err.requestID})` : "";
 }
@@ -321,9 +327,9 @@ function presentAPIError(err, fallbackMessage) {
   setStatus(formatAPIError(err, fallbackMessage), "error");
 }
 
-function setActiveAuthPane(pane) {
-  const next = ["login", "register", "reset"].includes(String(pane || "")) ? String(pane) : "login";
-  state.ui.activeAuthPane = next;
+function setActiveAuthTask(task) {
+  const next = ["login", "register", "reset"].includes(String(task || "")) ? String(task) : "login";
+  state.ui.activeAuthTask = next;
   const modes = {
     login: el.authModeLogin,
     register: el.authModeRegister,
@@ -338,14 +344,12 @@ function setActiveAuthPane(pane) {
     if (!button) return;
     const active = key === next;
     button.classList.toggle("is-active", active);
-    button.setAttribute("aria-selected", active ? "true" : "false");
-    button.setAttribute("tabindex", active ? "0" : "-1");
+    button.setAttribute("aria-pressed", active ? "true" : "false");
   });
   Object.entries(panes).forEach(([key, panel]) => {
     if (!panel) return;
     const hidden = key !== next;
     panel.classList.toggle("hidden", hidden);
-    panel.setAttribute("aria-hidden", hidden ? "true" : "false");
   });
   if (next === "reset" && !state.auth.resetCapabilities) {
     void loadResetCapabilities();
@@ -363,7 +367,7 @@ function updateRegisterMFAHelp() {
     el.registerMFAHelp.textContent = "Use Face ID, Touch ID, Windows Hello, or a hardware security key.";
     return;
   }
-  el.registerMFAHelp.textContent = "You can enable MFA later in Security settings.";
+  el.registerMFAHelp.textContent = "You can enable MFA later in Account Security.";
 }
 
 function authCapabilityReasonMessage(reason, fallback = "Passkeys are currently unavailable.") {
@@ -390,6 +394,10 @@ function authCapabilities() {
   return state.auth.capabilities;
 }
 
+function passkeyLoginEmailValue() {
+  return String(el.passkeyEmailInput?.value || "").trim().toLowerCase();
+}
+
 function renderPasskeyLoginUI() {
   if (!el.btnPasskeyLogin || !el.passkeyLoginHint) {
     return;
@@ -397,12 +405,18 @@ function renderPasskeyLoginUI() {
   const caps = authCapabilities();
   const browserSupported = supportsWebAuthn();
   const available = browserSupported && !!caps.passkey_passwordless_available;
-  el.btnPasskeyLogin.disabled = !available;
+  const usernameless = caps.passkey_usernameless_enabled !== false;
+  const hasEmail = passkeyLoginEmailValue() !== "";
+  const emailRequiredButMissing = available && !usernameless && !hasEmail;
+  el.btnPasskeyLogin.disabled = !available || emailRequiredButMissing;
   if (available) {
-    const usernameless = caps.passkey_usernameless_enabled !== false;
-    el.passkeyLoginHint.textContent = usernameless
-      ? "Passkey login is enabled. Email is optional."
-      : "Passkey login is enabled. Enter email before using passkey.";
+    if (!usernameless) {
+      el.passkeyLoginHint.textContent = "Email is required for passkey sign-in.";
+      return;
+    }
+    el.passkeyLoginHint.textContent = hasEmail
+      ? "Use a passkey scoped to this email."
+      : "Use a passkey on this device; account discovery is automatic.";
     return;
   }
   if (!browserSupported) {
@@ -420,14 +434,17 @@ function renderPasskeySecurityNote() {
     return;
   }
   const caps = authCapabilities();
-  if (caps.passkey_mfa_available) {
-    el.passkeysNote.textContent = "Passkey MFA is available. You can add, rename, and delete credentials.";
-    return;
-  }
-  el.passkeysNote.textContent = authCapabilityReasonMessage(
-    caps.reason,
-    "Passkey MFA is currently unavailable.",
-  );
+  const lines = [];
+  lines.push(caps.passkey_mfa_available
+    ? "Passkeys are available as a second factor (MFA)."
+    : authCapabilityReasonMessage(caps.reason, "Passkeys are currently unavailable for MFA."));
+  lines.push(caps.passkey_passwordless_available
+    ? "Passkeys are available for primary sign-in."
+    : authCapabilityReasonMessage(caps.reason, "Passkey sign-in is currently unavailable."));
+  lines.push(caps.passkey_usernameless_enabled === false
+    ? "Username-less account discovery is disabled; email is required for passkey sign-in."
+    : "Username-less account discovery is enabled; email is optional for passkey sign-in.");
+  el.passkeysNote.textContent = lines.join(" ");
 }
 
 async function loadAuthCapabilities() {
@@ -548,6 +565,7 @@ function routeToAuthWithMessage(message, code = "") {
   state.user = null;
   renderPasskeyCredentials([]);
   renderTrustedDevices([]);
+  renderSessions([]);
   closeComposeOverlay(false);
   closeUIModal({ confirmed: false, value: "" });
   closeMFAModal({ action: "cancel", value: "" });
@@ -555,7 +573,7 @@ function routeToAuthWithMessage(message, code = "") {
   if (!state.setup.required) {
     setActiveTab(el.tabAuth);
     showView("auth");
-    setActiveAuthPane("login");
+    setActiveAuthTask("login");
     void loadAuthCapabilities();
     void initCaptchaUI();
   }
@@ -1576,10 +1594,11 @@ async function runPasskeyPrimaryLoginFlow() {
   if (!caps.passkey_passwordless_available) {
     throw new Error(authCapabilityReasonMessage(caps.reason, "Passkey login is not available."));
   }
-  const emailValue = String(el.loginForm?.elements?.email?.value || "").trim().toLowerCase();
+  const emailValue = passkeyLoginEmailValue();
   const begin = await api("/api/v1/login/passkey/begin", {
     method: "POST",
     json: emailValue ? { email: emailValue } : {},
+    logErrors: false,
   });
   const options = normalizePublicKeyGetOptions(begin);
   const credential = await navigator.credentials.get({ publicKey: options });
@@ -1592,7 +1611,27 @@ async function runPasskeyPrimaryLoginFlow() {
       challenge_id: String(begin.challenge_id || ""),
       challenge: String(begin.challenge || ""),
     }),
+    logErrors: false,
   });
+}
+
+function formatPasskeyPrimaryLoginError(err) {
+  if (!err || typeof err !== "object") {
+    return "Passkey login failed.";
+  }
+  if (err.code !== "invalid_credentials") {
+    return formatAPIError(err, "Passkey login failed.");
+  }
+  const scopedEmail = passkeyLoginEmailValue();
+  const caps = authCapabilities();
+  const usernameless = caps.passkey_usernameless_enabled !== false;
+  if (scopedEmail) {
+    return `No matching passkey was accepted for ${scopedEmail}. Try another email or continue with password.${apiRequestRef(err)}`;
+  }
+  if (usernameless) {
+    return `No discoverable passkey was accepted on this device. Try again or sign in with email and password.${apiRequestRef(err)}`;
+  }
+  return `Email is required for passkey sign-in on this server.${apiRequestRef(err)}`;
 }
 
 async function runMFASetupStage(stage) {
@@ -2055,12 +2094,16 @@ function renderResetCapabilityNote() {
   const authMode = String(cap.auth_mode || "sql").toUpperCase();
   const delivery = String(cap.delivery || "disabled");
   const ttl = Number(cap.token_ttl_minutes || 30);
+  const senderAddress = String(cap.sender_address || "").trim() || "n/a";
+  const senderStatus = String(cap.sender_status || "unknown").trim();
+  const senderReason = String(cap.sender_reason || "").trim();
   if (!enabled) {
-    el.resetCapabilityNote.textContent = `Reset is currently unavailable (${authMode} mode, delivery ${delivery}).`;
+    const suffix = senderReason ? ` (${senderReason})` : "";
+    el.resetCapabilityNote.textContent = `Reset is currently unavailable (${authMode} mode, delivery ${delivery}, sender ${senderStatus}${suffix}).`;
     return;
   }
   const mappingNote = cap.requires_mapped_login ? "Mapped mailbox login is required." : "Mapped mailbox login is optional.";
-  el.resetCapabilityNote.textContent = `Reset enabled (${authMode}, delivery ${delivery}, token TTL ${ttl} min). ${mappingNote}`;
+  el.resetCapabilityNote.textContent = `Reset enabled (${authMode}, delivery ${delivery}, token TTL ${ttl} min, sender ${senderAddress}, status ${senderStatus}). ${mappingNote}`;
 }
 
 async function loadResetCapabilities() {
@@ -2203,7 +2246,7 @@ function setSetupCooldown(waitSec) {
 }
 
 function setActiveTab(tab) {
-  [el.tabSetup, el.tabAuth, el.tabMail, el.tabAdmin]
+  [el.tabSetup, el.tabAuth, el.tabMail, el.tabAccount, el.tabAdmin]
     .filter(Boolean)
     .forEach((btn) => btn.classList.remove("active"));
   if (tab) tab.classList.add("active");
@@ -2212,10 +2255,12 @@ function setActiveTab(tab) {
 function showView(name) {
   el.viewSetup.classList.add("hidden");
   el.viewAuth.classList.add("hidden");
+  el.viewAccount.classList.add("hidden");
   el.viewMail.classList.add("hidden");
   el.viewAdmin.classList.add("hidden");
   if (name === "setup") el.viewSetup.classList.remove("hidden");
   if (name === "auth") el.viewAuth.classList.remove("hidden");
+  if (name === "account") el.viewAccount.classList.remove("hidden");
   if (name === "mail") el.viewMail.classList.remove("hidden");
   if (name === "admin") el.viewAdmin.classList.remove("hidden");
 
@@ -2318,26 +2363,36 @@ function setActiveAdminSection(name) {
 }
 
 function applyNavVisibility() {
+  if (el.appShell) {
+    el.appShell.classList.toggle("is-setup-required", !!state.setup.required);
+  }
+
   if (state.setup.required) {
     el.tabSetup.style.display = "inline-block";
     el.tabAuth.style.display = "none";
     el.tabMail.style.display = "none";
+    el.tabAccount.style.display = "none";
     el.tabAdmin.style.display = "none";
+    el.btnTheme.style.display = "none";
     el.btnLogout.style.display = "none";
-    if (el.authSecurityPanel) {
-      el.authSecurityPanel.classList.add("hidden");
-    }
     return;
   }
 
   el.tabSetup.style.display = "none";
-  el.tabAuth.style.display = "inline-block";
-  el.tabMail.style.display = "inline-block";
-  el.tabAdmin.style.display = state.user && state.user.role === "admin" ? "inline-block" : "none";
-  el.btnLogout.style.display = state.user ? "inline-block" : "none";
-  if (el.authSecurityPanel) {
-    el.authSecurityPanel.classList.toggle("hidden", !state.user);
+  el.btnTheme.style.display = "inline-block";
+  if (!state.user) {
+    el.tabAuth.style.display = "inline-block";
+    el.tabMail.style.display = "none";
+    el.tabAccount.style.display = "none";
+    el.tabAdmin.style.display = "none";
+    el.btnLogout.style.display = "none";
+    return;
   }
+  el.tabAuth.style.display = "none";
+  el.tabMail.style.display = "inline-block";
+  el.tabAccount.style.display = "inline-block";
+  el.tabAdmin.style.display = state.user.role === "admin" ? "inline-block" : "none";
+  el.btnLogout.style.display = "inline-block";
 }
 
 function renderTrustedDevices(items) {
@@ -2355,16 +2410,36 @@ function renderTrustedDevices(items) {
     const card = document.createElement("article");
     card.className = "trusted-device-item";
 
+    const badges = document.createElement("div");
+    badges.className = "security-badges";
+    if (item.is_current) {
+      const currentBadge = document.createElement("span");
+      currentBadge.className = "security-badge security-badge--current";
+      currentBadge.textContent = "Current device";
+      badges.appendChild(currentBadge);
+    }
+    if (String(item.device_type || "").trim()) {
+      const typeBadge = document.createElement("span");
+      typeBadge.className = "security-badge";
+      typeBadge.textContent = String(item.device_type);
+      badges.appendChild(typeBadge);
+    }
+    if (badges.childElementCount > 0) {
+      card.appendChild(badges);
+    }
+
     const label = document.createElement("strong");
-    label.textContent = String(item.device_label || "Trusted device");
+    label.textContent = String(item.display_label || item.device_label || "Trusted device");
     card.appendChild(label);
 
     const meta = document.createElement("p");
     meta.className = "trusted-device-meta";
-    const lastUsed = item.last_used_at ? `Last used: ${new Date(item.last_used_at).toLocaleString()}` : "Last used: never";
-    const expires = item.expires_at ? `Expires: ${new Date(item.expires_at).toLocaleString()}` : "Expires: n/a";
+    const browser = String(item.browser || "").trim();
+    const os = String(item.os || "").trim();
+    const lastUsed = item.last_used_at ? `Last used: ${formatDateTimeOrNA(item.last_used_at)}` : "Last used: never";
+    const expires = item.expires_at ? `Expires: ${formatDateTimeOrNA(item.expires_at)}` : "Expires: n/a";
     const ip = item.ip_hint ? `IP: ${String(item.ip_hint)}` : "";
-    meta.textContent = [lastUsed, expires, ip].filter(Boolean).join(" | ");
+    meta.textContent = [browser, os, lastUsed, expires, ip].filter(Boolean).join(" | ");
     card.appendChild(meta);
 
     const revoke = document.createElement("button");
@@ -2396,6 +2471,83 @@ async function loadTrustedDevices() {
   } catch (err) {
     renderTrustedDevices([]);
     setStatus(formatAPIError(err, "Failed to load trusted devices."), "error");
+  }
+}
+
+function renderSessions(items) {
+  if (!el.sessionsList) return;
+  el.sessionsList.replaceChildren();
+  const rows = Array.isArray(items) ? items : [];
+  if (rows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "No active sessions found.";
+    el.sessionsList.appendChild(empty);
+    return;
+  }
+  for (const item of rows) {
+    const card = document.createElement("article");
+    card.className = "session-item";
+
+    const badges = document.createElement("div");
+    badges.className = "security-badges";
+    if (item.is_current) {
+      const currentBadge = document.createElement("span");
+      currentBadge.className = "security-badge security-badge--current";
+      currentBadge.textContent = "Current session";
+      badges.appendChild(currentBadge);
+    }
+    const methodBadge = document.createElement("span");
+    methodBadge.className = "security-badge";
+    methodBadge.textContent = String(item.auth_method || "password");
+    badges.appendChild(methodBadge);
+    card.appendChild(badges);
+
+    const label = document.createElement("strong");
+    label.textContent = String(item.device_label || item.ua_summary || "Session");
+    card.appendChild(label);
+
+    const meta = document.createElement("p");
+    meta.className = "session-meta";
+    const ua = String(item.ua_summary || "").trim();
+    const ip = String(item.ip_hint || "").trim();
+    const lastSeen = `Last seen: ${formatDateTimeOrNA(item.last_seen_at)}`;
+    const expires = `Expires: ${formatDateTimeOrNA(item.expires_at)}`;
+    meta.textContent = [ua, ip ? `IP: ${ip}` : "", lastSeen, expires].filter(Boolean).join(" | ");
+    card.appendChild(meta);
+
+    if (!item.is_current) {
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "cmd-btn cmd-btn--dense cmd-btn--danger";
+      revoke.textContent = "Revoke Session";
+      revoke.addEventListener("click", async () => {
+        try {
+          await api(`/api/v2/security/sessions/${encodeURIComponent(String(item.session_id || ""))}/revoke`, {
+            method: "POST",
+            json: { reason: "user_initiated" },
+          });
+          setStatus("Session revoked.", "ok");
+          await loadSessions();
+        } catch (err) {
+          setStatus(formatAPIError(err, "Failed to revoke session."), "error");
+        }
+      });
+      card.appendChild(revoke);
+    }
+
+    el.sessionsList.appendChild(card);
+  }
+}
+
+async function loadSessions() {
+  if (!state.user || !el.sessionsList) return;
+  try {
+    const payload = await api("/api/v2/security/sessions", { logErrors: false });
+    renderSessions(Array.isArray(payload.items) ? payload.items : []);
+  } catch (err) {
+    renderSessions([]);
+    setStatus(formatAPIError(err, "Failed to load sessions."), "error");
   }
 }
 
@@ -2636,11 +2788,26 @@ const OOBEController = {
   },
 
   setStep(step) {
-    state.setup.step = Math.max(0, Math.min(step, setupSteps.length - 1));
+    const nextStep = Math.max(0, Math.min(step, setupSteps.length - 1));
+    const previousStep = Number(state.setup.step || 0);
+    const direction = nextStep >= previousStep ? "forward" : "backward";
+    state.setup.step = nextStep;
     for (let i = 0; i < setupSteps.length; i += 1) {
       setupSteps[i].classList.toggle("hidden", i !== state.setup.step);
     }
-    setupDots.forEach((dot, index) => dot.classList.toggle("active", index <= state.setup.step));
+    const activeStep = setupSteps[state.setup.step];
+    if (activeStep) {
+      activeStep.classList.remove("is-entering-forward", "is-entering-backward");
+      if (nextStep !== previousStep && !prefersReducedMotion()) {
+        const enterClass = direction === "backward" ? "is-entering-backward" : "is-entering-forward";
+        const clear = () => activeStep.classList.remove("is-entering-forward", "is-entering-backward");
+        activeStep.addEventListener("animationend", clear, { once: true });
+        window.setTimeout(clear, 260);
+        window.requestAnimationFrame(() => {
+          activeStep.classList.add(enterClass);
+        });
+      }
+    }
     const isFirst = state.setup.step === 0;
     const isReview = state.setup.step === 4;
     const isComplete = state.setup.step === 5;
@@ -2975,11 +3142,13 @@ async function refreshSession(opts = {}) {
     await promptLegacyMFAIfNeeded();
     await loadTrustedDevices();
     await loadPasskeyCredentials();
+    await loadSessions();
     return { ok: true, user: me };
   } catch (err) {
     state.auth.recoveryPromptShownForSession = false;
     state.auth.legacyMFAOfferShownForSession = false;
     state.user = null;
+    renderSessions([]);
     applyNavVisibility();
     if (opts.throwOnFail) throw err;
     return { ok: false, error: err };
@@ -2993,10 +3162,12 @@ function userNeedsRecoveryEmail(user) {
   if (user.needs_recovery_email === true) {
     return true;
   }
-  if (typeof user.recovery_email !== "string") {
+  const login = String(user.email || "").trim().toLowerCase();
+  const recovery = String(user.recovery_email || "").trim().toLowerCase();
+  if (!recovery || !validEmail(recovery)) {
     return true;
   }
-  return String(user.recovery_email).trim() === "";
+  return login !== "" && recovery === login;
 }
 
 async function promptRecoveryEmailIfNeeded() {
@@ -3006,15 +3177,28 @@ async function promptRecoveryEmailIfNeeded() {
   state.auth.recoveryPromptShownForSession = true;
 
   while (state.user && userNeedsRecoveryEmail(state.user)) {
-    const seed = String(state.user.email || "").trim();
-    const input = window.prompt("Set recovery email for password reset tokens:", seed); // allow-native-recovery-email-prompt
+    const seed = String(state.user.recovery_email || state.user.email || "").trim();
+    const input = await showPromptModal({
+      title: "Set Recovery Email",
+      body: "Password reset tokens are sent to your recovery email. Use an address different from your login email.",
+      label: "Recovery Email",
+      inputType: "email",
+      defaultValue: seed,
+      confirmText: "Save",
+      cancelText: "Skip For Now",
+    });
     if (input === null) {
       setStatus("Recovery email is missing. Password reset delivery stays disabled until it is set.", "info");
       return;
     }
-    const candidate = String(input || "").trim();
-    if (!candidate) {
-      setStatus("Recovery email cannot be empty.", "error");
+    const candidate = String(input || "").trim().toLowerCase();
+    const login = String(state.user.email || "").trim().toLowerCase();
+    if (!candidate || !validEmail(candidate)) {
+      setStatus("Enter a valid recovery email address.", "error");
+      continue;
+    }
+    if (candidate === login) {
+      setStatus("Recovery email must be different from login email.", "error");
       continue;
     }
     try {
@@ -3888,7 +4072,7 @@ function bindSetupUI() {
             applyNavVisibility();
             setActiveTab(el.tabAuth);
             showView("auth");
-            setActiveAuthPane("login");
+            setActiveAuthTask("login");
             setStatus("SETUP ALREADY COMPLETED. SIGN IN WITH ADMIN ACCOUNT.", "info");
             setSetupInlineStatus("");
             return;
@@ -3999,38 +4183,27 @@ function bindSetupUI() {
 
 function bindUI() {
   bindSetupUI();
-  setActiveAuthPane("login");
+  setActiveAuthTask("login");
   setActiveAdminSection(state.ui.activeAdminSection || "update");
   setActiveMailPane(state.ui.activeMailPane || "mailboxes", { focus: false });
   if (el.authModeLogin) {
     el.authModeLogin.onclick = () => {
-      setActiveAuthPane("login");
+      setActiveAuthTask("login");
       void loadAuthCapabilities();
     };
   }
   if (el.authModeRegister) {
     el.authModeRegister.onclick = () => {
-      setActiveAuthPane("register");
+      setActiveAuthTask("register");
       void initCaptchaUI();
     };
   }
   if (el.authModeReset) {
     el.authModeReset.onclick = () => {
-      setActiveAuthPane("reset");
+      setActiveAuthTask("reset");
       void loadResetCapabilities();
     };
   }
-  const authModeButtons = [el.authModeLogin, el.authModeRegister, el.authModeReset].filter(Boolean);
-  authModeButtons.forEach((button, index) => {
-    button.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-      event.preventDefault();
-      const delta = event.key === "ArrowRight" ? 1 : -1;
-      const nextIndex = (index + delta + authModeButtons.length) % authModeButtons.length;
-      authModeButtons[nextIndex].focus();
-      authModeButtons[nextIndex].click();
-    });
-  });
   if (el.captchaManualInput) {
     el.captchaManualInput.addEventListener("input", () => {
       setCaptchaToken(el.captchaManualInput.value);
@@ -4042,6 +4215,11 @@ function bindUI() {
       }
     });
   }
+  if (el.passkeyEmailInput) {
+    el.passkeyEmailInput.addEventListener("input", () => {
+      renderPasskeyLoginUI();
+    });
+  }
   if (el.btnTheme) {
     el.btnTheme.onclick = () => {
       const next = ThemeController.getTheme() === "paper-light" ? "machine-dark" : "paper-light";
@@ -4050,9 +4228,11 @@ function bindUI() {
         showView("setup");
       } else if (!state.user) {
         showView("auth");
-        setActiveAuthPane(state.ui.activeAuthPane || "login");
+        setActiveAuthTask(state.ui.activeAuthTask || "login");
       } else if (!el.viewAdmin.classList.contains("hidden")) {
         showView("admin");
+      } else if (!el.viewAccount.classList.contains("hidden")) {
+        showView("account");
       } else {
         showView("mail");
       }
@@ -4311,7 +4491,7 @@ function bindUI() {
           await enterSetupIfRequired();
           return;
         }
-        setStatus(formatAPIError(err, "Passkey login failed."), "error");
+        setStatus(formatPasskeyPrimaryLoginError(err), "error");
       }
     });
   }
@@ -4319,6 +4499,16 @@ function bindUI() {
   document.getElementById("form-register").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    const loginEmail = String(fd.get("email") || "").trim().toLowerCase();
+    const recoveryEmail = String(fd.get("recovery_email") || "").trim().toLowerCase();
+    if (!validEmail(recoveryEmail)) {
+      setStatus("Provide a valid recovery email.", "error");
+      return;
+    }
+    if (loginEmail !== "" && loginEmail === recoveryEmail) {
+      setStatus("Recovery email must be different from login email.", "error");
+      return;
+    }
     const captchaToken = String(fd.get("captcha_token") || "").trim();
     const captchaEnabled = !!state.captcha.config?.enabled;
     if (captchaEnabled && !captchaToken) {
@@ -4332,7 +4522,8 @@ function bindUI() {
       await api("/api/v1/register", {
         method: "POST",
         json: {
-          email: fd.get("email"),
+          email: loginEmail,
+          recovery_email: recoveryEmail,
           password: fd.get("password"),
           captcha_token: captchaToken,
           mfa_preference: fd.get("mfa_preference") || "none",
@@ -4426,6 +4617,12 @@ function bindUI() {
       } catch (err) {
         setStatus(formatAPIError(err, "Failed to revoke trusted devices."), "error");
       }
+    });
+  }
+  if (el.btnSessionsRefresh) {
+    el.btnSessionsRefresh.addEventListener("click", async () => {
+      await loadSessions();
+      setStatus("Sessions refreshed.", "ok");
     });
   }
 
@@ -4589,13 +4786,9 @@ function bindUI() {
     closeComposeOverlay(false);
     setActiveTab(el.tabAuth);
     showView("auth");
-    setActiveAuthPane("login");
+    setActiveAuthTask("login");
     void loadAuthCapabilities();
     void initCaptchaUI();
-    if (state.user) {
-      void loadTrustedDevices();
-      void loadPasskeyCredentials();
-    }
   };
 
   el.tabMail.onclick = async () => {
@@ -4642,6 +4835,35 @@ function bindUI() {
     }
   };
 
+  if (el.tabAccount) {
+    el.tabAccount.onclick = async () => {
+      if (!state.user || state.setup.required) return;
+      if (requiresMFAStageAuthentication(state.user)) {
+        try {
+          await ensureMFAStageAuthenticated(state.user);
+          await refreshSession({
+            throwOnFail: true,
+            skipUnauthorizedHandling: true,
+            skipMFAHandling: true,
+          });
+        } catch (err) {
+          presentAPIError(err, "Multi-factor authentication is required before opening Account.");
+          return;
+        }
+      }
+      closeComposeOverlay(false);
+      setActiveTab(el.tabAccount);
+      showView("account");
+      try {
+        await loadPasskeyCredentials();
+        await loadTrustedDevices();
+        await loadSessions();
+      } catch (err) {
+        presentAPIError(err, "Failed to load account security data");
+      }
+    };
+  }
+
   el.tabAdmin.onclick = async () => {
     if (!state.user || state.user.role !== "admin" || state.setup.required) return;
     if (requiresMFAStageAuthentication(state.user)) {
@@ -4682,12 +4904,13 @@ function bindUI() {
     state.selectedMessage = null;
     renderPasskeyCredentials([]);
     renderTrustedDevices([]);
+    renderSessions([]);
     closeComposeOverlay(false);
     closeMFAModal({ action: "cancel", value: "" });
     applyNavVisibility();
     setActiveTab(el.tabAuth);
     showView("auth");
-    setActiveAuthPane("login");
+    setActiveAuthTask("login");
     void initCaptchaUI();
     setStatus("Signed out.", "ok");
   };
@@ -4757,7 +4980,7 @@ async function bootstrap() {
   if (!session.ok) {
     setActiveTab(el.tabAuth);
     showView("auth");
-    setActiveAuthPane("login");
+    setActiveAuthTask("login");
     await loadAuthCapabilities();
     await initCaptchaUI();
     setStatus("Authentication required.");

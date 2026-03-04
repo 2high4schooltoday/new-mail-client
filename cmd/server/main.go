@@ -100,6 +100,11 @@ func main() {
 	sender := notify.NewSender(cfg)
 
 	svc := service.New(cfg, st, mailClient, provisioner, sender)
+	if senderState, err := svc.EnsurePasswordResetSenderIdentity(context.Background()); err != nil {
+		log.Printf("password_reset_sender_init_failed address=%s err=%v", senderState.Address, err)
+	} else {
+		log.Printf("password_reset_sender_status status=%s reason=%s address=%s", senderState.Status, senderState.Reason, senderState.Address)
+	}
 	workers.StartMailWorkers(context.Background(), cfg, st)
 	r := api.NewRouter(cfg, svc)
 

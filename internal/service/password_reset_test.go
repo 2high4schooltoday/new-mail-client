@@ -58,7 +58,7 @@ func newPasswordResetService(t *testing.T, sender *captureResetSender) (*Service
 		PasswordMaxLength:            128,
 		PasswordResetPublicEnabled:   true,
 		PasswordResetTokenTTLMinutes: 30,
-		PasswordResetSender:          "smtp",
+		PasswordResetSender:          "log",
 	}
 	svc := New(cfg, st, mail.NoopClient{}, mail.NoopProvisioner{}, sender)
 	return svc, st

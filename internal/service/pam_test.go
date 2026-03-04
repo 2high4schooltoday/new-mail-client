@@ -195,9 +195,9 @@ func TestPAMModeUsesHelperPolicyForPasswordReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	// Public request path remains generic when helper is disabled.
-	if err := svc.RequestPasswordReset(ctx, "alice@example.com"); err != nil {
-		t.Fatalf("expected RequestPasswordReset to stay generic, got: %v", err)
+	// Public request path is unavailable when helper is disabled.
+	if err := svc.RequestPasswordReset(ctx, "alice@example.com"); !errors.Is(err, ErrPasswordResetUnavailable) {
+		t.Fatalf("expected RequestPasswordReset to be unavailable, got: %v", err)
 	}
 	if err := svc.ConfirmPasswordReset(ctx, "token", "NewPassword123!"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ConfirmPasswordReset invalid token, got: %v", err)
@@ -207,7 +207,7 @@ func TestPAMModeUsesHelperPolicyForPasswordReset(t *testing.T) {
 	}
 }
 
-func TestPAMAdminResetRequiresMappedLoginWhenConfigured(t *testing.T) {
+func TestPAMAdminResetFallsBackToEmailWhenMappedLoginMissing(t *testing.T) {
 	ctx := context.Background()
 	svc, st := newPAMTestService(t, "PamPass123!")
 	svc.cfg.PAMResetHelperEnabled = true
@@ -221,8 +221,8 @@ func TestPAMAdminResetRequiresMappedLoginWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if err := svc.AdminResetPassword(ctx, "admin-id", user.ID, "NewPassword123!"); !errors.Is(err, ErrPasswordResetLoginUnmapped) {
-		t.Fatalf("expected ErrPasswordResetLoginUnmapped, got: %v", err)
+	if err := svc.AdminResetPassword(ctx, "admin-id", user.ID, "NewPassword123!"); !errors.Is(err, ErrPasswordResetHelperDown) {
+		t.Fatalf("expected helper unavailable after fallback to email login, got: %v", err)
 	}
 }
 
