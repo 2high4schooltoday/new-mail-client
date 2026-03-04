@@ -1,0 +1,11 @@
+{
+  "request_id": "req-crypto-1",
+  "ok": true,
+  "code": "ok",
+  "error": "",
+  "result": {
+    "signed_message_armored": "-----BEGIN PGP MESSAGE-----\n...\n-----END PGP MESSAGE-----",
+    "signed_message_b64url": "c2lnbmVk",
+    "signer_fingerprint": "ABCD1234"
+  }
+}

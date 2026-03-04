@@ -172,6 +172,18 @@ func (c *IMAPSMTPClient) GetMessage(ctx context.Context, user, pass, id string) 
 	return parsed, nil
 }
 
+func (c *IMAPSMTPClient) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	mailbox, uid, err := DecodeMessageID(id)
+	if err != nil {
+		return nil, err
+	}
+	raw, _, err := c.fetchRawMessage(ctx, user, pass, mailbox, uid)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 func (c *IMAPSMTPClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]MessageSummary, error) {
 	if page < 1 {
 		page = 1

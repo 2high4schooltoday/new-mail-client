@@ -334,6 +334,81 @@ Base: `/api/v1`
   - `POST /admin/system/update/check`
   - `POST /admin/system/update/apply`
 
+### API v2 foundation
+Base: `/api/v2`
+
+This release adds a new v2 surface while keeping `/api/v1` unchanged.
+
+- Auth/MFA:
+  - `POST /login`
+  - `POST /mfa/totp/verify`
+  - `POST /mfa/webauthn/begin`
+  - `POST /mfa/webauthn/finish`
+  - `POST /mfa/recovery-code/verify`
+  - `WebAuthn` and `TOTP` verification can be delegated to `mailsec_service` when `MAILSEC_ENABLED=true`.
+- Accounts and identities:
+  - `GET /accounts`
+  - `POST /accounts`
+  - `PATCH /accounts/{id}`
+  - `DELETE /accounts/{id}`
+  - `POST /accounts/{id}/activate`
+  - `GET /accounts/{id}/identities`
+  - `POST /accounts/{id}/identities`
+  - `PATCH /identities/{id}`
+  - `DELETE /identities/{id}`
+- Mail index and actions:
+  - `GET /mailboxes`
+  - `POST /mailboxes`
+  - `PATCH /mailboxes/{id}`
+  - `DELETE /mailboxes/{id}`
+  - `GET /threads`
+  - `GET /threads/{id}`
+  - `GET /messages/{id}`
+  - `GET /messages/{id}/raw`
+  - `POST /messages/bulk`
+  - `POST /messages/{id}/remote-images/allow`
+  - `POST /messages/{id}/crypto/decrypt`
+  - `POST /messages/{id}/crypto/verify`
+- Search/saved queries:
+  - `GET /search`
+  - `GET /saved-searches`
+  - `POST /saved-searches`
+  - `PATCH /saved-searches/{id}`
+  - `DELETE /saved-searches/{id}`
+- Drafts/send:
+  - `GET /drafts`
+  - `POST /drafts`
+  - `PATCH /drafts/{id}`
+  - `GET /drafts/{id}/versions`
+  - `POST /drafts/{id}/send`
+  - `POST /messages/send`
+- Rules/preferences/security:
+  - `GET /rules/scripts`
+  - `GET /rules/scripts/{name}`
+  - `PUT /rules/scripts/{name}`
+  - `POST /rules/scripts/{name}/activate`
+  - `DELETE /rules/scripts/{name}`
+  - `POST /rules/validate`
+  - `GET /preferences`
+  - `PUT /preferences`
+  - `GET /security/mfa/status`
+  - `POST /security/mfa/totp/enroll`
+  - `POST /security/mfa/totp/confirm`
+  - `POST /security/mfa/webauthn/register/begin`
+  - `POST /security/mfa/webauthn/register/finish`
+  - `DELETE /security/mfa/webauthn/{id}`
+  - `GET /security/sessions`
+  - `POST /security/sessions/{id}/revoke`
+  - `GET /security/crypto/keyrings`
+  - `POST /security/crypto/keyrings`
+  - `PATCH /security/crypto/keyrings/{id}`
+  - `DELETE /security/crypto/keyrings/{id}`
+  - `GET /security/crypto/trust-policies`
+  - `POST /security/crypto/trust-policies`
+  - `PATCH /security/crypto/trust-policies/{id}`
+  - `DELETE /security/crypto/trust-policies/{id}`
+  - `GET /quota`
+
 ## Test
 - `go test ./...`
 - `./scripts/check_warm_palette.sh`
@@ -343,3 +418,11 @@ Base: `/api/v1`
 - CAPTCHA (when enabled) is server-verified.
 - CORS now uses explicit allowlist via `CORS_ALLOWED_ORIGINS`.
 - Cookie policy now supports `COOKIE_SECURE_MODE` (preferred) with legacy `COOKIE_SECURE` compatibility.
+
+## Mail Security Service
+- Rust `mailsec_service` is now part of the workspace (`rust/mailsec_service`).
+- IPC contract is frozen in [`docs/security/rust-mailsec-contracts.md`](docs/security/rust-mailsec-contracts.md).
+- Contract wire format remains length-prefixed JSON frames over UNIX sockets.
+- `mailsec_service` implements PGP and S/MIME operations used by `/api/v2` compose and reader crypto flows:
+  - sign / encrypt / decrypt / verify
+  - strict JSON decoding (`deny_unknown_fields`) and bounded IPC frame size.

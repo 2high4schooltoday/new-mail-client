@@ -1,0 +1,12 @@
+{
+  "request_id": "req-crypto-1",
+  "op": "crypto.pgp.sign",
+  "account_id": "account-1",
+  "message_id": "message-1",
+  "payload": {
+    "plaintext": "hello",
+    "private_key_armored": "-----BEGIN PGP PRIVATE KEY BLOCK-----\n...\n-----END PGP PRIVATE KEY BLOCK-----",
+    "passphrase": "secret"
+  },
+  "deadline_ms": 5000
+}

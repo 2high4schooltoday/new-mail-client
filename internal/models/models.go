@@ -12,24 +12,29 @@ const (
 )
 
 type User struct {
-	ID             string
-	Email          string
-	RecoveryEmail  *string
-	MailLogin      *string
-	PasswordHash   string
-	Role           string
-	Status         UserStatus
-	ProvisionState string
-	ProvisionError *string
-	CreatedAt      time.Time
-	ApprovedAt     *time.Time
-	ApprovedBy     *string
-	LastLoginAt    *time.Time
+	ID                     string
+	Email                  string
+	RecoveryEmail          *string
+	MailLogin              *string
+	MFAPreference          string
+	LegacyMFAPromptPending bool
+	MFASetupSwitchUsed     bool
+	MFABackupCompleted     bool
+	PasswordHash           string
+	Role                   string
+	Status                 UserStatus
+	ProvisionState         string
+	ProvisionError         *string
+	CreatedAt              time.Time
+	ApprovedAt             *time.Time
+	ApprovedBy             *string
+	LastLoginAt            *time.Time
 }
 
 type Registration struct {
 	ID            string
 	Email         string
+	MFAPreference string
 	SourceIP      string
 	UserAgentHash string
 	CaptchaOK     bool
@@ -41,17 +46,20 @@ type Registration struct {
 }
 
 type Session struct {
-	ID            string
-	UserID        string
-	TokenHash     string
-	MailSecret    string
-	IPHint        string
-	UserAgentHash string
-	ExpiresAt     time.Time
-	IdleExpiresAt time.Time
-	CreatedAt     time.Time
-	LastSeenAt    time.Time
-	RevokedAt     *time.Time
+	ID              string
+	UserID          string
+	TokenHash       string
+	MailSecret      string
+	IPHint          string
+	UserAgentHash   string
+	AuthMethod      string
+	MFAVerifiedAt   *time.Time
+	ActiveAccountID *string
+	ExpiresAt       time.Time
+	IdleExpiresAt   time.Time
+	CreatedAt       time.Time
+	LastSeenAt      time.Time
+	RevokedAt       *time.Time
 }
 
 type PasswordResetToken struct {

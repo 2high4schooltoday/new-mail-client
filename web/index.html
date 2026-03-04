@@ -60,6 +60,14 @@
             <form id="form-register" class="stack auth-form">
               <label>Email <input name="email" type="email" required autocomplete="email"></label>
               <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
+              <label>MFA Preference
+                <select name="mfa_preference" id="register-mfa-preference">
+                  <option value="none">None</option>
+                  <option value="totp">TOTP App</option>
+                  <option value="webauthn">Passkey (WebAuthn)</option>
+                </select>
+              </label>
+              <p id="register-mfa-help" class="hint">You can enable MFA later in Security settings.</p>
               <div id="captcha-shell" class="captcha-shell hidden">
                 <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
                 <div id="captcha-widget-container" class="captcha-widget-container"></div>
@@ -84,6 +92,16 @@
               <label>New Password <input name="new_password" type="password" required autocomplete="new-password"></label>
               <button class="cmd-btn cmd-btn--primary" type="submit">Apply New Password</button>
             </form>
+          </section>
+
+          <section id="auth-security-panel" class="auth-security hidden" aria-labelledby="auth-security-title">
+            <h3 id="auth-security-title">Security Settings</h3>
+            <p class="hint">Manage trusted devices used to skip MFA for 30 days on this account.</p>
+            <div id="trusted-devices-list" class="trusted-devices-list"></div>
+            <div class="actions">
+              <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
+              <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
+            </div>
           </section>
         </article>
       </section>
@@ -168,6 +186,7 @@
                   <div><b>Admin:</b> <span id="setup-summary-email">-</span></div>
                 </div>
                 <p>Initialize writes your baseline settings and signs in as webmaster.</p>
+                <p class="hint">Admin MFA setup is mandatory and will start immediately after initialization.</p>
               </div>
 
               <div id="setup-step-5" class="oobe-step hidden">
@@ -437,6 +456,22 @@
         <button id="ui-modal-cancel" class="cmd-btn" type="button">Cancel</button>
         <button id="ui-modal-confirm" class="cmd-btn cmd-btn--primary" type="button">Confirm</button>
       </div>
+    </article>
+  </div>
+
+  <div id="mfa-modal-overlay" class="ui-modal hidden" aria-hidden="true">
+    <article id="mfa-modal-card" class="ui-modal-card panel" role="dialog" aria-modal="true" aria-labelledby="mfa-modal-title" aria-describedby="mfa-modal-body">
+      <header class="ui-modal-head">
+        <h3 id="mfa-modal-title">Multi-Factor Authentication</h3>
+      </header>
+      <div id="mfa-modal-body" class="hint"></div>
+      <div id="mfa-modal-extra" class="mfa-modal-extra hidden"></div>
+      <p id="mfa-modal-error" class="hint mfa-modal-error"></p>
+      <label id="mfa-modal-input-wrap" class="ui-modal-input-wrap hidden">
+        <span id="mfa-modal-input-label">Code</span>
+        <input id="mfa-modal-input" type="text" autocomplete="one-time-code">
+      </label>
+      <div id="mfa-modal-actions" class="actions ui-modal-actions"></div>
     </article>
   </div>
 

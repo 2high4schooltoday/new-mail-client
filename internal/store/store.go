@@ -24,15 +24,120 @@ type Store struct {
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
 func (s *Store) CreateUser(ctx context.Context, email, passwordHash, role string, status models.UserStatus) (models.User, error) {
+	return s.CreateUserWithMFA(ctx, email, passwordHash, role, status, "none")
+}
+
+func normalizeMFAPreference(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "totp":
+		return "totp"
+	case "webauthn":
+		return "webauthn"
+	default:
+		return "none"
+	}
+}
+
+func scanUserCore(scanner interface{ Scan(dest ...any) error }) (models.User, error) {
+	var u models.User
+	var approvedAt, lastLogin sql.NullTime
+	var approvedBy, provisionErr, recoveryEmail, mailLogin, mfaPref sql.NullString
+	var legacyPrompt, switchUsed, backupCompleted int
+	err := scanner.Scan(
+		&u.ID,
+		&u.Email,
+		&recoveryEmail,
+		&mailLogin,
+		&mfaPref,
+		&legacyPrompt,
+		&switchUsed,
+		&backupCompleted,
+		&u.PasswordHash,
+		&u.Role,
+		&u.Status,
+		&u.ProvisionState,
+		&provisionErr,
+		&u.CreatedAt,
+		&approvedAt,
+		&approvedBy,
+		&lastLogin,
+	)
+	if err != nil {
+		return models.User{}, err
+	}
+	u.MFAPreference = normalizeMFAPreference(mfaPref.String)
+	u.LegacyMFAPromptPending = legacyPrompt == 1
+	u.MFASetupSwitchUsed = switchUsed == 1
+	u.MFABackupCompleted = backupCompleted == 1
+	if approvedAt.Valid {
+		t := approvedAt.Time
+		u.ApprovedAt = &t
+	}
+	if approvedBy.Valid {
+		v := strings.TrimSpace(approvedBy.String)
+		if v != "" {
+			u.ApprovedBy = &v
+		}
+	}
+	if lastLogin.Valid {
+		t := lastLogin.Time
+		u.LastLoginAt = &t
+	}
+	if provisionErr.Valid {
+		v := provisionErr.String
+		u.ProvisionError = &v
+	}
+	if recoveryEmail.Valid {
+		v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
+		if v != "" {
+			u.RecoveryEmail = &v
+		}
+	}
+	if mailLogin.Valid {
+		v := strings.TrimSpace(mailLogin.String)
+		if v != "" {
+			u.MailLogin = &v
+		}
+	}
+	return u, nil
+}
+
+func (s *Store) CreateUserWithMFA(ctx context.Context, email, passwordHash, role string, status models.UserStatus, mfaPreference string) (models.User, error) {
 	now := time.Now().UTC()
 	recovery := strings.ToLower(strings.TrimSpace(email))
-	u := models.User{ID: uuid.NewString(), Email: email, PasswordHash: passwordHash, Role: role, Status: status, ProvisionState: "pending", CreatedAt: now}
+	preference := normalizeMFAPreference(mfaPreference)
+	u := models.User{
+		ID:                     uuid.NewString(),
+		Email:                  email,
+		PasswordHash:           passwordHash,
+		Role:                   role,
+		Status:                 status,
+		ProvisionState:         "pending",
+		CreatedAt:              now,
+		MFAPreference:          preference,
+		LegacyMFAPromptPending: false,
+		MFASetupSwitchUsed:     false,
+		MFABackupCompleted:     preference == "none",
+	}
 	if recovery != "" {
 		u.RecoveryEmail = &recovery
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users(id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Email, u.RecoveryEmail, nil, u.PasswordHash, u.Role, u.Status, u.ProvisionState, nil, u.CreatedAt,
+		`INSERT INTO users(id,email,recovery_email,mail_login,mfa_preference,legacy_mfa_prompt_pending,mfa_setup_switch_used,mfa_backup_completed,password_hash,role,status,provision_state,provision_error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID,
+		u.Email,
+		u.RecoveryEmail,
+		nil,
+		u.MFAPreference,
+		0,
+		0,
+		boolToInt(u.MFABackupCompleted),
+		u.PasswordHash,
+		u.Role,
+		u.Status,
+		u.ProvisionState,
+		nil,
+		u.CreatedAt,
 	)
 	return u, err
 }
@@ -89,92 +194,39 @@ func (s *Store) UpsertSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE key=?`, key)
+	return err
+}
+
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, error) {
-	var u models.User
-	var approvedAt, lastLogin sql.NullTime
-	var approvedBy, provisionErr, recoveryEmail, mailLogin sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE email=?`,
+	u, err := scanUserCore(s.db.QueryRowContext(ctx,
+		`SELECT id,email,recovery_email,mail_login,mfa_preference,legacy_mfa_prompt_pending,mfa_setup_switch_used,mfa_backup_completed,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
+		 FROM users
+		 WHERE email=?`,
 		email,
-	).Scan(&u.ID, &u.Email, &recoveryEmail, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
+	))
 	if err == sql.ErrNoRows {
 		return models.User{}, ErrNotFound
 	}
 	if err != nil {
 		return models.User{}, err
-	}
-	if approvedAt.Valid {
-		t := approvedAt.Time
-		u.ApprovedAt = &t
-	}
-	if approvedBy.Valid {
-		sv := approvedBy.String
-		u.ApprovedBy = &sv
-	}
-	if lastLogin.Valid {
-		t := lastLogin.Time
-		u.LastLoginAt = &t
-	}
-	if provisionErr.Valid {
-		v := provisionErr.String
-		u.ProvisionError = &v
-	}
-	if recoveryEmail.Valid {
-		v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
-		if v != "" {
-			u.RecoveryEmail = &v
-		}
-	}
-	if mailLogin.Valid {
-		v := strings.TrimSpace(mailLogin.String)
-		if v != "" {
-			u.MailLogin = &v
-		}
 	}
 	return u, nil
 }
 
 func (s *Store) GetUserByID(ctx context.Context, id string) (models.User, error) {
-	var u models.User
-	var approvedAt, lastLogin sql.NullTime
-	var approvedBy, provisionErr, recoveryEmail, mailLogin sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at FROM users WHERE id=?`,
+	u, err := scanUserCore(s.db.QueryRowContext(ctx,
+		`SELECT id,email,recovery_email,mail_login,mfa_preference,legacy_mfa_prompt_pending,mfa_setup_switch_used,mfa_backup_completed,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
+		 FROM users
+		 WHERE id=?`,
 		id,
-	).Scan(&u.ID, &u.Email, &recoveryEmail, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin)
+	))
 	if err == sql.ErrNoRows {
 		return models.User{}, ErrNotFound
 	}
 	if err != nil {
 		return models.User{}, err
-	}
-	if approvedAt.Valid {
-		t := approvedAt.Time
-		u.ApprovedAt = &t
-	}
-	if approvedBy.Valid {
-		sv := approvedBy.String
-		u.ApprovedBy = &sv
-	}
-	if lastLogin.Valid {
-		t := lastLogin.Time
-		u.LastLoginAt = &t
-	}
-	if provisionErr.Valid {
-		v := provisionErr.String
-		u.ProvisionError = &v
-	}
-	if recoveryEmail.Valid {
-		v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
-		if v != "" {
-			u.RecoveryEmail = &v
-		}
-	}
-	if mailLogin.Valid {
-		v := strings.TrimSpace(mailLogin.String)
-		if v != "" {
-			u.MailLogin = &v
-		}
 	}
 	return u, nil
 }
@@ -215,6 +267,78 @@ func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, userID, recoveryEma
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET recovery_email=? WHERE id=?`, recoveryEmail, userID)
 	return err
+}
+
+func (s *Store) GetUserMFAPreference(ctx context.Context, userID string) (string, error) {
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT mfa_preference FROM users WHERE id=?`, userID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return normalizeMFAPreference(raw), nil
+}
+
+func (s *Store) UpdateUserMFAPreference(ctx context.Context, userID, preference string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET mfa_preference=? WHERE id=?`, normalizeMFAPreference(preference), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetLegacyMFAPromptPending(ctx context.Context, userID string, pending bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET legacy_mfa_prompt_pending=? WHERE id=?`, boolToInt(pending), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) MarkMFASetupSwitchUsed(ctx context.Context, userID string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET mfa_setup_switch_used=1 WHERE id=?`, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetMFASetupSwitchUsed(ctx context.Context, userID string, used bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET mfa_setup_switch_used=? WHERE id=?`, boolToInt(used), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetUserMFABackupCompleted(ctx context.Context, userID string, completed bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET mfa_backup_completed=? WHERE id=?`, boolToInt(completed), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) TouchUserLastLogin(ctx context.Context, userID string, at time.Time) error {
@@ -265,7 +389,7 @@ func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models
 	offset := clampOffset(query.Offset)
 
 	listSQL := fmt.Sprintf(
-		`SELECT id,email,recovery_email,mail_login,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
+		`SELECT id,email,recovery_email,mail_login,mfa_preference,legacy_mfa_prompt_pending,mfa_setup_switch_used,mfa_backup_completed,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
 		 FROM users
 		 WHERE %s
 		 ORDER BY %s %s
@@ -283,39 +407,9 @@ func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models
 
 	out := make([]models.User, 0, limit)
 	for rows.Next() {
-		var u models.User
-		var approvedAt, lastLogin sql.NullTime
-		var approvedBy, provisionErr, recoveryEmail, mailLogin sql.NullString
-		if err := rows.Scan(&u.ID, &u.Email, &recoveryEmail, &mailLogin, &u.PasswordHash, &u.Role, &u.Status, &u.ProvisionState, &provisionErr, &u.CreatedAt, &approvedAt, &approvedBy, &lastLogin); err != nil {
+		u, err := scanUserCore(rows)
+		if err != nil {
 			return nil, 0, err
-		}
-		if approvedAt.Valid {
-			t := approvedAt.Time
-			u.ApprovedAt = &t
-		}
-		if approvedBy.Valid {
-			sv := approvedBy.String
-			u.ApprovedBy = &sv
-		}
-		if lastLogin.Valid {
-			t := lastLogin.Time
-			u.LastLoginAt = &t
-		}
-		if provisionErr.Valid {
-			v := provisionErr.String
-			u.ProvisionError = &v
-		}
-		if recoveryEmail.Valid {
-			v := strings.ToLower(strings.TrimSpace(recoveryEmail.String))
-			if v != "" {
-				u.RecoveryEmail = &v
-			}
-		}
-		if mailLogin.Valid {
-			v := strings.TrimSpace(mailLogin.String)
-			if v != "" {
-				u.MailLogin = &v
-			}
 		}
 		out = append(out, u)
 	}
@@ -323,10 +417,15 @@ func (s *Store) ListUsers(ctx context.Context, query models.UserQuery) ([]models
 }
 
 func (s *Store) CreateRegistration(ctx context.Context, email, ip, uaHash string, captchaOK bool) (models.Registration, error) {
+	return s.CreateRegistrationWithMFA(ctx, email, ip, uaHash, captchaOK, "none")
+}
+
+func (s *Store) CreateRegistrationWithMFA(ctx context.Context, email, ip, uaHash string, captchaOK bool, mfaPreference string) (models.Registration, error) {
 	now := time.Now().UTC()
 	r := models.Registration{
 		ID:            uuid.NewString(),
 		Email:         email,
+		MFAPreference: normalizeMFAPreference(mfaPreference),
 		SourceIP:      ip,
 		UserAgentHash: uaHash,
 		CaptchaOK:     captchaOK,
@@ -334,8 +433,8 @@ func (s *Store) CreateRegistration(ctx context.Context, email, ip, uaHash string
 		CreatedAt:     now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO registrations(id,email,source_ip,user_agent_hash,captcha_ok,status,created_at) VALUES(?,?,?,?,?,?,?)`,
-		r.ID, r.Email, r.SourceIP, r.UserAgentHash, boolToInt(captchaOK), r.Status, r.CreatedAt,
+		`INSERT INTO registrations(id,email,mfa_preference,source_ip,user_agent_hash,captcha_ok,status,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		r.ID, r.Email, r.MFAPreference, r.SourceIP, r.UserAgentHash, boolToInt(captchaOK), r.Status, r.CreatedAt,
 	)
 	return r, err
 }
@@ -344,11 +443,13 @@ func (s *Store) GetRegistrationByID(ctx context.Context, id string) (models.Regi
 	var r models.Registration
 	var cap int
 	var decidedAt sql.NullTime
-	var decidedBy, reason sql.NullString
+	var decidedBy, reason, mfaPreference sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,email,source_ip,user_agent_hash,captcha_ok,status,created_at,decided_at,decided_by,reason FROM registrations WHERE id=?`,
+		`SELECT id,email,mfa_preference,source_ip,user_agent_hash,captcha_ok,status,created_at,decided_at,decided_by,reason
+		 FROM registrations
+		 WHERE id=?`,
 		id,
-	).Scan(&r.ID, &r.Email, &r.SourceIP, &r.UserAgentHash, &cap, &r.Status, &r.CreatedAt, &decidedAt, &decidedBy, &reason)
+	).Scan(&r.ID, &r.Email, &mfaPreference, &r.SourceIP, &r.UserAgentHash, &cap, &r.Status, &r.CreatedAt, &decidedAt, &decidedBy, &reason)
 	if err == sql.ErrNoRows {
 		return models.Registration{}, ErrNotFound
 	}
@@ -356,6 +457,7 @@ func (s *Store) GetRegistrationByID(ctx context.Context, id string) (models.Regi
 		return models.Registration{}, err
 	}
 	r.CaptchaOK = cap == 1
+	r.MFAPreference = normalizeMFAPreference(mfaPreference.String)
 	if decidedAt.Valid {
 		t := decidedAt.Time
 		r.DecidedAt = &t
@@ -408,7 +510,7 @@ func (s *Store) ListRegistrations(ctx context.Context, query models.Registration
 	offset := clampOffset(query.Offset)
 
 	listSQL := fmt.Sprintf(
-		`SELECT id,email,source_ip,user_agent_hash,captcha_ok,status,created_at,decided_at,decided_by,reason
+		`SELECT id,email,mfa_preference,source_ip,user_agent_hash,captcha_ok,status,created_at,decided_at,decided_by,reason
 		 FROM registrations
 		 WHERE %s
 		 ORDER BY %s %s
@@ -428,11 +530,12 @@ func (s *Store) ListRegistrations(ctx context.Context, query models.Registration
 		var r models.Registration
 		var cap int
 		var decidedAt sql.NullTime
-		var decidedBy, reason sql.NullString
-		if err := rows.Scan(&r.ID, &r.Email, &r.SourceIP, &r.UserAgentHash, &cap, &r.Status, &r.CreatedAt, &decidedAt, &decidedBy, &reason); err != nil {
+		var decidedBy, reason, mfaPreference sql.NullString
+		if err := rows.Scan(&r.ID, &r.Email, &mfaPreference, &r.SourceIP, &r.UserAgentHash, &cap, &r.Status, &r.CreatedAt, &decidedAt, &decidedBy, &reason); err != nil {
 			return nil, 0, err
 		}
 		r.CaptchaOK = cap == 1
+		r.MFAPreference = normalizeMFAPreference(mfaPreference.String)
 		if decidedAt.Valid {
 			t := decidedAt.Time
 			r.DecidedAt = &t
@@ -584,9 +687,25 @@ func (s *Store) RejectRegistrationAndDeletePendingUser(ctx context.Context, regI
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess models.Session) error {
+	authMethod := strings.TrimSpace(sess.AuthMethod)
+	if authMethod == "" {
+		authMethod = "password"
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions(id,user_id,token_hash,mail_secret,ip_hint,user_agent_hash,expires_at,idle_expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		sess.ID, sess.UserID, sess.TokenHash, sess.MailSecret, sess.IPHint, sess.UserAgentHash, sess.ExpiresAt, sess.IdleExpiresAt, sess.CreatedAt, sess.LastSeenAt,
+		`INSERT INTO sessions(id,user_id,token_hash,mail_secret,ip_hint,user_agent_hash,auth_method,mfa_verified_at,active_account_id,expires_at,idle_expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sess.ID,
+		sess.UserID,
+		sess.TokenHash,
+		sess.MailSecret,
+		sess.IPHint,
+		sess.UserAgentHash,
+		authMethod,
+		sess.MFAVerifiedAt,
+		sess.ActiveAccountID,
+		sess.ExpiresAt,
+		sess.IdleExpiresAt,
+		sess.CreatedAt,
+		sess.LastSeenAt,
 	)
 	return err
 }
@@ -594,10 +713,27 @@ func (s *Store) CreateSession(ctx context.Context, sess models.Session) error {
 func (s *Store) GetSessionByTokenHash(ctx context.Context, tokenHash string) (models.Session, error) {
 	var sess models.Session
 	var revoked sql.NullTime
+	var mfaVerifiedAt sql.NullTime
+	var activeAccountID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,user_id,token_hash,mail_secret,ip_hint,user_agent_hash,expires_at,idle_expires_at,created_at,last_seen_at,revoked_at FROM sessions WHERE token_hash=?`,
+		`SELECT id,user_id,token_hash,mail_secret,ip_hint,user_agent_hash,auth_method,mfa_verified_at,active_account_id,expires_at,idle_expires_at,created_at,last_seen_at,revoked_at FROM sessions WHERE token_hash=?`,
 		tokenHash,
-	).Scan(&sess.ID, &sess.UserID, &sess.TokenHash, &sess.MailSecret, &sess.IPHint, &sess.UserAgentHash, &sess.ExpiresAt, &sess.IdleExpiresAt, &sess.CreatedAt, &sess.LastSeenAt, &revoked)
+	).Scan(
+		&sess.ID,
+		&sess.UserID,
+		&sess.TokenHash,
+		&sess.MailSecret,
+		&sess.IPHint,
+		&sess.UserAgentHash,
+		&sess.AuthMethod,
+		&mfaVerifiedAt,
+		&activeAccountID,
+		&sess.ExpiresAt,
+		&sess.IdleExpiresAt,
+		&sess.CreatedAt,
+		&sess.LastSeenAt,
+		&revoked,
+	)
 	if err == sql.ErrNoRows {
 		return models.Session{}, ErrNotFound
 	}
@@ -607,6 +743,19 @@ func (s *Store) GetSessionByTokenHash(ctx context.Context, tokenHash string) (mo
 	if revoked.Valid {
 		t := revoked.Time
 		sess.RevokedAt = &t
+	}
+	if mfaVerifiedAt.Valid {
+		t := mfaVerifiedAt.Time
+		sess.MFAVerifiedAt = &t
+	}
+	if activeAccountID.Valid {
+		v := strings.TrimSpace(activeAccountID.String)
+		if v != "" {
+			sess.ActiveAccountID = &v
+		}
+	}
+	if strings.TrimSpace(sess.AuthMethod) == "" {
+		sess.AuthMethod = "password"
 	}
 	return sess, nil
 }
@@ -626,6 +775,28 @@ func (s *Store) RevokeSession(ctx context.Context, id string) error {
 func (s *Store) RevokeUserSessions(ctx context.Context, userID string) error {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, now, userID)
+	return err
+}
+
+func (s *Store) SetSessionMFAVerified(ctx context.Context, sessionID, authMethod string) error {
+	authMethod = strings.TrimSpace(authMethod)
+	if authMethod == "" {
+		authMethod = "mfa"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET mfa_verified_at=?, auth_method=? WHERE id=?`,
+		time.Now().UTC(),
+		authMethod,
+		sessionID,
+	)
+	return err
+}
+
+func (s *Store) ClearSessionMFAVerified(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET mfa_verified_at=NULL, auth_method='password' WHERE id=?`,
+		sessionID,
+	)
 	return err
 }
 

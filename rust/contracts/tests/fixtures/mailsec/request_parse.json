@@ -1,0 +1,10 @@
+{
+  "request_id": "mailsec-req-001",
+  "op": "mime.parse",
+  "account_id": "acc-1",
+  "message_id": "msg-1",
+  "payload": {
+    "raw": "SGVsbG8="
+  },
+  "deadline_ms": 5000
+}

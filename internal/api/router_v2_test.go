@@ -1,0 +1,1207 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"mailclient/internal/auth"
+	"mailclient/internal/config"
+	"mailclient/internal/db"
+	"mailclient/internal/mail"
+	"mailclient/internal/mailsec"
+	"mailclient/internal/models"
+	"mailclient/internal/service"
+	"mailclient/internal/store"
+)
+
+func newV2Router(t *testing.T) http.Handler {
+	return newV2RouterWithConfig(t, nil)
+}
+
+func newV2RouterWithConfig(t *testing.T, mutate func(*config.Config)) http.Handler {
+	router, _ := newV2RouterWithConfigAndStore(t, mutate)
+	return router
+}
+
+func newV2RouterWithConfigAndStore(t *testing.T, mutate func(*config.Config)) (http.Handler, *store.Store) {
+	router, st, _ := newV2RouterWithConfigAndStoreDB(t, mutate)
+	return router, st
+}
+
+func newV2RouterWithConfigAndStoreDB(t *testing.T, mutate func(*config.Config)) (http.Handler, *store.Store, *sql.DB) {
+	t.Helper()
+	sqdb, err := db.OpenSQLite(filepath.Join(t.TempDir(), "app.db"), 1, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqdb.Close() })
+
+	for _, migration := range []string{
+		filepath.Join("..", "..", "migrations", "001_init.sql"),
+		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
+		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
+		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
+		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
+		filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql"),
+		filepath.Join("..", "..", "migrations", "007_mail_accounts.sql"),
+		filepath.Join("..", "..", "migrations", "008_mail_index.sql"),
+		filepath.Join("..", "..", "migrations", "009_preferences_and_search.sql"),
+		filepath.Join("..", "..", "migrations", "010_drafts_schedule.sql"),
+		filepath.Join("..", "..", "migrations", "011_rules_sieve.sql"),
+		filepath.Join("..", "..", "migrations", "012_mfa_totp_webauthn.sql"),
+		filepath.Join("..", "..", "migrations", "013_crypto_keys.sql"),
+		filepath.Join("..", "..", "migrations", "014_session_management.sql"),
+		filepath.Join("..", "..", "migrations", "015_sync_state.sql"),
+		filepath.Join("..", "..", "migrations", "016_quota_and_health.sql"),
+		filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql"),
+		filepath.Join("..", "..", "migrations", "018_mfa_usability_trusted_devices.sql"),
+	} {
+		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
+			t.Fatalf("apply migration %s: %v", migration, err)
+		}
+	}
+
+	st := store.New(sqdb)
+	pwHash, err := auth.HashPassword("SecretPass123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if err := st.EnsureAdmin(context.Background(), "admin@example.com", pwHash); err != nil {
+		t.Fatalf("ensure admin: %v", err)
+	}
+
+	cfg := config.Config{
+		ListenAddr:          ":8080",
+		BaseDomain:          "example.com",
+		SessionCookieName:   "mailclient_session",
+		CSRFCookieName:      "mailclient_csrf",
+		SessionIdleMinutes:  30,
+		SessionAbsoluteHour: 24,
+		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",
+		CookieSecureMode:    "never",
+		TrustProxy:          false,
+		PasswordMinLength:   12,
+		PasswordMaxLength:   128,
+		DovecotAuthMode:     "sql",
+		IMAPHost:            "127.0.0.1",
+		IMAPPort:            993,
+		IMAPTLS:             true,
+		SMTPHost:            "127.0.0.1",
+		SMTPPort:            587,
+		SMTPStartTLS:        true,
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	mailClient := mail.NoopClient{}
+	svc := service.New(cfg, st, mailClient, mail.NoopProvisioner{}, nil)
+	return NewRouter(cfg, svc), st, sqdb
+}
+
+type fakeMailSecRecorder struct {
+	mu       sync.Mutex
+	requests []mailsec.Request
+}
+
+func (r *fakeMailSecRecorder) add(req mailsec.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = append(r.requests, req)
+}
+
+func (r *fakeMailSecRecorder) byOp(op string) []mailsec.Request {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]mailsec.Request, 0, len(r.requests))
+	for _, req := range r.requests {
+		if req.Op == op {
+			out = append(out, req)
+		}
+	}
+	return out
+}
+
+func startFakeMailSecServer(t *testing.T) string {
+	socketPath, _ := startFakeMailSecServerWithRecorder(t)
+	return socketPath
+}
+
+func startFakeMailSecServerWithRecorder(t *testing.T) (string, *fakeMailSecRecorder) {
+	t.Helper()
+	socketPath := filepath.Join("/tmp", fmt.Sprintf("mailsec-%d.sock", time.Now().UnixNano()))
+	_ = os.Remove(socketPath)
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen fake mailsec: %v", err)
+	}
+	recorder := &fakeMailSecRecorder{}
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = os.Remove(socketPath)
+	})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				lenBuf := make([]byte, 4)
+				if _, err := io.ReadFull(c, lenBuf); err != nil {
+					return
+				}
+				n := int(binary.BigEndian.Uint32(lenBuf))
+				if n <= 0 || n > 1024*1024 {
+					return
+				}
+				payload := make([]byte, n)
+				if _, err := io.ReadFull(c, payload); err != nil {
+					return
+				}
+				var req mailsec.Request
+				if err := json.Unmarshal(payload, &req); err != nil {
+					return
+				}
+				recorder.add(req)
+				resp := mailsec.Response{
+					RequestID: req.RequestID,
+					OK:        true,
+					Code:      "ok",
+					Result:    map[string]any{},
+				}
+				switch req.Op {
+				case "webauthn.register.finish":
+					credentialID := "cred-test-1"
+					if v, ok := req.Payload["credential_id"].(string); ok && v != "" {
+						credentialID = v
+					}
+					resp.Result = map[string]any{
+						"credential_id":          credentialID,
+						"public_key_cose_b64url": "Y29zZS1wdWJrZXk",
+						"sign_count":             1,
+					}
+				case "webauthn.assertion.finish":
+					stored := int64(0)
+					if v, ok := req.Payload["stored_sign_count"].(float64); ok {
+						stored = int64(v)
+					}
+					resp.Result = map[string]any{
+						"credential_id": req.Payload["credential_id"],
+						"sign_count":    stored + 1,
+					}
+				case "totp.verify":
+					code, _ := req.Payload["code"].(string)
+					resp.Result = map[string]any{
+						"valid":           code == "123456",
+						"matched_counter": 100,
+					}
+				case "crypto.pgp.sign":
+					plaintext, _ := req.Payload["plaintext"].(string)
+					resp.Result = map[string]any{
+						"signed_message_armored": "PGP-SIGNED:" + plaintext,
+					}
+				case "crypto.pgp.encrypt":
+					plaintext, _ := req.Payload["plaintext"].(string)
+					resp.Result = map[string]any{
+						"ciphertext_armored": "PGP-ENC:" + plaintext,
+					}
+				case "crypto.pgp.decrypt":
+					ciphertext, _ := req.Payload["ciphertext_armored"].(string)
+					resp.Result = map[string]any{
+						"plaintext_utf8": "PGP-DEC:" + ciphertext,
+					}
+				case "crypto.pgp.verify":
+					resp.Result = map[string]any{
+						"valid":          true,
+						"plaintext_utf8": "PGP-VERIFIED",
+					}
+				case "crypto.smime.sign":
+					plaintext, _ := req.Payload["plaintext"].(string)
+					resp.Result = map[string]any{
+						"signed_smime": "SMIME-SIGNED:" + plaintext,
+					}
+				case "crypto.smime.encrypt":
+					plaintext, _ := req.Payload["plaintext"].(string)
+					resp.Result = map[string]any{
+						"ciphertext_smime": "SMIME-ENC:" + plaintext,
+					}
+				case "crypto.smime.decrypt":
+					ciphertext, _ := req.Payload["ciphertext_smime"].(string)
+					resp.Result = map[string]any{
+						"plaintext_utf8": "SMIME-DEC:" + ciphertext,
+					}
+				case "crypto.smime.verify":
+					resp.Result = map[string]any{
+						"valid":          true,
+						"plaintext_utf8": "SMIME-VERIFIED",
+					}
+				default:
+					resp.OK = false
+					resp.Code = "unsupported_operation"
+					resp.Error = "unsupported op"
+				}
+				out, err := json.Marshal(resp)
+				if err != nil {
+					return
+				}
+				binary.BigEndian.PutUint32(lenBuf, uint32(len(out)))
+				_, _ = c.Write(lenBuf)
+				_, _ = c.Write(out)
+			}(conn)
+		}
+	}()
+	return socketPath, recorder
+}
+
+func loginV2WithResponse(t *testing.T, router http.Handler) (*http.Cookie, *http.Cookie, map[string]any) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{
+		"email":    "admin@example.com",
+		"password": "SecretPass123!",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected login 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	var sessionCookie *http.Cookie
+	var csrfCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "mailclient_session" {
+			sessionCookie = c
+		}
+		if c.Name == "mailclient_csrf" {
+			csrfCookie = c
+		}
+	}
+	if sessionCookie == nil || csrfCookie == nil {
+		t.Fatalf("missing session/csrf cookie")
+	}
+	return sessionCookie, csrfCookie, payload
+}
+
+func loginV2(t *testing.T, router http.Handler) (*http.Cookie, *http.Cookie) {
+	t.Helper()
+	sess, csrf, _ := loginV2WithResponse(t, router)
+	return sess, csrf
+}
+
+func loginV1WithResponse(t *testing.T, router http.Handler, email, password string) (*http.Cookie, *http.Cookie, map[string]any) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{
+		"email":    email,
+		"password": password,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected v1 login 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode v1 login response: %v", err)
+	}
+	var sessionCookie *http.Cookie
+	var csrfCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "mailclient_session" {
+			sessionCookie = c
+		}
+		if c.Name == "mailclient_csrf" {
+			csrfCookie = c
+		}
+	}
+	if sessionCookie == nil || csrfCookie == nil {
+		t.Fatalf("missing session/csrf cookie on v1 login")
+	}
+	return sessionCookie, csrfCookie, payload
+}
+
+func doV1AuthedJSON(t *testing.T, router http.Handler, method, path string, payload any, sess, csrf *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	var body []byte
+	if payload != nil {
+		body, _ = json.Marshal(payload)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.AddCookie(sess)
+	req.AddCookie(csrf)
+	if method != http.MethodGet {
+		req.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func doV2AuthedJSON(t *testing.T, router http.Handler, method, path string, payload any, sess, csrf *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	var body []byte
+	if payload != nil {
+		body, _ = json.Marshal(payload)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.AddCookie(sess)
+	req.AddCookie(csrf)
+	if method != http.MethodGet {
+		req.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestV2PreferencesFlow(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	rec := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/preferences", nil, sess, csrf)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	put := doV2AuthedJSON(t, router, http.MethodPut, "/api/v2/preferences", map[string]any{
+		"theme":               "paper-light",
+		"page_size":           80,
+		"grouping_mode":       "today_yesterday",
+		"remote_image_policy": "ask",
+		"keymap": map[string]string{
+			"compose": "n",
+		},
+	}, sess, csrf)
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", put.Code, put.Body.String())
+	}
+
+	rec2 := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/preferences", nil, sess, csrf)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := out["theme"]; got != "paper-light" {
+		t.Fatalf("expected theme=paper-light got=%v", got)
+	}
+	if got := int(out["page_size"].(float64)); got != 80 {
+		t.Fatalf("expected page_size=80 got=%d", got)
+	}
+}
+
+func TestV2AccountsCreateAndList(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts", map[string]any{
+		"display_name": "Primary",
+		"login":        "admin@example.com",
+		"password":     "mailbox-secret",
+		"imap_host":    "imap.example.com",
+		"imap_port":    993,
+		"smtp_host":    "smtp.example.com",
+		"smtp_port":    587,
+		"is_default":   true,
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", create.Code, create.Body.String())
+	}
+
+	list := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess, csrf)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", list.Code, list.Body.String())
+	}
+	var out struct {
+		Items []models.MailAccount `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected 1 account got=%d", len(out.Items))
+	}
+	if out.Items[0].Login != "admin@example.com" {
+		t.Fatalf("unexpected account login: %s", out.Items[0].Login)
+	}
+}
+
+func TestV2TOTPFlowWithMailSecVerifier(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+	sess, csrf := loginV2(t, router)
+
+	enroll := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/totp/enroll", map[string]any{}, sess, csrf)
+	if enroll.Code != http.StatusOK {
+		t.Fatalf("expected enroll 200, got %d body=%s", enroll.Code, enroll.Body.String())
+	}
+	confirm := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/totp/confirm", map[string]any{
+		"code":               "123456",
+		"recovery_codes_ack": true,
+	}, sess, csrf)
+	if confirm.Code != http.StatusOK {
+		t.Fatalf("expected confirm 200, got %d body=%s", confirm.Code, confirm.Body.String())
+	}
+
+	sess2, csrf2, login := loginV2WithResponse(t, router)
+	if required, _ := login["mfa_required"].(bool); !required {
+		t.Fatalf("expected mfa_required=true after totp enrollment")
+	}
+
+	invalid := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/totp/verify", map[string]any{
+		"code": "999999",
+	}, sess2, csrf2)
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid verify 401, got %d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	valid := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/totp/verify", map[string]any{
+		"code": "123456",
+	}, sess2, csrf2)
+	if valid.Code != http.StatusOK {
+		t.Fatalf("expected valid verify 200, got %d body=%s", valid.Code, valid.Body.String())
+	}
+}
+
+func TestV2TrustedDeviceRememberAndRevokeFlow(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+
+	sess, csrf := loginV2(t, router)
+
+	enroll := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/totp/enroll", map[string]any{}, sess, csrf)
+	if enroll.Code != http.StatusOK {
+		t.Fatalf("expected enroll 200, got %d body=%s", enroll.Code, enroll.Body.String())
+	}
+	confirm := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/totp/confirm", map[string]any{
+		"code":               "123456",
+		"recovery_codes_ack": true,
+	}, sess, csrf)
+	if confirm.Code != http.StatusOK {
+		t.Fatalf("expected confirm 200, got %d body=%s", confirm.Code, confirm.Body.String())
+	}
+
+	sess2, csrf2, login := loginV2WithResponse(t, router)
+	if required, _ := login["mfa_required"].(bool); !required {
+		t.Fatalf("expected mfa_required=true after enrollment")
+	}
+
+	verify := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/totp/verify", map[string]any{
+		"code":            "123456",
+		"remember_device": true,
+	}, sess2, csrf2)
+	if verify.Code != http.StatusOK {
+		t.Fatalf("expected verify 200, got %d body=%s", verify.Code, verify.Body.String())
+	}
+	var trustedCookie *http.Cookie
+	for _, c := range verify.Result().Cookies() {
+		if c.Name == "mailclient_mfa_trusted" {
+			trustedCookie = c
+			break
+		}
+	}
+	if trustedCookie == nil || strings.TrimSpace(trustedCookie.Value) == "" {
+		t.Fatalf("expected trusted device cookie after remember_device verify")
+	}
+
+	loginBody, _ := json.Marshal(map[string]string{
+		"email":    "admin@example.com",
+		"password": "SecretPass123!",
+	})
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v2/login", bytes.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.AddCookie(trustedCookie)
+	loginRec := httptest.NewRecorder()
+	router.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("expected trusted-device login 200, got %d body=%s", loginRec.Code, loginRec.Body.String())
+	}
+	var loginPayload map[string]any
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("decode trusted-device login payload: %v", err)
+	}
+	if stage, _ := loginPayload["auth_stage"].(string); stage != "authenticated" {
+		t.Fatalf("expected authenticated stage with trusted device, got %v payload=%v", stage, loginPayload)
+	}
+	if required, _ := loginPayload["mfa_required"].(bool); required {
+		t.Fatalf("expected mfa_required=false with trusted device, payload=%v", loginPayload)
+	}
+
+	var sess3, csrf3, rotatedTrusted *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		switch c.Name {
+		case "mailclient_session":
+			sess3 = c
+		case "mailclient_csrf":
+			csrf3 = c
+		case "mailclient_mfa_trusted":
+			rotatedTrusted = c
+		}
+	}
+	if sess3 == nil || csrf3 == nil || rotatedTrusted == nil {
+		t.Fatalf("expected rotated trusted + session cookies after trusted-device login")
+	}
+
+	listTrusted := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/security/mfa/trusted-devices", nil, sess3, csrf3)
+	if listTrusted.Code != http.StatusOK {
+		t.Fatalf("expected trusted devices list 200, got %d body=%s", listTrusted.Code, listTrusted.Body.String())
+	}
+	var trustedPayload struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(listTrusted.Body.Bytes(), &trustedPayload); err != nil {
+		t.Fatalf("decode trusted devices list: %v", err)
+	}
+	if len(trustedPayload.Items) == 0 {
+		t.Fatalf("expected at least one trusted device after remember flow")
+	}
+
+	revokeAll := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/trusted-devices/revoke-all", map[string]any{}, sess3, csrf3)
+	if revokeAll.Code != http.StatusOK {
+		t.Fatalf("expected revoke-all 200, got %d body=%s", revokeAll.Code, revokeAll.Body.String())
+	}
+
+	loginReq2 := httptest.NewRequest(http.MethodPost, "/api/v2/login", bytes.NewReader(loginBody))
+	loginReq2.Header.Set("Content-Type", "application/json")
+	loginReq2.AddCookie(rotatedTrusted)
+	loginRec2 := httptest.NewRecorder()
+	router.ServeHTTP(loginRec2, loginReq2)
+	if loginRec2.Code != http.StatusOK {
+		t.Fatalf("expected login 200 after revoke-all, got %d body=%s", loginRec2.Code, loginRec2.Body.String())
+	}
+	var loginPayload2 map[string]any
+	if err := json.Unmarshal(loginRec2.Body.Bytes(), &loginPayload2); err != nil {
+		t.Fatalf("decode login payload after revoke-all: %v", err)
+	}
+	if stage, _ := loginPayload2["auth_stage"].(string); stage != "mfa_required" {
+		t.Fatalf("expected mfa_required stage after trusted devices revoked, got %v payload=%v", stage, loginPayload2)
+	}
+}
+
+func TestV2WebAuthnRegistrationAndMFAGate(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+	sess, csrf, login := loginV2WithResponse(t, router)
+	if required, _ := login["mfa_required"].(bool); required {
+		t.Fatalf("expected mfa_required=false before enrollment")
+	}
+
+	beginReg := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/webauthn/register/begin", map[string]any{}, sess, csrf)
+	if beginReg.Code != http.StatusOK {
+		t.Fatalf("expected register begin 200, got %d body=%s", beginReg.Code, beginReg.Body.String())
+	}
+	var beginRegPayload map[string]any
+	if err := json.Unmarshal(beginReg.Body.Bytes(), &beginRegPayload); err != nil {
+		t.Fatalf("decode register begin: %v", err)
+	}
+	challenge, _ := beginRegPayload["challenge"].(string)
+	if challenge == "" {
+		t.Fatalf("expected non-empty challenge")
+	}
+
+	finishReg := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/webauthn/register/finish", map[string]any{
+		"challenge":  challenge,
+		"id":         "cred-test-1",
+		"rawId":      "cred-test-1",
+		"transports": []string{"internal"},
+		"name":       "Laptop Passkey",
+		"response": map[string]any{
+			"clientDataJSON":    "Y2xpZW50LWRhdGE",
+			"attestationObject": "YXR0ZXN0YXRpb24tb2JqZWN0",
+		},
+	}, sess, csrf)
+	if finishReg.Code != http.StatusCreated {
+		t.Fatalf("expected register finish 201, got %d body=%s", finishReg.Code, finishReg.Body.String())
+	}
+	var finishPayload map[string]any
+	if err := json.Unmarshal(finishReg.Body.Bytes(), &finishPayload); err != nil {
+		t.Fatalf("decode register finish: %v", err)
+	}
+	credential, ok := finishPayload["credential"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected credential object in register finish payload: %v", finishPayload)
+	}
+	credentialID, _ := credential["id"].(string)
+	if strings.TrimSpace(credentialID) == "" {
+		t.Fatalf("expected created credential id")
+	}
+
+	sess2, csrf2, login2 := loginV2WithResponse(t, router)
+	if required, _ := login2["mfa_required"].(bool); !required {
+		t.Fatalf("expected mfa_required=true after enrollment")
+	}
+
+	blocked := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess2, csrf2)
+	if blocked.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 before mfa verify, got %d body=%s", blocked.Code, blocked.Body.String())
+	}
+
+	beginLogin := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/webauthn/begin", map[string]any{}, sess2, csrf2)
+	if beginLogin.Code != http.StatusOK {
+		t.Fatalf("expected login begin 200, got %d body=%s", beginLogin.Code, beginLogin.Body.String())
+	}
+	var beginLoginPayload map[string]any
+	if err := json.Unmarshal(beginLogin.Body.Bytes(), &beginLoginPayload); err != nil {
+		t.Fatalf("decode login begin: %v", err)
+	}
+	loginChallenge, _ := beginLoginPayload["challenge"].(string)
+	if loginChallenge == "" {
+		t.Fatalf("expected non-empty login challenge")
+	}
+
+	finishLogin := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/mfa/webauthn/finish", map[string]any{
+		"id":    "cred-test-1",
+		"rawId": "cred-test-1",
+		"response": map[string]any{
+			"clientDataJSON":    "Y2xpZW50LWRhdGE",
+			"authenticatorData": "YXV0aGVudGljYXRvci1kYXRh",
+			"signature":         "c2lnbmF0dXJl",
+		},
+	}, sess2, csrf2)
+	if finishLogin.Code != http.StatusOK {
+		t.Fatalf("expected login finish 200, got %d body=%s", finishLogin.Code, finishLogin.Body.String())
+	}
+
+	unblocked := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess2, csrf2)
+	if unblocked.Code != http.StatusOK {
+		t.Fatalf("expected 200 after mfa verify, got %d body=%s", unblocked.Code, unblocked.Body.String())
+	}
+
+	del := doV2AuthedJSON(t, router, http.MethodDelete, "/api/v2/security/mfa/webauthn/"+credentialID, nil, sess, csrf)
+	if del.Code != http.StatusOK {
+		t.Fatalf("expected credential delete 200, got %d body=%s", del.Code, del.Body.String())
+	}
+}
+
+func TestMFASetupRequiredBlocksV1AndV2UntilEnrollment(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router, st := newV2RouterWithConfigAndStore(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+
+	ctx := context.Background()
+	admin, err := st.GetUserByEmail(ctx, "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	if err := st.UpdateUserMFAPreference(ctx, admin.ID, "totp"); err != nil {
+		t.Fatalf("set mfa preference: %v", err)
+	}
+
+	sess, csrf, login := loginV1WithResponse(t, router, "admin@example.com", "SecretPass123!")
+	if stage, _ := login["auth_stage"].(string); stage != "mfa_setup_required" {
+		t.Fatalf("expected auth_stage=mfa_setup_required, got=%v payload=%v", stage, login)
+	}
+	if setupMethod, _ := login["mfa_setup_method"].(string); setupMethod != "totp" {
+		t.Fatalf("expected mfa_setup_method=totp, got=%v payload=%v", setupMethod, login)
+	}
+
+	v1Blocked := doV1AuthedJSON(t, router, http.MethodGet, "/api/v1/mailboxes", nil, sess, csrf)
+	if v1Blocked.Code != http.StatusUnauthorized {
+		t.Fatalf("expected v1 401 before setup, got %d body=%s", v1Blocked.Code, v1Blocked.Body.String())
+	}
+	var v1Err map[string]any
+	_ = json.Unmarshal(v1Blocked.Body.Bytes(), &v1Err)
+	if code, _ := v1Err["code"].(string); code != "mfa_setup_required" {
+		t.Fatalf("expected v1 mfa_setup_required, got=%v body=%s", code, v1Blocked.Body.String())
+	}
+
+	v2Blocked := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess, csrf)
+	if v2Blocked.Code != http.StatusUnauthorized {
+		t.Fatalf("expected v2 401 before setup, got %d body=%s", v2Blocked.Code, v2Blocked.Body.String())
+	}
+	var v2Err map[string]any
+	_ = json.Unmarshal(v2Blocked.Body.Bytes(), &v2Err)
+	if code, _ := v2Err["code"].(string); code != "mfa_setup_required" {
+		t.Fatalf("expected v2 mfa_setup_required, got=%v body=%s", code, v2Blocked.Body.String())
+	}
+
+	enroll := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/totp/enroll", map[string]any{}, sess, csrf)
+	if enroll.Code != http.StatusOK {
+		t.Fatalf("expected totp enroll 200, got %d body=%s", enroll.Code, enroll.Body.String())
+	}
+	confirm := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/totp/confirm", map[string]any{
+		"code":               "123456",
+		"recovery_codes_ack": true,
+	}, sess, csrf)
+	if confirm.Code != http.StatusOK {
+		t.Fatalf("expected totp confirm 200, got %d body=%s", confirm.Code, confirm.Body.String())
+	}
+
+	v2After := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess, csrf)
+	if v2After.Code != http.StatusOK {
+		t.Fatalf("expected v2 200 after setup, got %d body=%s", v2After.Code, v2After.Body.String())
+	}
+	v1After := doV1AuthedJSON(t, router, http.MethodGet, "/api/v1/mailboxes", nil, sess, csrf)
+	if v1After.Code != http.StatusOK {
+		t.Fatalf("expected v1 200 after setup, got %d body=%s", v1After.Code, v1After.Body.String())
+	}
+}
+
+func TestRegisterPersistsMFAPreference(t *testing.T) {
+	router, st := newV2RouterWithConfigAndStore(t, nil)
+	body, _ := json.Marshal(map[string]any{
+		"email":          "newuser@example.com",
+		"password":       "StrongPass123!",
+		"mfa_preference": "totp",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected register 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	u, err := st.GetUserByEmail(context.Background(), "newuser@example.com")
+	if err != nil {
+		t.Fatalf("load registered user: %v", err)
+	}
+	if u.MFAPreference != "totp" {
+		t.Fatalf("expected user mfa_preference=totp got=%q", u.MFAPreference)
+	}
+
+	items, _, err := st.ListRegistrations(context.Background(), models.RegistrationQuery{
+		Status: "pending",
+		Limit:  50,
+	})
+	if err != nil {
+		t.Fatalf("list registrations: %v", err)
+	}
+	found := false
+	for _, item := range items {
+		if strings.EqualFold(item.Email, "newuser@example.com") {
+			found = true
+			if item.MFAPreference != "totp" {
+				t.Fatalf("expected registration mfa_preference=totp got=%q", item.MFAPreference)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected pending registration for newuser@example.com")
+	}
+}
+
+func TestMFASetupPreferenceSwitchAllowsOnlyOneChange(t *testing.T) {
+	router, st := newV2RouterWithConfigAndStore(t, nil)
+
+	ctx := context.Background()
+	admin, err := st.GetUserByEmail(ctx, "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	if err := st.UpdateUserMFAPreference(ctx, admin.ID, "webauthn"); err != nil {
+		t.Fatalf("set mfa preference: %v", err)
+	}
+
+	sess, csrf, login := loginV2WithResponse(t, router)
+	if stage, _ := login["auth_stage"].(string); stage != "mfa_setup_required" {
+		t.Fatalf("expected auth_stage=mfa_setup_required, got=%v payload=%v", stage, login)
+	}
+
+	switchOne := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/preference", map[string]any{
+		"preference": "totp",
+	}, sess, csrf)
+	if switchOne.Code != http.StatusOK {
+		t.Fatalf("expected first switch 200, got %d body=%s", switchOne.Code, switchOne.Body.String())
+	}
+
+	switchTwo := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/preference", map[string]any{
+		"preference": "webauthn",
+	}, sess, csrf)
+	if switchTwo.Code != http.StatusConflict {
+		t.Fatalf("expected second switch 409, got %d body=%s", switchTwo.Code, switchTwo.Body.String())
+	}
+	var errPayload map[string]any
+	_ = json.Unmarshal(switchTwo.Body.Bytes(), &errPayload)
+	if code, _ := errPayload["code"].(string); code != "mfa_preference_switch_exhausted" {
+		t.Fatalf("expected mfa_preference_switch_exhausted, got=%v body=%s", code, switchTwo.Body.String())
+	}
+}
+
+func TestLegacyMFAPromptDismissFlow(t *testing.T) {
+	router, st := newV2RouterWithConfigAndStore(t, nil)
+	ctx := context.Background()
+	admin, err := st.GetUserByEmail(ctx, "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	if err := st.SetLegacyMFAPromptPending(ctx, admin.ID, true); err != nil {
+		t.Fatalf("set legacy prompt: %v", err)
+	}
+	if err := st.UpdateUserMFAPreference(ctx, admin.ID, "none"); err != nil {
+		t.Fatalf("set mfa preference: %v", err)
+	}
+
+	sess, csrf, login := loginV1WithResponse(t, router, "admin@example.com", "SecretPass123!")
+	if stage, _ := login["auth_stage"].(string); stage != "authenticated" {
+		t.Fatalf("expected authenticated stage, got=%v payload=%v", stage, login)
+	}
+	if prompt, _ := login["legacy_mfa_prompt"].(bool); !prompt {
+		t.Fatalf("expected legacy_mfa_prompt=true on login, payload=%v", login)
+	}
+
+	dismiss := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/mfa/legacy-dismiss", map[string]any{}, sess, csrf)
+	if dismiss.Code != http.StatusOK {
+		t.Fatalf("expected legacy dismiss 200, got %d body=%s", dismiss.Code, dismiss.Body.String())
+	}
+
+	me := doV1AuthedJSON(t, router, http.MethodGet, "/api/v1/me", nil, sess, csrf)
+	if me.Code != http.StatusOK {
+		t.Fatalf("expected me 200, got %d body=%s", me.Code, me.Body.String())
+	}
+	var mePayload map[string]any
+	if err := json.Unmarshal(me.Body.Bytes(), &mePayload); err != nil {
+		t.Fatalf("decode me payload: %v", err)
+	}
+	if prompt, _ := mePayload["legacy_mfa_prompt"].(bool); prompt {
+		t.Fatalf("expected legacy_mfa_prompt=false after dismiss, payload=%v", mePayload)
+	}
+}
+
+func TestAdminMFAIsMandatoryWhenEnforcementEnabled(t *testing.T) {
+	router, st := newV2RouterWithConfigAndStore(t, nil)
+	ctx := context.Background()
+	if err := st.UpsertSetting(ctx, "enforce_admin_mfa", "1"); err != nil {
+		t.Fatalf("set enforce_admin_mfa: %v", err)
+	}
+
+	sess, csrf, login := loginV2WithResponse(t, router)
+	if stage, _ := login["auth_stage"].(string); stage != "mfa_setup_required" {
+		t.Fatalf("expected admin auth_stage=mfa_setup_required, got=%v payload=%v", stage, login)
+	}
+	if setupMethod, _ := login["mfa_setup_method"].(string); setupMethod != "totp" {
+		t.Fatalf("expected admin setup method=totp, got=%v payload=%v", setupMethod, login)
+	}
+
+	blocked := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess, csrf)
+	if blocked.Code != http.StatusUnauthorized {
+		t.Fatalf("expected blocked accounts 401, got %d body=%s", blocked.Code, blocked.Body.String())
+	}
+	var errPayload map[string]any
+	if err := json.Unmarshal(blocked.Body.Bytes(), &errPayload); err != nil {
+		t.Fatalf("decode blocked response: %v", err)
+	}
+	if code, _ := errPayload["code"].(string); code != "mfa_setup_required" {
+		t.Fatalf("expected code=mfa_setup_required got=%v payload=%v", code, errPayload)
+	}
+}
+
+func TestRegularUserMFAIsOptionalByDefault(t *testing.T) {
+	router, st := newV2RouterWithConfigAndStore(t, nil)
+	ctx := context.Background()
+	pwHash, err := auth.HashPassword("UserSecret123!")
+	if err != nil {
+		t.Fatalf("hash user password: %v", err)
+	}
+	if _, err := st.CreateUserWithMFA(ctx, "user@example.com", pwHash, "user", models.UserActive, "none"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"email":    "user@example.com",
+		"password": "UserSecret123!",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected user login 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode user login payload: %v", err)
+	}
+	if stage, _ := payload["auth_stage"].(string); stage != "authenticated" {
+		t.Fatalf("expected user auth_stage=authenticated, got=%v payload=%v", stage, payload)
+	}
+}
+
+func TestV2SendDraftSchedulesFutureDraft(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	createAccount := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts", map[string]any{
+		"display_name": "Primary",
+		"login":        "admin@example.com",
+		"password":     "mailbox-secret",
+		"imap_host":    "imap.example.com",
+		"imap_port":    993,
+		"smtp_host":    "smtp.example.com",
+		"smtp_port":    587,
+	}, sess, csrf)
+	if createAccount.Code != http.StatusCreated {
+		t.Fatalf("expected account create 201, got %d body=%s", createAccount.Code, createAccount.Body.String())
+	}
+	var account models.MailAccount
+	if err := json.Unmarshal(createAccount.Body.Bytes(), &account); err != nil {
+		t.Fatalf("decode account response: %v", err)
+	}
+
+	scheduledFor := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339)
+	createDraft := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"account_id":    account.ID,
+		"to":            "someone@example.com",
+		"subject":       "Scheduled draft",
+		"body_text":     "Hello future",
+		"send_mode":     "scheduled",
+		"scheduled_for": scheduledFor,
+	}, sess, csrf)
+	if createDraft.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", createDraft.Code, createDraft.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(createDraft.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+
+	send := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts/"+draft.ID+"/send", nil, sess, csrf)
+	if send.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for scheduled send, got %d body=%s", send.Code, send.Body.String())
+	}
+}
+
+func TestV2SendMessageAppliesPGPCryptoPipeline(t *testing.T) {
+	socketPath, recorder := startFakeMailSecServerWithRecorder(t)
+	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+	sess, csrf := loginV2(t, router)
+
+	createSign := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/crypto/keyrings", map[string]any{
+		"kind":        "pgp_private",
+		"public_key":  "PGP-PUB-SIGN",
+		"private_key": "PGP-PRIV-SIGN",
+		"user_ids":    []string{"admin@example.com"},
+	}, sess, csrf)
+	if createSign.Code != http.StatusCreated {
+		t.Fatalf("expected signing keyring create 201, got %d body=%s", createSign.Code, createSign.Body.String())
+	}
+	var signKey models.CryptoKeyring
+	if err := json.Unmarshal(createSign.Body.Bytes(), &signKey); err != nil {
+		t.Fatalf("decode signing keyring: %v", err)
+	}
+
+	createRecipient := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/crypto/keyrings", map[string]any{
+		"kind":       "pgp_public",
+		"public_key": "PGP-PUB-RECIPIENT",
+		"user_ids":   []string{"recipient@example.com"},
+	}, sess, csrf)
+	if createRecipient.Code != http.StatusCreated {
+		t.Fatalf("expected recipient keyring create 201, got %d body=%s", createRecipient.Code, createRecipient.Body.String())
+	}
+	var recipientKey models.CryptoKeyring
+	if err := json.Unmarshal(createRecipient.Body.Bytes(), &recipientKey); err != nil {
+		t.Fatalf("decode recipient keyring: %v", err)
+	}
+
+	send := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/messages/send", map[string]any{
+		"to":      []string{"recipient@example.com"},
+		"subject": "Secure hello",
+		"body":    "hello world",
+		"crypto_options": map[string]any{
+			"provider":              "pgp",
+			"sign":                  true,
+			"encrypt":               true,
+			"sign_keyring_id":       signKey.ID,
+			"recipient_keyring_ids": []string{recipientKey.ID},
+		},
+		"crypto_passphrase": "hunter2",
+	}, sess, csrf)
+	if send.Code != http.StatusOK {
+		t.Fatalf("expected send 200, got %d body=%s", send.Code, send.Body.String())
+	}
+
+	signOps := recorder.byOp("crypto.pgp.sign")
+	if len(signOps) != 1 {
+		t.Fatalf("expected 1 pgp sign op, got %d", len(signOps))
+	}
+	if got, _ := signOps[0].Payload["plaintext"].(string); got != "hello world" {
+		t.Fatalf("expected sign plaintext hello world, got %q", got)
+	}
+	encryptOps := recorder.byOp("crypto.pgp.encrypt")
+	if len(encryptOps) != 1 {
+		t.Fatalf("expected 1 pgp encrypt op, got %d", len(encryptOps))
+	}
+	encryptPlaintext, _ := encryptOps[0].Payload["plaintext"].(string)
+	if !strings.HasPrefix(encryptPlaintext, "PGP-SIGNED:") {
+		t.Fatalf("expected encrypted plaintext to be signed output, got %q", encryptPlaintext)
+	}
+}
+
+func TestV2DecryptAndVerifyIndexedMessageWithSMIME(t *testing.T) {
+	socketPath, recorder := startFakeMailSecServerWithRecorder(t)
+	router, st, sqdb := newV2RouterWithConfigAndStoreDB(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+	})
+	sess, csrf := loginV2(t, router)
+
+	createAccount := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts", map[string]any{
+		"display_name": "Primary",
+		"login":        "admin@example.com",
+		"password":     "mailbox-secret",
+		"imap_host":    "imap.example.com",
+		"imap_port":    993,
+		"smtp_host":    "smtp.example.com",
+		"smtp_port":    587,
+	}, sess, csrf)
+	if createAccount.Code != http.StatusCreated {
+		t.Fatalf("expected account create 201, got %d body=%s", createAccount.Code, createAccount.Body.String())
+	}
+	var account models.MailAccount
+	if err := json.Unmarshal(createAccount.Body.Bytes(), &account); err != nil {
+		t.Fatalf("decode account: %v", err)
+	}
+
+	createPrivate := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/crypto/keyrings", map[string]any{
+		"account_id":      account.ID,
+		"kind":            "smime_private",
+		"public_key":      "SMIME-CERT-PRIVATE",
+		"private_key":     "SMIME-PRIVATE-KEY",
+		"trust_level":     "high",
+		"fingerprint":     "smime-private-fpr",
+		"passphrase_hint": "test",
+	}, sess, csrf)
+	if createPrivate.Code != http.StatusCreated {
+		t.Fatalf("expected private keyring create 201, got %d body=%s", createPrivate.Code, createPrivate.Body.String())
+	}
+	var privateKey models.CryptoKeyring
+	if err := json.Unmarshal(createPrivate.Body.Bytes(), &privateKey); err != nil {
+		t.Fatalf("decode private keyring: %v", err)
+	}
+
+	createPublic := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/security/crypto/keyrings", map[string]any{
+		"account_id":  account.ID,
+		"kind":        "smime_public",
+		"public_key":  "SMIME-CERT-PUBLIC",
+		"trust_level": "high",
+	}, sess, csrf)
+	if createPublic.Code != http.StatusCreated {
+		t.Fatalf("expected public keyring create 201, got %d body=%s", createPublic.Code, createPublic.Body.String())
+	}
+	var publicKey models.CryptoKeyring
+	if err := json.Unmarshal(createPublic.Body.Bytes(), &publicKey); err != nil {
+		t.Fatalf("decode public keyring: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if _, err := sqdb.ExecContext(context.Background(),
+		`INSERT INTO thread_index(
+		  id,account_id,mailbox,subject_norm,participants_json,message_count,unread_count,has_attachments,has_flagged,importance,latest_message_id,latest_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"thread-1",
+		account.ID,
+		"Inbox",
+		"encrypted",
+		`["sender@example.com","admin@example.com"]`,
+		1,
+		1,
+		0,
+		0,
+		0,
+		"msg-crypto-1",
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert thread index row: %v", err)
+	}
+
+	msg, err := st.UpsertIndexedMessage(context.Background(), models.IndexedMessage{
+		ID:         "msg-crypto-1",
+		AccountID:  account.ID,
+		Mailbox:    "Inbox",
+		UID:        1,
+		ThreadID:   "thread-1",
+		FromValue:  "sender@example.com",
+		ToValue:    "admin@example.com",
+		Subject:    "Encrypted",
+		Snippet:    "Encrypted payload",
+		BodyText:   "",
+		RawSource:  "SMIME-CIPHERTEXT",
+		Seen:       false,
+		Importance: 0,
+	})
+	if err != nil {
+		t.Fatalf("upsert indexed message: %v", err)
+	}
+
+	decrypt := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/messages/"+msg.ID+"/crypto/decrypt?account_id="+account.ID, map[string]any{
+		"provider":   "smime",
+		"keyring_id": privateKey.ID,
+		"passphrase": "hunter2",
+	}, sess, csrf)
+	if decrypt.Code != http.StatusOK {
+		t.Fatalf("expected decrypt 200, got %d body=%s", decrypt.Code, decrypt.Body.String())
+	}
+	var decryptBody map[string]any
+	if err := json.Unmarshal(decrypt.Body.Bytes(), &decryptBody); err != nil {
+		t.Fatalf("decode decrypt response: %v", err)
+	}
+	resultMap, _ := decryptBody["result"].(map[string]any)
+	if got, _ := resultMap["plaintext_utf8"].(string); got != "SMIME-DEC:SMIME-CIPHERTEXT" {
+		t.Fatalf("unexpected decrypt plaintext: %q", got)
+	}
+
+	verify := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/messages/"+msg.ID+"/crypto/verify?account_id="+account.ID, map[string]any{
+		"provider":          "smime",
+		"public_keyring_id": publicKey.ID,
+	}, sess, csrf)
+	if verify.Code != http.StatusOK {
+		t.Fatalf("expected verify 200, got %d body=%s", verify.Code, verify.Body.String())
+	}
+
+	decryptOps := recorder.byOp("crypto.smime.decrypt")
+	if len(decryptOps) != 1 {
+		t.Fatalf("expected 1 smime decrypt op, got %d", len(decryptOps))
+	}
+	if got, _ := decryptOps[0].Payload["ciphertext_smime"].(string); got != "SMIME-CIPHERTEXT" {
+		t.Fatalf("unexpected decrypt ciphertext payload: %q", got)
+	}
+	verifyOps := recorder.byOp("crypto.smime.verify")
+	if len(verifyOps) != 1 {
+		t.Fatalf("expected 1 smime verify op, got %d", len(verifyOps))
+	}
+}

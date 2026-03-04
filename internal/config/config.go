@@ -20,16 +20,17 @@ type Config struct {
 	DBMaxIdleConns    int
 	DBConnMaxLifetime time.Duration
 
-	SessionCookieName   string
-	SessionIdleMinutes  int
-	SessionAbsoluteHour int
-	SessionEncryptKey   string
-	CSRFCookieName      string
-	CookieSecure        bool
-	CookieSecureMode    string
-	CookiePolicyWarning string
-	TrustProxy          bool
-	CORSAllowedOrigins  []string
+	SessionCookieName    string
+	MFATrustedCookieName string
+	SessionIdleMinutes   int
+	SessionAbsoluteHour  int
+	SessionEncryptKey    string
+	CSRFCookieName       string
+	CookieSecure         bool
+	CookieSecureMode     string
+	CookiePolicyWarning  string
+	TrustProxy           bool
+	CORSAllowedOrigins   []string
 
 	CaptchaEnabled   bool
 	CaptchaProvider  string
@@ -95,6 +96,10 @@ type Config struct {
 	UpdateInstallDir       string
 	UpdateServiceName      string
 	UpdateSystemdUnitDir   string
+
+	MailSecEnabled   bool
+	MailSecSocket    string
+	MailSecTimeoutMS int
 }
 
 func Load() (Config, error) {
@@ -119,6 +124,7 @@ func Load() (Config, error) {
 		DBMaxIdleConns:                  envInt("APP_DB_MAX_IDLE_CONNS", 2),
 		DBConnMaxLifetime:               time.Duration(envInt("APP_DB_CONN_MAX_LIFETIME_MIN", 30)) * time.Minute,
 		SessionCookieName:               env("SESSION_COOKIE_NAME", "mailclient_session"),
+		MFATrustedCookieName:            env("MFA_TRUSTED_COOKIE_NAME", "mailclient_mfa_trusted"),
 		SessionIdleMinutes:              envInt("SESSION_IDLE_MINUTES", 30),
 		SessionAbsoluteHour:             envInt("SESSION_ABSOLUTE_HOURS", 24),
 		SessionEncryptKey:               env("SESSION_ENCRYPT_KEY", "CHANGE_ME_PRODUCTION_SESSION_KEY"),
@@ -182,6 +188,9 @@ func Load() (Config, error) {
 		UpdateInstallDir:                env("UPDATE_INSTALL_DIR", "/opt/mailclient"),
 		UpdateServiceName:               env("UPDATE_SERVICE_NAME", "mailclient"),
 		UpdateSystemdUnitDir:            env("UPDATE_SYSTEMD_UNIT_DIR", "/etc/systemd/system"),
+		MailSecEnabled:                  envBool("MAILSEC_ENABLED", false),
+		MailSecSocket:                   env("MAILSEC_SOCKET", "/run/mailclient/mailsec.sock"),
+		MailSecTimeoutMS:                envInt("MAILSEC_TIMEOUT_MS", 5000),
 	}
 
 	if cfg.SessionIdleMinutes <= 0 || cfg.SessionAbsoluteHour <= 0 {
@@ -295,6 +304,12 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.UpdateSystemdUnitDir) == "" {
 		return Config{}, fmt.Errorf("UPDATE_SYSTEMD_UNIT_DIR is required")
+	}
+	if cfg.MailSecEnabled && strings.TrimSpace(cfg.MailSecSocket) == "" {
+		return Config{}, fmt.Errorf("MAILSEC_SOCKET is required when MAILSEC_ENABLED=true")
+	}
+	if cfg.MailSecTimeoutMS <= 0 {
+		return Config{}, fmt.Errorf("MAILSEC_TIMEOUT_MS must be positive")
 	}
 	return cfg, nil
 }

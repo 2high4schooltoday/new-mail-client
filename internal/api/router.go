@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/google/uuid"
 
 	"mailclient/internal/captcha"
 	"mailclient/internal/config"
@@ -47,6 +49,7 @@ type Handlers struct {
 const (
 	maxUploadAttachmentBytes = 25 << 20
 	maxUploadTotalBytes      = 35 << 20
+	trustedDeviceTTL         = 30 * 24 * time.Hour
 )
 
 func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
@@ -127,42 +130,138 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName, h.cfg.TrustProxy))
 			r.Get("/me", h.Me)
-			r.Get("/mailboxes", h.ListMailboxes)
-			r.Get("/messages", h.ListMessages)
-			r.Get("/messages/{id}", h.GetMessage)
-			r.Get("/search", h.Search)
-			r.Get("/attachments/{id}", h.GetAttachment)
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
+				r.Get("/mailboxes", h.ListMailboxes)
+				r.Get("/messages", h.ListMessages)
+				r.Get("/messages/{id}", h.GetMessage)
+				r.Get("/search", h.Search)
+				r.Get("/attachments/{id}", h.GetAttachment)
+
+				r.Group(func(r chi.Router) {
+					r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
+					r.Post("/me/recovery-email", h.MeUpdateRecoveryEmail)
+					r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/send", h.SendMessage)
+					r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/reply", h.ReplyMessage)
+					r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/forward", h.ForwardMessage)
+					r.Post("/messages/{id}/flags", h.SetMessageFlags)
+					r.Post("/messages/{id}/move", h.MoveMessage)
+				})
+
+				r.Route("/admin", func(r chi.Router) {
+					r.Use(middleware.AdminOnly)
+					r.Get("/registrations", h.AdminListRegistrations)
+					r.Get("/users", h.AdminListUsers)
+					r.Get("/audit-log", h.AdminAuditLog)
+					r.Get("/system/mail-health", h.AdminMailHealth)
+					r.Get("/system/version", h.AdminVersion)
+					r.Get("/system/update/status", h.AdminUpdateStatus)
+					r.Group(func(r chi.Router) {
+						r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
+						r.Post("/registrations/{id}/approve", h.AdminApproveRegistration)
+						r.Post("/registrations/{id}/reject", h.AdminRejectRegistration)
+						r.Post("/registrations/bulk/decision", h.AdminBulkRegistrationDecision)
+						r.Post("/users/{id}/suspend", h.AdminSuspendUser)
+						r.Post("/users/{id}/unsuspend", h.AdminUnsuspendUser)
+						r.Post("/users/bulk/action", h.AdminBulkUserAction)
+						r.Post("/users/{id}/reset-password", h.AdminResetPassword)
+						r.Post("/users/{id}/retry-provision", h.AdminRetryProvisionUser)
+						r.With(middleware.RateLimit(h.limiter, "update_check", 20, time.Minute, h.cfg.TrustProxy)).Post("/system/update/check", h.AdminUpdateCheck)
+						r.With(middleware.RateLimit(h.limiter, "update_apply", 10, time.Minute, h.cfg.TrustProxy)).Post("/system/update/apply", h.AdminUpdateApply)
+					})
+				})
+			})
+		})
+	})
+	r.Route("/api/v2", func(r chi.Router) {
+		r.With(middleware.RateLimit(h.limiter, "login_v2", 20, time.Minute, h.cfg.TrustProxy)).Post("/login", h.V2Login)
+
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName, h.cfg.TrustProxy))
 
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
-				r.Post("/me/recovery-email", h.MeUpdateRecoveryEmail)
-				r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/send", h.SendMessage)
-				r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/reply", h.ReplyMessage)
-				r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/forward", h.ForwardMessage)
-				r.Post("/messages/{id}/flags", h.SetMessageFlags)
-				r.Post("/messages/{id}/move", h.MoveMessage)
+				r.Post("/mfa/totp/verify", h.V2MFATOTPVerify)
+				r.Post("/mfa/webauthn/begin", h.V2MFAWebAuthnBegin)
+				r.Post("/mfa/webauthn/finish", h.V2MFAWebAuthnFinish)
+				r.Post("/mfa/recovery-code/verify", h.V2MFARecoveryCodeVerify)
+				r.Post("/security/mfa/totp/enroll", h.V2MFAEnrollTOTP)
+				r.Post("/security/mfa/totp/confirm", h.V2MFAConfirmTOTP)
+				r.Post("/security/mfa/webauthn/register/begin", h.V2MFAWebAuthnRegisterBegin)
+				r.Post("/security/mfa/webauthn/register/finish", h.V2MFAWebAuthnRegisterFinish)
+				r.Post("/security/mfa/recovery-codes/ack", h.V2MFARecoveryCodesAck)
+				r.Post("/security/mfa/preference", h.V2MFAUpdatePreference)
+				r.Post("/security/mfa/legacy-dismiss", h.V2MFALegacyDismiss)
 			})
 
-			r.Route("/admin", func(r chi.Router) {
-				r.Use(middleware.AdminOnly)
-				r.Get("/registrations", h.AdminListRegistrations)
-				r.Get("/users", h.AdminListUsers)
-				r.Get("/audit-log", h.AdminAuditLog)
-				r.Get("/system/mail-health", h.AdminMailHealth)
-				r.Get("/system/version", h.AdminVersion)
-				r.Get("/system/update/status", h.AdminUpdateStatus)
+			r.Get("/security/mfa/status", h.V2GetMFAStatus)
+
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
+				r.Get("/accounts", h.V2ListAccounts)
+				r.Get("/accounts/{id}/identities", h.V2ListIdentities)
+				r.Get("/mailboxes", h.V2ListMailboxMappings)
+				r.Get("/threads", h.V2ListThreads)
+				r.Get("/threads/{id}", h.V2GetThread)
+				r.Get("/messages/{id}", h.V2GetIndexedMessage)
+				r.Get("/messages/{id}/raw", h.V2GetIndexedMessageRaw)
+				r.Get("/search", h.V2Search)
+				r.Get("/saved-searches", h.V2ListSavedSearches)
+				r.Get("/drafts", h.V2ListDrafts)
+				r.Get("/drafts/{id}/versions", h.V2ListDraftVersions)
+				r.Get("/rules/scripts", h.V2ListRuleScripts)
+				r.Get("/rules/scripts/{name}", h.V2GetRuleScript)
+				r.Get("/preferences", h.V2GetPreferences)
+				r.Get("/security/sessions", h.V2ListSessions)
+				r.Get("/security/mfa/trusted-devices", h.V2ListTrustedDevices)
+				r.Get("/quota", h.V2GetQuota)
+				r.Get("/security/crypto/keyrings", h.V2ListCryptoKeyrings)
+				r.Get("/security/crypto/trust-policies", h.V2ListCryptoTrustPolicies)
+
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
-					r.Post("/registrations/{id}/approve", h.AdminApproveRegistration)
-					r.Post("/registrations/{id}/reject", h.AdminRejectRegistration)
-					r.Post("/registrations/bulk/decision", h.AdminBulkRegistrationDecision)
-					r.Post("/users/{id}/suspend", h.AdminSuspendUser)
-					r.Post("/users/{id}/unsuspend", h.AdminUnsuspendUser)
-					r.Post("/users/bulk/action", h.AdminBulkUserAction)
-					r.Post("/users/{id}/reset-password", h.AdminResetPassword)
-					r.Post("/users/{id}/retry-provision", h.AdminRetryProvisionUser)
-					r.With(middleware.RateLimit(h.limiter, "update_check", 20, time.Minute, h.cfg.TrustProxy)).Post("/system/update/check", h.AdminUpdateCheck)
-					r.With(middleware.RateLimit(h.limiter, "update_apply", 10, time.Minute, h.cfg.TrustProxy)).Post("/system/update/apply", h.AdminUpdateApply)
+					r.Post("/accounts", h.V2CreateAccount)
+					r.Patch("/accounts/{id}", h.V2UpdateAccount)
+					r.Delete("/accounts/{id}", h.V2DeleteAccount)
+					r.Post("/accounts/{id}/activate", h.V2ActivateAccount)
+					r.Post("/accounts/{id}/identities", h.V2CreateIdentity)
+					r.Patch("/identities/{id}", h.V2UpdateIdentity)
+					r.Delete("/identities/{id}", h.V2DeleteIdentity)
+
+					r.Post("/mailboxes", h.V2UpsertMailboxMapping)
+					r.Patch("/mailboxes/{id}", h.V2UpsertMailboxMapping)
+					r.Delete("/mailboxes/{id}", h.V2DeleteMailboxMapping)
+
+					r.Post("/messages/bulk", h.V2BulkMessages)
+					r.Post("/messages/{id}/remote-images/allow", h.V2AllowRemoteImages)
+					r.Post("/messages/{id}/crypto/decrypt", h.V2DecryptIndexedMessage)
+					r.Post("/messages/{id}/crypto/verify", h.V2VerifyIndexedMessage)
+
+					r.Post("/saved-searches", h.V2CreateSavedSearch)
+					r.Patch("/saved-searches/{id}", h.V2UpdateSavedSearch)
+					r.Delete("/saved-searches/{id}", h.V2DeleteSavedSearch)
+
+					r.Post("/drafts", h.V2CreateDraft)
+					r.Patch("/drafts/{id}", h.V2UpdateDraft)
+					r.Post("/drafts/{id}/send", h.V2SendDraft)
+					r.With(middleware.RateLimit(h.limiter, "send_v2", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/send", h.V2SendMessage)
+
+					r.Put("/rules/scripts/{name}", h.V2PutRuleScript)
+					r.Post("/rules/scripts/{name}/activate", h.V2ActivateRuleScript)
+					r.Delete("/rules/scripts/{name}", h.V2DeleteRuleScript)
+					r.Post("/rules/validate", h.V2ValidateRuleScript)
+
+					r.Put("/preferences", h.V2UpdatePreferences)
+					r.Delete("/security/mfa/webauthn/{id}", h.V2MFAWebAuthnDelete)
+					r.Post("/security/mfa/trusted-devices/revoke-all", h.V2RevokeAllTrustedDevices)
+					r.Post("/security/mfa/trusted-devices/{id}/revoke", h.V2RevokeTrustedDevice)
+					r.Post("/security/sessions/{id}/revoke", h.V2RevokeSession)
+					r.Post("/security/crypto/keyrings", h.V2CreateCryptoKeyring)
+					r.Patch("/security/crypto/keyrings/{id}", h.V2UpdateCryptoKeyring)
+					r.Delete("/security/crypto/keyrings/{id}", h.V2DeleteCryptoKeyring)
+					r.Post("/security/crypto/trust-policies", h.V2CreateCryptoTrustPolicy)
+					r.Patch("/security/crypto/trust-policies/{id}", h.V2UpdateCryptoTrustPolicy)
+					r.Delete("/security/crypto/trust-policies/{id}", h.V2DeleteCryptoTrustPolicy)
 				})
 			})
 		})
@@ -186,9 +285,10 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 }
 
 type registerRequest struct {
-	Email        string `json:"email"`
-	Password     string `json:"password"`
-	CaptchaToken string `json:"captcha_token"`
+	Email         string `json:"email"`
+	Password      string `json:"password"`
+	CaptchaToken  string `json:"captcha_token"`
+	MFAPreference string `json:"mfa_preference"`
 }
 
 func (h *Handlers) PublicCaptchaConfig(w http.ResponseWriter, r *http.Request) {
@@ -305,8 +405,21 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrfToken := randomToken()
+	_, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", "cannot finalize setup session", middleware.RequestID(r.Context()))
+		return
+	}
 	h.setAuthCookies(w, r, token, csrfToken)
-	util.WriteJSON(w, 200, map[string]string{"status": "ok", "user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken})
+	out := map[string]any{
+		"status":     "ok",
+		"user_id":    user.ID,
+		"email":      user.Email,
+		"role":       user.Role,
+		"csrf_token": csrfToken,
+	}
+	applyAuthStageFields(out, stage)
+	util.WriteJSON(w, 200, out)
 }
 
 func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
@@ -339,7 +452,7 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		}
 		captchaOK = true
 	}
-	if err := h.svc.Register(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent(), captchaOK); err != nil {
+	if err := h.svc.Register(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent(), captchaOK, req.MFAPreference); err != nil {
 		util.WriteError(w, 400, "register_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
@@ -349,6 +462,61 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+func applyAuthStageFields(out map[string]any, stage service.MFAStage) {
+	out["auth_stage"] = stage.AuthStage
+	out["mfa_required"] = stage.MFARequired
+	out["mfa_setup_required"] = stage.MFASetupRequired
+	out["mfa_setup_method"] = stage.MFASetupMethod
+	out["mfa_setup_step"] = stage.MFASetupStep
+	out["mfa_enrolled"] = stage.MFAEnrolled
+	out["legacy_mfa_prompt"] = stage.LegacyMFAPrompt
+	out["mfa_preference"] = stage.MFAPreference
+	out["mfa_trusted_supported"] = true
+}
+
+func (h *Handlers) resolveLoginStage(ctx context.Context, w http.ResponseWriter, r *http.Request, token string, user models.User) (models.Session, service.MFAStage, error) {
+	sum := sha256.Sum256([]byte(token))
+	sess, err := h.svc.Store().GetSessionByTokenHash(ctx, hex.EncodeToString(sum[:]))
+	if err != nil {
+		return models.Session{}, service.MFAStage{}, err
+	}
+	stage, err := h.svc.ResolveMFAStage(ctx, user, &sess)
+	if err != nil {
+		return models.Session{}, service.MFAStage{}, err
+	}
+	if stage.AuthStage == service.AuthStageMFARequired {
+		trustedOK, err := h.tryAuthenticateTrustedDevice(ctx, w, r, user, sess)
+		if err != nil {
+			return models.Session{}, service.MFAStage{}, err
+		}
+		if trustedOK {
+			sess, err = h.svc.Store().GetSessionByTokenHash(ctx, hex.EncodeToString(sum[:]))
+			if err != nil {
+				return models.Session{}, service.MFAStage{}, err
+			}
+			stage, err = h.svc.ResolveMFAStage(ctx, user, &sess)
+			if err != nil {
+				return models.Session{}, service.MFAStage{}, err
+			}
+		}
+	}
+	if stage.AuthStage != service.AuthStageAuthenticated {
+		if err := h.svc.Store().ClearSessionMFAVerified(ctx, sess.ID); err != nil {
+			return models.Session{}, service.MFAStage{}, err
+		}
+		sess.MFAVerifiedAt = nil
+		return sess, stage, nil
+	}
+	if sess.MFAVerifiedAt == nil {
+		if err := h.svc.Store().SetSessionMFAVerified(ctx, sess.ID, "password"); err != nil {
+			return models.Session{}, service.MFAStage{}, err
+		}
+		now := time.Now().UTC()
+		sess.MFAVerifiedAt = &now
+	}
+	return sess, stage, nil
 }
 
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
@@ -409,9 +577,17 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	ip := middleware.ClientIP(r, h.cfg.TrustProxy)
 	_ = h.svc.Store().DeleteRateEvents(r.Context(), ip+"|"+normalizedEmail, "login_failed")
 
-	csrfToken := randomToken()
-	h.setAuthCookies(w, r, token, csrfToken)
-	util.WriteJSON(w, 200, map[string]string{"user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken})
+	if _, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user); err != nil {
+		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
+		return
+	} else {
+		csrfToken := randomToken()
+		h.setAuthCookies(w, r, token, csrfToken)
+		payload := map[string]any{"user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken}
+		applyAuthStageFields(payload, stage)
+		util.WriteJSON(w, 200, payload)
+		return
+	}
 }
 
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
@@ -482,18 +658,26 @@ func (h *Handlers) PasswordResetConfirm(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
+	sess, _ := middleware.Session(r.Context())
 	recoveryEmail := ""
 	if u.RecoveryEmail != nil {
 		recoveryEmail = strings.TrimSpace(*u.RecoveryEmail)
 	}
-	util.WriteJSON(w, 200, map[string]any{
+	stage, err := h.svc.ResolveMFAStage(r.Context(), u, &sess)
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", "cannot resolve mfa stage", middleware.RequestID(r.Context()))
+		return
+	}
+	out := map[string]any{
 		"id":                   u.ID,
 		"email":                u.Email,
 		"role":                 u.Role,
 		"status":               u.Status,
 		"recovery_email":       recoveryEmail,
 		"needs_recovery_email": recoveryEmail == "",
-	})
+	}
+	applyAuthStageFields(out, stage)
+	util.WriteJSON(w, 200, out)
 }
 
 func (h *Handlers) MeUpdateRecoveryEmail(w http.ResponseWriter, r *http.Request) {
@@ -1133,6 +1317,142 @@ func randomToken() string {
 	buf := make([]byte, 32)
 	_, _ = rand.Read(buf)
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+func trustedDeviceTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
+}
+
+func trustedDeviceUserAgentHash(userAgent string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(userAgent)))
+	return hex.EncodeToString(sum[:])
+}
+
+func trustedDeviceLabel(userAgent string) string {
+	label := strings.TrimSpace(userAgent)
+	if label == "" {
+		return "Trusted device"
+	}
+	if len(label) > 120 {
+		return label[:120]
+	}
+	return label
+}
+
+func (h *Handlers) trustedDeviceCookieName() string {
+	name := strings.TrimSpace(h.cfg.MFATrustedCookieName)
+	if name == "" {
+		return "mailclient_mfa_trusted"
+	}
+	return name
+}
+
+func (h *Handlers) setTrustedDeviceCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
+	secure := h.cfg.ResolveCookieSecure(r)
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     h.trustedDeviceCookieName(),
+		Value:    strings.TrimSpace(token),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+		Expires:  expiresAt,
+	})
+}
+
+func (h *Handlers) clearTrustedDeviceCookie(w http.ResponseWriter, r *http.Request) {
+	secure := h.cfg.ResolveCookieSecure(r)
+	expiredAt := time.Unix(1, 0).UTC()
+	http.SetCookie(w, &http.Cookie{
+		Name:     h.trustedDeviceCookieName(),
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  expiredAt,
+	})
+}
+
+func (h *Handlers) issueTrustedDevice(ctx context.Context, w http.ResponseWriter, r *http.Request, userID string) error {
+	now := time.Now().UTC()
+	token := randomToken()
+	expiresAt := now.Add(trustedDeviceTTL)
+	_, err := h.svc.Store().CreateMFATrustedDevice(ctx, models.MFATrustedDevice{
+		ID:          uuid.NewString(),
+		UserID:      userID,
+		TokenHash:   trustedDeviceTokenHash(token),
+		UAHash:      trustedDeviceUserAgentHash(r.UserAgent()),
+		IPHint:      middleware.ClientIP(r, h.cfg.TrustProxy),
+		DeviceLabel: trustedDeviceLabel(r.UserAgent()),
+		CreatedAt:   now,
+		LastUsedAt:  now,
+		ExpiresAt:   expiresAt,
+	})
+	if err != nil {
+		return err
+	}
+	h.setTrustedDeviceCookie(w, r, token, expiresAt)
+	return nil
+}
+
+func (h *Handlers) rotateTrustedDevice(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, trustedDeviceID string) error {
+	now := time.Now().UTC()
+	token := randomToken()
+	expiresAt := now.Add(trustedDeviceTTL)
+	_, err := h.svc.Store().RotateMFATrustedDeviceToken(
+		ctx,
+		userID,
+		trustedDeviceID,
+		trustedDeviceTokenHash(token),
+		trustedDeviceUserAgentHash(r.UserAgent()),
+		middleware.ClientIP(r, h.cfg.TrustProxy),
+		expiresAt,
+	)
+	if err != nil {
+		return err
+	}
+	h.setTrustedDeviceCookie(w, r, token, expiresAt)
+	return nil
+}
+
+func (h *Handlers) tryAuthenticateTrustedDevice(ctx context.Context, w http.ResponseWriter, r *http.Request, user models.User, sess models.Session) (bool, error) {
+	cookie, err := r.Cookie(h.trustedDeviceCookieName())
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return false, nil
+	}
+	trusted, err := h.svc.Store().GetActiveMFATrustedDeviceByTokenHash(
+		ctx,
+		user.ID,
+		trustedDeviceTokenHash(cookie.Value),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.clearTrustedDeviceCookie(w, r)
+			return false, nil
+		}
+		return false, err
+	}
+	expectedUAHash := trustedDeviceUserAgentHash(r.UserAgent())
+	if strings.TrimSpace(trusted.UAHash) != "" && subtle.ConstantTimeCompare([]byte(trusted.UAHash), []byte(expectedUAHash)) != 1 {
+		h.clearTrustedDeviceCookie(w, r)
+		return false, nil
+	}
+	if err := h.svc.Store().SetSessionMFAVerified(ctx, sess.ID, "trusted_device"); err != nil {
+		return false, err
+	}
+	if err := h.rotateTrustedDevice(ctx, w, r, user.ID, trusted.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (h *Handlers) setAuthCookies(w http.ResponseWriter, r *http.Request, sessionToken, csrfToken string) {

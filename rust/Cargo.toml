@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "contracts",
+  "mailsec_service",
   "pam_reset_helper",
   "update_worker",
 ]

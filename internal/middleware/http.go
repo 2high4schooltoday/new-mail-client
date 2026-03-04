@@ -67,6 +67,82 @@ func AdminOnly(next http.Handler) http.Handler {
 	})
 }
 
+func RequireMFAVerified(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess, ok := Session(r.Context())
+		if !ok {
+			util.WriteError(w, http.StatusUnauthorized, "session_missing", "authentication required", RequestID(r.Context()))
+			return
+		}
+		if sess.MFAVerifiedAt == nil {
+			util.WriteError(w, http.StatusUnauthorized, "mfa_required", "multi-factor authentication required", RequestID(r.Context()))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func RequireMFAStageAuthenticated(svc *service.Service) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, ok := User(r.Context())
+			if !ok {
+				util.WriteError(w, http.StatusUnauthorized, "session_missing", "authentication required", RequestID(r.Context()))
+				return
+			}
+			sess, ok := Session(r.Context())
+			if !ok {
+				util.WriteError(w, http.StatusUnauthorized, "session_missing", "authentication required", RequestID(r.Context()))
+				return
+			}
+			if svc == nil {
+				util.WriteError(w, http.StatusInternalServerError, "internal_error", "mfa middleware is not configured", RequestID(r.Context()))
+				return
+			}
+			stage, err := svc.ResolveMFAStage(r.Context(), u, &sess)
+			if err != nil {
+				util.WriteError(w, http.StatusInternalServerError, "internal_error", "cannot resolve mfa stage", RequestID(r.Context()))
+				return
+			}
+			if stage.AuthStage == service.AuthStageMFASetupNeeded {
+				util.WriteJSON(w, http.StatusUnauthorized, map[string]any{
+					"code":                  "mfa_setup_required",
+					"message":               "multi-factor setup is required",
+					"request_id":            RequestID(r.Context()),
+					"auth_stage":            stage.AuthStage,
+					"mfa_required":          stage.MFARequired,
+					"mfa_setup_required":    stage.MFASetupRequired,
+					"mfa_setup_method":      stage.MFASetupMethod,
+					"mfa_setup_step":        stage.MFASetupStep,
+					"mfa_enrolled":          stage.MFAEnrolled,
+					"legacy_mfa_prompt":     stage.LegacyMFAPrompt,
+					"mfa_preference":        stage.MFAPreference,
+					"mfa_trusted_supported": true,
+				})
+				return
+			}
+			if stage.AuthStage == service.AuthStageMFARequired {
+				util.WriteJSON(w, http.StatusUnauthorized, map[string]any{
+					"code":                  "mfa_required",
+					"message":               "multi-factor authentication required",
+					"request_id":            RequestID(r.Context()),
+					"auth_stage":            stage.AuthStage,
+					"mfa_required":          stage.MFARequired,
+					"mfa_setup_required":    stage.MFASetupRequired,
+					"mfa_setup_method":      stage.MFASetupMethod,
+					"mfa_setup_step":        stage.MFASetupStep,
+					"mfa_enrolled":          stage.MFAEnrolled,
+					"legacy_mfa_prompt":     stage.LegacyMFAPrompt,
+					"mfa_preference":        stage.MFAPreference,
+					"mfa_trusted_supported": true,
+				})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func CSRFFromCookie(cookieName string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

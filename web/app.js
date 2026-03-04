@@ -9,6 +9,8 @@ const state = {
     lastUnauthorizedCode: "",
     resetCapabilities: null,
     recoveryPromptShownForSession: false,
+    legacyMFAOfferShownForSession: false,
+    mfaFlowPromise: null,
   },
   setup: {
     required: false,
@@ -48,6 +50,8 @@ const state = {
     composeLastTrigger: null,
     modalOpen: false,
     modalLastTrigger: null,
+    mfaModalOpen: false,
+    mfaModalLastTrigger: null,
     activeMailPane: "mailboxes",
     activeKeyboardPane: "mailboxes",
     activeAdminSection: "update",
@@ -132,8 +136,24 @@ const el = {
   uiModalInput: document.getElementById("ui-modal-input"),
   uiModalCancel: document.getElementById("ui-modal-cancel"),
   uiModalConfirm: document.getElementById("ui-modal-confirm"),
+  mfaModalOverlay: document.getElementById("mfa-modal-overlay"),
+  mfaModalCard: document.getElementById("mfa-modal-card"),
+  mfaModalTitle: document.getElementById("mfa-modal-title"),
+  mfaModalBody: document.getElementById("mfa-modal-body"),
+  mfaModalExtra: document.getElementById("mfa-modal-extra"),
+  mfaModalError: document.getElementById("mfa-modal-error"),
+  mfaModalInputWrap: document.getElementById("mfa-modal-input-wrap"),
+  mfaModalInputLabel: document.getElementById("mfa-modal-input-label"),
+  mfaModalInput: document.getElementById("mfa-modal-input"),
+  mfaModalActions: document.getElementById("mfa-modal-actions"),
   registerForm: document.getElementById("form-register"),
+  registerMFAPreference: document.getElementById("register-mfa-preference"),
+  registerMFAHelp: document.getElementById("register-mfa-help"),
   registerSubmit: document.querySelector("#form-register button[type='submit']"),
+  authSecurityPanel: document.getElementById("auth-security-panel"),
+  trustedDevicesList: document.getElementById("trusted-devices-list"),
+  btnTrustedDevicesRefresh: document.getElementById("btn-trusted-devices-refresh"),
+  btnTrustedDevicesRevokeAll: document.getElementById("btn-trusted-devices-revoke-all"),
   captchaShell: document.getElementById("captcha-shell"),
   captchaNote: document.getElementById("captcha-note"),
   captchaError: document.getElementById("captcha-error"),
@@ -324,6 +344,20 @@ function setActiveAuthPane(pane) {
   }
 }
 
+function updateRegisterMFAHelp() {
+  if (!el.registerMFAHelp || !el.registerMFAPreference) return;
+  const value = String(el.registerMFAPreference.value || "none").toLowerCase();
+  if (value === "totp") {
+    el.registerMFAHelp.textContent = "Use an authenticator app (Google Authenticator, 1Password, Authy, etc.).";
+    return;
+  }
+  if (value === "webauthn") {
+    el.registerMFAHelp.textContent = "Use Face ID, Touch ID, Windows Hello, or a hardware security key.";
+    return;
+  }
+  el.registerMFAHelp.textContent = "You can enable MFA later in Security settings.";
+}
+
 function safeDomID(prefix, raw, fallback = "item") {
   const stem = String(raw || "")
     .toLowerCase()
@@ -380,16 +414,20 @@ function getCookie(name) {
 }
 
 function isProtectedAPIPath(path) {
-  return path.startsWith("/api/v1/me")
-    || path.startsWith("/api/v1/mailboxes")
-    || path.startsWith("/api/v1/messages")
-    || path.startsWith("/api/v1/search")
-    || path.startsWith("/api/v1/attachments")
-    || path.startsWith("/api/v1/admin/");
+  if (path.startsWith("/api/v1/public/")) return false;
+  if (path.startsWith("/api/v1/setup/")) return false;
+  if (path === "/api/v1/login" || path === "/api/v1/register" || path === "/api/v1/logout") return false;
+  if (path.startsWith("/api/v1/password/reset/")) return false;
+  if (path === "/api/v2/login") return false;
+  return path.startsWith("/api/v1/") || path.startsWith("/api/v2/");
 }
 
 function isSessionErrorCode(code) {
   return code === "session_missing" || code === "session_invalid" || code === "unauthorized";
+}
+
+function isMFAStageCode(code) {
+  return code === "mfa_required" || code === "mfa_setup_required";
 }
 
 function reauthMessageForCode(code) {
@@ -405,9 +443,12 @@ function routeToAuthWithMessage(message, code = "") {
   state.auth.lastUnauthorizedAtMs = now;
   state.auth.lastUnauthorizedCode = code;
   state.auth.recoveryPromptShownForSession = false;
+  state.auth.legacyMFAOfferShownForSession = false;
+  state.auth.mfaFlowPromise = null;
   state.user = null;
   closeComposeOverlay(false);
   closeUIModal({ confirmed: false, value: "" });
+  closeMFAModal({ action: "cancel", value: "" });
   applyNavVisibility();
   if (!state.setup.required) {
     setActiveTab(el.tabAuth);
@@ -480,7 +521,7 @@ function closeComposeOverlay(restoreFocus = true) {
   state.ui.composeOpen = false;
   el.composeOverlay.classList.add("hidden");
   el.composeOverlay.setAttribute("aria-hidden", "true");
-  document.body.style.overflow = state.ui.modalOpen ? "hidden" : "";
+  document.body.style.overflow = state.ui.modalOpen || state.ui.mfaModalOpen ? "hidden" : "";
   if (restoreFocus && state.ui.composeLastTrigger && typeof state.ui.composeLastTrigger.focus === "function") {
     state.ui.composeLastTrigger.focus();
   }
@@ -526,7 +567,7 @@ function closeUIModal(result = null) {
   state.ui.modalOpen = false;
   el.uiModalOverlay.classList.add("hidden");
   el.uiModalOverlay.setAttribute("aria-hidden", "true");
-  document.body.style.overflow = state.ui.composeOpen ? "hidden" : "";
+  document.body.style.overflow = state.ui.composeOpen || state.ui.mfaModalOpen ? "hidden" : "";
   if (modalState.resolver) {
     modalState.resolver(result);
   }
@@ -646,6 +687,945 @@ function handleUIModalKeydown(event) {
   }
 }
 
+const mfaModalState = {
+  resolver: null,
+  rejecter: null,
+  mode: "actions",
+  collector: null,
+};
+
+function mfaModalFocusableElements() {
+  if (!el.mfaModalCard) return [];
+  return Array.from(el.mfaModalCard.querySelectorAll("button, [href], input, textarea, select, [tabindex]:not([tabindex='-1'])"))
+    .filter((node) => !node.disabled && node.offsetParent !== null);
+}
+
+function setMFAModalError(text = "") {
+  if (!el.mfaModalError) return;
+  el.mfaModalError.textContent = String(text || "");
+}
+
+function closeMFAModal(result = null) {
+  if (!el.mfaModalOverlay) return;
+  state.ui.mfaModalOpen = false;
+  el.mfaModalOverlay.classList.add("hidden");
+  el.mfaModalOverlay.setAttribute("aria-hidden", "true");
+  if (el.mfaModalBody) {
+    el.mfaModalBody.textContent = "";
+  }
+  if (el.mfaModalExtra) {
+    el.mfaModalExtra.replaceChildren();
+    el.mfaModalExtra.classList.add("hidden");
+  }
+  if (el.mfaModalActions) {
+    el.mfaModalActions.replaceChildren();
+  }
+  setMFAModalError("");
+  document.body.style.overflow = state.ui.composeOpen || state.ui.modalOpen ? "hidden" : "";
+  if (mfaModalState.resolver) {
+    mfaModalState.resolver(result);
+  }
+  mfaModalState.resolver = null;
+  mfaModalState.rejecter = null;
+  mfaModalState.mode = "actions";
+  mfaModalState.collector = null;
+  if (state.ui.mfaModalLastTrigger && typeof state.ui.mfaModalLastTrigger.focus === "function") {
+    state.ui.mfaModalLastTrigger.focus();
+  }
+  state.ui.mfaModalLastTrigger = null;
+}
+
+function openMFAModal(options = {}) {
+  if (!el.mfaModalOverlay || !el.mfaModalCard) {
+    return Promise.resolve({ action: "cancel", value: "" });
+  }
+  if (state.ui.mfaModalOpen) {
+    closeMFAModal({ action: "cancel", value: "" });
+  }
+  const {
+    title = "Multi-Factor Authentication",
+    body = "",
+    bodyHTML = "",
+    inputLabel = "Code",
+    inputType = "text",
+    inputValue = "",
+    showInput = false,
+    trigger = null,
+    extraContent = null,
+    collect = null,
+    actions = [],
+  } = options;
+
+  const actionDefs = Array.isArray(actions) && actions.length > 0
+    ? actions
+    : [
+      { id: "confirm", label: "Confirm", kind: "primary" },
+      { id: "cancel", label: "Cancel", kind: "ghost" },
+    ];
+
+  state.ui.mfaModalOpen = true;
+  state.ui.mfaModalLastTrigger = trigger || document.activeElement || null;
+  mfaModalState.mode = showInput ? "input" : "actions";
+  mfaModalState.collector = typeof collect === "function" ? collect : null;
+
+  el.mfaModalTitle.textContent = title;
+  if (bodyHTML) {
+    el.mfaModalBody.innerHTML = bodyHTML;
+  } else {
+    el.mfaModalBody.textContent = body;
+  }
+  if (el.mfaModalExtra) {
+    el.mfaModalExtra.replaceChildren();
+    if (extraContent instanceof Node) {
+      el.mfaModalExtra.appendChild(extraContent);
+      el.mfaModalExtra.classList.remove("hidden");
+    } else {
+      el.mfaModalExtra.classList.add("hidden");
+    }
+  }
+  el.mfaModalInputLabel.textContent = inputLabel;
+  el.mfaModalInput.type = inputType;
+  el.mfaModalInput.value = inputValue;
+  el.mfaModalInputWrap.classList.toggle("hidden", !showInput);
+  setMFAModalError("");
+  el.mfaModalActions.replaceChildren();
+
+  for (const action of actionDefs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "cmd-btn";
+    if (action.kind === "primary") button.classList.add("cmd-btn--primary");
+    if (action.kind === "danger") button.classList.add("cmd-btn--danger");
+    button.textContent = String(action.label || action.id || "Action");
+    button.dataset.actionId = String(action.id || "action");
+    button.addEventListener("click", () => {
+      const value = showInput && el.mfaModalInput ? String(el.mfaModalInput.value || "") : "";
+      const meta = typeof mfaModalState.collector === "function" ? (mfaModalState.collector() || {}) : {};
+      closeMFAModal({ action: button.dataset.actionId, value, meta });
+    });
+    el.mfaModalActions.appendChild(button);
+  }
+
+  el.mfaModalOverlay.classList.remove("hidden");
+  el.mfaModalOverlay.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  window.setTimeout(() => {
+    if (showInput && el.mfaModalInput) {
+      el.mfaModalInput.focus();
+      return;
+    }
+    const firstButton = el.mfaModalActions.querySelector("button");
+    if (firstButton) firstButton.focus();
+  }, 0);
+
+  return new Promise((resolve, reject) => {
+    mfaModalState.resolver = resolve;
+    mfaModalState.rejecter = reject;
+  });
+}
+
+function handleMFAModalKeydown(event) {
+  if (!state.ui.mfaModalOpen) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeMFAModal({ action: "cancel", value: "" });
+    return;
+  }
+  if (event.key === "Enter" && mfaModalState.mode !== "actions") {
+    event.preventDefault();
+    const value = el.mfaModalInput ? String(el.mfaModalInput.value || "") : "";
+    const meta = typeof mfaModalState.collector === "function" ? (mfaModalState.collector() || {}) : {};
+    closeMFAModal({ action: "confirm", value, meta });
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusables = mfaModalFocusableElements();
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  }
+}
+
+function authStageFromPayload(payload = {}) {
+  return {
+    auth_stage: String(payload.auth_stage || "authenticated"),
+    mfa_required: !!payload.mfa_required,
+    mfa_setup_required: !!payload.mfa_setup_required,
+    mfa_setup_method: String(payload.mfa_setup_method || ""),
+    mfa_setup_step: String(payload.mfa_setup_step || ""),
+    mfa_enrolled: !!payload.mfa_enrolled,
+    legacy_mfa_prompt: !!payload.legacy_mfa_prompt,
+    mfa_preference: String(payload.mfa_preference || "none"),
+    mfa_trusted_supported: payload.mfa_trusted_supported !== false,
+  };
+}
+
+function requiresMFAStageAuthentication(payload = {}) {
+  const stage = authStageFromPayload(payload);
+  return stage.auth_stage === "mfa_required" || stage.auth_stage === "mfa_setup_required";
+}
+
+function supportsWebAuthn() {
+  return !!(window.PublicKeyCredential && navigator.credentials && typeof navigator.credentials.create === "function" && typeof navigator.credentials.get === "function");
+}
+
+function isHexString(raw) {
+  return /^[0-9a-f]+$/i.test(String(raw || "")) && String(raw || "").length % 2 === 0;
+}
+
+function hexToBytes(raw) {
+  const value = String(raw || "");
+  const out = new Uint8Array(value.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function base64urlToBytes(raw) {
+  const value = String(raw || "").replace(/-/g, "+").replace(/_/g, "/");
+  const pad = value.length % 4 === 0 ? "" : "=".repeat(4 - (value.length % 4));
+  const binary = atob(value + pad);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+function bytesToBase64url(bufferLike) {
+  const bytes = bufferLike instanceof Uint8Array ? bufferLike : new Uint8Array(bufferLike);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeCredentialID(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return new Uint8Array();
+  try {
+    return base64urlToBytes(value);
+  } catch {
+    if (isHexString(value)) {
+      return hexToBytes(value);
+    }
+    return new TextEncoder().encode(value);
+  }
+}
+
+function normalizePublicKeyCreateOptions(beginPayload = {}) {
+  const pk = beginPayload.public_key || beginPayload;
+  const user = pk.user || beginPayload.user || {};
+  const excludeCredentials = Array.isArray(pk.excludeCredentials)
+    ? pk.excludeCredentials
+    : Array.isArray(beginPayload.exclude_credentials) ? beginPayload.exclude_credentials : [];
+  return {
+    challenge: decodeCredentialID(pk.challenge || beginPayload.challenge),
+    rp: pk.rp || beginPayload.rp || { id: beginPayload.rp_id || window.location.hostname, name: "Despatch" },
+    user: {
+      id: decodeCredentialID(user.id || ""),
+      name: String(user.name || ""),
+      displayName: String(user.displayName || user.display_name || user.name || ""),
+    },
+    pubKeyCredParams: Array.isArray(pk.pubKeyCredParams) ? pk.pubKeyCredParams : (Array.isArray(beginPayload.pub_key_cred_params) ? beginPayload.pub_key_cred_params : [{ type: "public-key", alg: -7 }]),
+    timeout: Number(pk.timeout || beginPayload.timeout_ms || 300000),
+    attestation: String(pk.attestation || "none"),
+    authenticatorSelection: pk.authenticatorSelection || { userVerification: "preferred" },
+    excludeCredentials: excludeCredentials.map((item) => ({
+      type: "public-key",
+      id: decodeCredentialID(item.id),
+      transports: Array.isArray(item.transports) ? item.transports : undefined,
+    })),
+  };
+}
+
+function normalizePublicKeyGetOptions(beginPayload = {}) {
+  const pk = beginPayload.public_key || beginPayload;
+  const allowCredentials = Array.isArray(pk.allowCredentials)
+    ? pk.allowCredentials
+    : Array.isArray(beginPayload.allow_credentials) ? beginPayload.allow_credentials : [];
+  return {
+    challenge: decodeCredentialID(pk.challenge || beginPayload.challenge),
+    rpId: String(pk.rpId || beginPayload.rp_id || window.location.hostname),
+    timeout: Number(pk.timeout || beginPayload.timeout_ms || 300000),
+    userVerification: String(pk.userVerification || "preferred"),
+    allowCredentials: allowCredentials.map((item) => ({
+      type: "public-key",
+      id: decodeCredentialID(item.id),
+      transports: Array.isArray(item.transports) ? item.transports : undefined,
+    })),
+  };
+}
+
+function credentialToPayload(credential) {
+  if (!credential || !credential.response) return {};
+  const base = {
+    id: credential.id,
+    rawId: bytesToBase64url(new Uint8Array(credential.rawId)),
+    type: credential.type || "public-key",
+  };
+  if (credential.response.attestationObject) {
+    return {
+      ...base,
+      response: {
+        clientDataJSON: bytesToBase64url(new Uint8Array(credential.response.clientDataJSON)),
+        attestationObject: bytesToBase64url(new Uint8Array(credential.response.attestationObject)),
+      },
+      transports: typeof credential.response.getTransports === "function" ? credential.response.getTransports() : [],
+    };
+  }
+  return {
+    ...base,
+    response: {
+      clientDataJSON: bytesToBase64url(new Uint8Array(credential.response.clientDataJSON)),
+      authenticatorData: bytesToBase64url(new Uint8Array(credential.response.authenticatorData)),
+      signature: bytesToBase64url(new Uint8Array(credential.response.signature)),
+      userHandle: credential.response.userHandle ? bytesToBase64url(new Uint8Array(credential.response.userHandle)) : "",
+    },
+  };
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (!value) return false;
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // fallback below
+  }
+  const area = document.createElement("textarea");
+  area.value = value;
+  area.style.position = "fixed";
+  area.style.left = "-9999px";
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  document.body.removeChild(area);
+  return ok;
+}
+
+function downloadTextFile(filename, content) {
+  const blob = new Blob([String(content || "")], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function printRecoveryCodes(codes) {
+  const text = Array.isArray(codes) ? codes.join("\n") : "";
+  const popup = window.open("", "_blank", "noopener,noreferrer");
+  if (!popup) {
+    setStatus("Popup blocked. Use Download instead to save recovery codes.", "error");
+    return;
+  }
+  popup.document.write("<!doctype html><html><head><title>Recovery Codes</title></head><body>");
+  popup.document.write("<h1>Recovery Codes</h1>");
+  popup.document.write(`<pre>${text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}</pre>`);
+  popup.document.write("</body></html>");
+  popup.document.close();
+  popup.focus();
+  popup.print();
+}
+
+function createRecoveryCodesPanel(codes, options = {}) {
+  const values = Array.isArray(codes) ? codes.map((code) => String(code || "").trim()).filter(Boolean) : [];
+  const wrapper = document.createElement("section");
+  wrapper.className = "mfa-recovery-card";
+
+  const title = document.createElement("strong");
+  title.textContent = "Recovery codes";
+  wrapper.appendChild(title);
+
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = "Store these codes offline. Each code can be used only once if you lose access to your MFA device.";
+  wrapper.appendChild(hint);
+
+  const list = document.createElement("ol");
+  list.className = "mfa-recovery-list";
+  for (const code of values) {
+    const li = document.createElement("li");
+    li.textContent = code;
+    list.appendChild(li);
+  }
+  wrapper.appendChild(list);
+
+  const actions = document.createElement("div");
+  actions.className = "mfa-recovery-actions";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "cmd-btn cmd-btn--dense";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", async () => {
+    const ok = await copyTextToClipboard(values.join("\n"));
+    setStatus(ok ? "Recovery codes copied." : "Failed to copy recovery codes.", ok ? "ok" : "error");
+  });
+  actions.appendChild(copyBtn);
+
+  const downloadBtn = document.createElement("button");
+  downloadBtn.type = "button";
+  downloadBtn.className = "cmd-btn cmd-btn--dense";
+  downloadBtn.textContent = "Download .txt";
+  downloadBtn.addEventListener("click", () => {
+    downloadTextFile("despatch-recovery-codes.txt", values.join("\n"));
+  });
+  actions.appendChild(downloadBtn);
+
+  const printBtn = document.createElement("button");
+  printBtn.type = "button";
+  printBtn.className = "cmd-btn cmd-btn--dense";
+  printBtn.textContent = "Print";
+  printBtn.addEventListener("click", () => printRecoveryCodes(values));
+  actions.appendChild(printBtn);
+
+  wrapper.appendChild(actions);
+
+  let ackInput = null;
+  if (options.requireAck) {
+    const ackWrap = document.createElement("label");
+    ackWrap.className = "mfa-inline-check";
+    ackInput = document.createElement("input");
+    ackInput.type = "checkbox";
+    ackInput.checked = !!options.ackDefault;
+    const ackText = document.createElement("span");
+    ackText.textContent = options.ackLabel || "I saved these recovery codes.";
+    ackWrap.appendChild(ackInput);
+    ackWrap.appendChild(ackText);
+    wrapper.appendChild(ackWrap);
+  }
+
+  let rememberInput = null;
+  if (options.includeRemember) {
+    const rememberWrap = document.createElement("label");
+    rememberWrap.className = "mfa-inline-check";
+    rememberInput = document.createElement("input");
+    rememberInput.type = "checkbox";
+    rememberInput.checked = options.rememberDefault !== false;
+    const rememberText = document.createElement("span");
+    rememberText.textContent = "Remember this device for 30 days";
+    rememberWrap.appendChild(rememberInput);
+    rememberWrap.appendChild(rememberText);
+    wrapper.appendChild(rememberWrap);
+  }
+
+  return {
+    node: wrapper,
+    getAck: () => !!(ackInput && ackInput.checked),
+    getRemember: () => !!(rememberInput && rememberInput.checked),
+    values,
+  };
+}
+
+function createBackupConfirmationPanel(options = {}) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "mfa-recovery-card";
+
+  const text = document.createElement("p");
+  text.className = "hint";
+  text.textContent = options.body || "Confirm that you saved your recovery codes to complete MFA setup.";
+  wrapper.appendChild(text);
+
+  const ackWrap = document.createElement("label");
+  ackWrap.className = "mfa-inline-check";
+  const ackInput = document.createElement("input");
+  ackInput.type = "checkbox";
+  ackInput.checked = !!options.ackDefault;
+  const ackText = document.createElement("span");
+  ackText.textContent = options.ackLabel || "I saved my recovery codes.";
+  ackWrap.appendChild(ackInput);
+  ackWrap.appendChild(ackText);
+  wrapper.appendChild(ackWrap);
+
+  const rememberWrap = document.createElement("label");
+  rememberWrap.className = "mfa-inline-check";
+  const rememberInput = document.createElement("input");
+  rememberInput.type = "checkbox";
+  rememberInput.checked = options.rememberDefault !== false;
+  const rememberText = document.createElement("span");
+  rememberText.textContent = "Remember this device for 30 days";
+  rememberWrap.appendChild(rememberInput);
+  rememberWrap.appendChild(rememberText);
+  wrapper.appendChild(rememberWrap);
+
+  return {
+    node: wrapper,
+    getAck: () => !!ackInput.checked,
+    getRemember: () => !!rememberInput.checked,
+  };
+}
+
+function createRememberDevicePanel(defaultChecked = true) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "mfa-recovery-card";
+  const text = document.createElement("p");
+  text.className = "hint";
+  text.textContent = "Choose how to verify this login session.";
+  wrapper.appendChild(text);
+  const rememberWrap = document.createElement("label");
+  rememberWrap.className = "mfa-inline-check";
+  const rememberInput = document.createElement("input");
+  rememberInput.type = "checkbox";
+  rememberInput.checked = defaultChecked !== false;
+  const rememberText = document.createElement("span");
+  rememberText.textContent = "Remember this device for 30 days";
+  rememberWrap.appendChild(rememberInput);
+  rememberWrap.appendChild(rememberText);
+  wrapper.appendChild(rememberWrap);
+  return {
+    node: wrapper,
+    getRemember: () => !!rememberInput.checked,
+  };
+}
+
+async function fetchCurrentAuthStage() {
+  const me = await api("/api/v1/me", {
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+    logErrors: false,
+  });
+  state.user = me;
+  applyNavVisibility();
+  return authStageFromPayload(me);
+}
+
+async function verifyTOTPCodeFlow(endpoint, title = "Enter Authenticator Code", label = "Authenticator Code", rememberDevice = true) {
+  let errorHint = "";
+  while (true) {
+    const out = await openMFAModal({
+      title,
+      body: errorHint || (title.includes("Recovery") ? "Enter one of your saved recovery codes." : "Enter the 6-digit code from your authenticator app."),
+      showInput: true,
+      inputLabel: label,
+      inputType: "text",
+      actions: [
+        { id: "confirm", label: "Verify", kind: "primary" },
+        { id: "cancel", label: "Cancel", kind: "ghost" },
+      ],
+    });
+    if (!out || out.action !== "confirm") {
+      throw new Error("MFA verification was cancelled");
+    }
+    const code = String(out.value || "").trim();
+    if (!code) {
+      errorHint = "Enter a code to continue.";
+      continue;
+    }
+    try {
+      await api(endpoint, {
+        method: "POST",
+        json: { code, remember_device: !!rememberDevice },
+        skipUnauthorizedHandling: true,
+        skipMFAHandling: true,
+      });
+      return;
+    } catch (err) {
+      errorHint = formatAPIError(err, "Verification failed.");
+    }
+  }
+}
+
+async function runTOTPSetupFlow() {
+  const enroll = await api("/api/v2/security/mfa/totp/enroll", {
+    method: "POST",
+    json: {},
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+  });
+
+  const instructions = Array.isArray(enroll.setup_instructions) ? enroll.setup_instructions : [];
+  const setupPanel = document.createElement("div");
+  setupPanel.className = "mfa-qr-wrap";
+
+  if (String(enroll.qr_png_data_url || "")) {
+    const qr = document.createElement("img");
+    qr.className = "mfa-qr-image";
+    qr.src = String(enroll.qr_png_data_url);
+    qr.alt = "Authenticator app QR code";
+    setupPanel.appendChild(qr);
+  }
+
+  const manualWrap = document.createElement("div");
+  manualWrap.className = "mfa-manual-key";
+  const keyLabel = document.createElement("span");
+  keyLabel.textContent = "Can’t scan?";
+  const keyValue = document.createElement("code");
+  keyValue.textContent = String(enroll.manual_entry_key || enroll.secret || "");
+  const keyCopyBtn = document.createElement("button");
+  keyCopyBtn.type = "button";
+  keyCopyBtn.className = "cmd-btn cmd-btn--dense";
+  keyCopyBtn.textContent = "Copy key";
+  keyCopyBtn.addEventListener("click", async () => {
+    const ok = await copyTextToClipboard(keyValue.textContent);
+    setStatus(ok ? "Manual key copied." : "Failed to copy manual key.", ok ? "ok" : "error");
+  });
+  manualWrap.appendChild(keyLabel);
+  manualWrap.appendChild(keyValue);
+  manualWrap.appendChild(keyCopyBtn);
+  setupPanel.appendChild(manualWrap);
+
+  const appHint = document.createElement("p");
+  appHint.className = "hint";
+  appHint.textContent = "Supported apps: Google Authenticator, Microsoft Authenticator, 1Password, Authy.";
+  setupPanel.appendChild(appHint);
+
+  const setupIntro = await openMFAModal({
+    title: "Set Up Authenticator App",
+    body: instructions.length ? instructions.join(" ") : "Scan the QR code in your authenticator app.",
+    extraContent: setupPanel,
+    actions: [
+      { id: "continue", label: "Continue", kind: "primary" },
+      { id: "cancel", label: "Cancel", kind: "ghost" },
+    ],
+  });
+  if (!setupIntro || setupIntro.action !== "continue") {
+    throw new Error("TOTP setup was cancelled");
+  }
+
+  let errorHint = "";
+  while (true) {
+    const recoveryPanel = createRecoveryCodesPanel(enroll.recovery_codes, {
+      requireAck: true,
+      includeRemember: true,
+      ackDefault: false,
+      rememberDefault: true,
+      ackLabel: "I saved these recovery codes.",
+    });
+    const out = await openMFAModal({
+      title: "Confirm Authenticator App",
+      body: errorHint || "Enter the 6-digit code from your authenticator app, then confirm recovery codes are saved.",
+      showInput: true,
+      inputLabel: "Authenticator code",
+      inputType: "text",
+      extraContent: recoveryPanel.node,
+      collect: () => ({
+        recovery_ack: recoveryPanel.getAck(),
+        remember_device: recoveryPanel.getRemember(),
+      }),
+      actions: [
+        { id: "confirm", label: "Enable MFA", kind: "primary" },
+        { id: "cancel", label: "Cancel", kind: "ghost" },
+      ],
+    });
+    if (!out || out.action !== "confirm") {
+      throw new Error("TOTP setup was cancelled");
+    }
+    const code = String(out.value || "").trim();
+    const ack = !!out.meta?.recovery_ack;
+    const remember = !!out.meta?.remember_device;
+    if (!ack) {
+      errorHint = "Confirm that recovery codes are saved before continuing.";
+      continue;
+    }
+    if (!code) {
+      errorHint = "Enter the authenticator code to continue.";
+      continue;
+    }
+    try {
+      await api("/api/v2/security/mfa/totp/confirm", {
+        method: "POST",
+        json: {
+          code,
+          recovery_codes_ack: true,
+          remember_device: remember,
+        },
+        skipUnauthorizedHandling: true,
+        skipMFAHandling: true,
+      });
+      return;
+    } catch (err) {
+      errorHint = formatAPIError(err, "Failed to enable authenticator app.");
+    }
+  }
+}
+
+async function runMFARecoveryAckFlow(recoveryCodes = []) {
+  let errorHint = "";
+  while (true) {
+    const useRecoveryCard = Array.isArray(recoveryCodes) && recoveryCodes.length > 0;
+    const panel = useRecoveryCard
+      ? createRecoveryCodesPanel(recoveryCodes, {
+        requireAck: true,
+        includeRemember: true,
+        ackDefault: false,
+        rememberDefault: true,
+        ackLabel: "I saved these recovery codes.",
+      })
+      : createBackupConfirmationPanel({
+        body: "Finish MFA setup by confirming your recovery codes are saved.",
+        ackDefault: false,
+        rememberDefault: true,
+      });
+    const out = await openMFAModal({
+      title: "Finish MFA Setup",
+      body: errorHint || "Recovery codes are required as your backup sign-in method.",
+      extraContent: panel.node,
+      collect: () => ({
+        recovery_ack: panel.getAck(),
+        remember_device: panel.getRemember(),
+      }),
+      actions: [
+        { id: "confirm", label: "Finish Setup", kind: "primary" },
+        { id: "cancel", label: "Cancel", kind: "ghost" },
+      ],
+    });
+    if (!out || out.action !== "confirm") {
+      throw new Error("MFA setup was cancelled.");
+    }
+    if (!out.meta?.recovery_ack) {
+      errorHint = "Confirm that recovery codes are saved before continuing.";
+      continue;
+    }
+    try {
+      await api("/api/v2/security/mfa/recovery-codes/ack", {
+        method: "POST",
+        json: {
+          recovery_codes_ack: true,
+          remember_device: !!out.meta?.remember_device,
+        },
+        skipUnauthorizedHandling: true,
+        skipMFAHandling: true,
+      });
+      return;
+    } catch (err) {
+      errorHint = formatAPIError(err, "Failed to confirm recovery codes.");
+    }
+  }
+}
+
+async function runWebAuthnSetupFlow() {
+  if (!supportsWebAuthn()) {
+    throw new Error("Passkey setup is not supported in this browser or device.");
+  }
+  const begin = await api("/api/v2/security/mfa/webauthn/register/begin", {
+    method: "POST",
+    json: {},
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+  });
+  const options = normalizePublicKeyCreateOptions(begin);
+  const credential = await navigator.credentials.create({ publicKey: options });
+  if (!credential) {
+    throw new Error("Passkey registration was cancelled.");
+  }
+  const payload = credentialToPayload(credential);
+  payload.challenge = String(begin.challenge || "");
+  payload.remember_device = false;
+  const finish = await api("/api/v2/security/mfa/webauthn/register/finish", {
+    method: "POST",
+    json: payload,
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+  });
+  await runMFARecoveryAckFlow(Array.isArray(finish.recovery_codes) ? finish.recovery_codes : []);
+}
+
+async function runWebAuthnVerifyFlow(rememberDevice = true) {
+  if (!supportsWebAuthn()) {
+    throw new Error("Passkey verification is not supported in this browser.");
+  }
+  const begin = await api("/api/v2/mfa/webauthn/begin", {
+    method: "POST",
+    json: {},
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+  });
+  const options = normalizePublicKeyGetOptions(begin);
+  const credential = await navigator.credentials.get({ publicKey: options });
+  if (!credential) {
+    throw new Error("Passkey verification was cancelled.");
+  }
+  await api("/api/v2/mfa/webauthn/finish", {
+    method: "POST",
+    json: Object.assign({}, credentialToPayload(credential), { remember_device: !!rememberDevice }),
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+  });
+}
+
+async function runMFASetupStage(stage) {
+  const method = String(stage.mfa_setup_method || stage.mfa_preference || "").toLowerCase();
+  const setupStep = String(stage.mfa_setup_step || "method").toLowerCase();
+  if (setupStep === "backup") {
+    await runMFARecoveryAckFlow([]);
+    return;
+  }
+  const switchTarget = method === "totp" ? "webauthn" : "totp";
+  const switchLabel = method === "totp" ? "Switch To Passkey" : "Switch To Authenticator App";
+  while (true) {
+    try {
+      if (method === "totp") {
+        await runTOTPSetupFlow();
+      } else if (method === "webauthn") {
+        await runWebAuthnSetupFlow();
+      } else {
+        throw new Error("Unsupported MFA setup method.");
+      }
+      return;
+    } catch (err) {
+      const actions = [
+        { id: "retry", label: "Retry", kind: "primary" },
+        { id: "cancel", label: "Cancel", kind: "ghost" },
+      ];
+      if (method === "totp" || method === "webauthn") {
+        actions.splice(1, 0, { id: "switch", label: switchLabel, kind: "ghost" });
+      }
+      const out = await openMFAModal({
+        title: "MFA Setup Required",
+        body: formatAPIError(err, "Setup failed."),
+        actions,
+      });
+      if (!out || out.action === "cancel") {
+        throw err;
+      }
+      if (out.action === "switch") {
+        await api("/api/v2/security/mfa/preference", {
+          method: "POST",
+          json: { preference: switchTarget },
+          skipUnauthorizedHandling: true,
+          skipMFAHandling: true,
+        });
+        return;
+      }
+    }
+  }
+}
+
+async function runMFAVerificationStage() {
+  let lastError = "";
+  while (true) {
+    const rememberPanel = createRememberDevicePanel(true);
+    const actions = [
+      { id: "totp", label: "Use Authenticator Code", kind: "primary" },
+      { id: "recovery", label: "Use Recovery Code", kind: "ghost" },
+      { id: "cancel", label: "Cancel", kind: "ghost" },
+    ];
+    if (supportsWebAuthn()) {
+      actions.unshift({ id: "passkey", label: "Use Passkey", kind: "primary" });
+    }
+    const out = await openMFAModal({
+      title: "MFA Verification Required",
+      body: lastError ? `Verification failed: ${lastError}` : "Choose how to verify this login session.",
+      extraContent: rememberPanel.node,
+      collect: () => ({ remember_device: rememberPanel.getRemember() }),
+      actions,
+    });
+    if (!out || out.action === "cancel") {
+      throw new Error("MFA verification was cancelled.");
+    }
+    const rememberDevice = !!out.meta?.remember_device;
+    try {
+      if (out.action === "passkey") {
+        await runWebAuthnVerifyFlow(rememberDevice);
+      } else if (out.action === "totp") {
+        await verifyTOTPCodeFlow("/api/v2/mfa/totp/verify", "Enter Authenticator Code", "Authenticator code", rememberDevice);
+      } else if (out.action === "recovery") {
+        await verifyTOTPCodeFlow("/api/v2/mfa/recovery-code/verify", "Enter Recovery Code", "Recovery code", rememberDevice);
+      }
+      lastError = "";
+      return;
+    } catch (err) {
+      lastError = formatAPIError(err, "Verification failed.");
+    }
+  }
+}
+
+async function ensureMFAStageAuthenticated(initial = null) {
+  if (state.auth.mfaFlowPromise) {
+    return state.auth.mfaFlowPromise;
+  }
+  state.auth.mfaFlowPromise = (async () => {
+    let stage = authStageFromPayload(initial || {});
+    if (!initial) {
+      stage = await fetchCurrentAuthStage();
+    }
+    while (stage.auth_stage !== "authenticated") {
+      if (stage.auth_stage === "mfa_setup_required") {
+        await runMFASetupStage(stage);
+      } else if (stage.auth_stage === "mfa_required") {
+        await runMFAVerificationStage(stage);
+      } else {
+        throw new Error(`Unsupported authentication stage: ${stage.auth_stage}`);
+      }
+      stage = await fetchCurrentAuthStage();
+    }
+    closeMFAModal({ action: "done", value: "" });
+    return stage;
+  })().finally(() => {
+    state.auth.mfaFlowPromise = null;
+  });
+  return state.auth.mfaFlowPromise;
+}
+
+async function promptLegacyMFAIfNeeded() {
+  if (!state.user || !state.user.legacy_mfa_prompt || state.auth.legacyMFAOfferShownForSession) {
+    return;
+  }
+  state.auth.legacyMFAOfferShownForSession = true;
+  const out = await openMFAModal({
+    title: "Secure Your Account",
+    body: "Set up multi-factor authentication now for stronger account security.",
+    actions: [
+      { id: "totp", label: "Set Up Authenticator App", kind: "primary" },
+      { id: "passkey", label: "Set Up Passkey", kind: "primary" },
+      { id: "later", label: "Not now", kind: "ghost" },
+    ],
+  });
+  if (!out || out.action === "later") {
+    await api("/api/v2/security/mfa/legacy-dismiss", {
+      method: "POST",
+      json: {},
+      skipUnauthorizedHandling: true,
+      skipMFAHandling: true,
+      logErrors: false,
+    });
+    state.user.legacy_mfa_prompt = false;
+    return;
+  }
+  try {
+    if (out.action === "totp") {
+      await runTOTPSetupFlow();
+    } else if (out.action === "passkey") {
+      await runWebAuthnSetupFlow();
+    }
+    await api("/api/v2/security/mfa/legacy-dismiss", {
+      method: "POST",
+      json: {},
+      skipUnauthorizedHandling: true,
+      skipMFAHandling: true,
+      logErrors: false,
+    });
+    state.user.legacy_mfa_prompt = false;
+    setStatus("MFA has been enabled for this account.", "ok");
+  } catch (err) {
+    setStatus(formatAPIError(err, "MFA setup failed."), "error");
+  } finally {
+    closeMFAModal({ action: "done", value: "" });
+  }
+}
+
 async function api(path, opts = {}) {
   const method = opts.method || "GET";
   const headers = Object.assign({}, opts.headers || {});
@@ -693,6 +1673,22 @@ async function api(path, opts = {}) {
       && !!state.user;
     if (shouldHandleUnauthorized) {
       routeToAuthWithMessage(reauthMessageForCode(error.code), error.code);
+    }
+    const shouldHandleMFAStage = error.status === 401
+      && isMFAStageCode(error.code)
+      && isProtectedAPIPath(path)
+      && !opts.skipMFAHandling
+      && !state.setup.required;
+    if (shouldHandleMFAStage) {
+      try {
+        await ensureMFAStageAuthenticated(payload);
+        return api(path, Object.assign({}, opts, {
+          skipMFAHandling: true,
+          skipUnauthorizedHandling: true,
+        }));
+      } catch (mfaErr) {
+        error.message = formatAPIError(mfaErr, "Multi-factor authentication is required.");
+      }
     }
     throw error;
   }
@@ -1198,6 +2194,9 @@ function applyNavVisibility() {
     el.tabMail.style.display = "none";
     el.tabAdmin.style.display = "none";
     el.btnLogout.style.display = "none";
+    if (el.authSecurityPanel) {
+      el.authSecurityPanel.classList.add("hidden");
+    }
     return;
   }
 
@@ -1206,6 +2205,68 @@ function applyNavVisibility() {
   el.tabMail.style.display = "inline-block";
   el.tabAdmin.style.display = state.user && state.user.role === "admin" ? "inline-block" : "none";
   el.btnLogout.style.display = state.user ? "inline-block" : "none";
+  if (el.authSecurityPanel) {
+    el.authSecurityPanel.classList.toggle("hidden", !state.user);
+  }
+}
+
+function renderTrustedDevices(items) {
+  if (!el.trustedDevicesList) return;
+  el.trustedDevicesList.replaceChildren();
+  const rows = Array.isArray(items) ? items : [];
+  if (rows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "No trusted devices saved.";
+    el.trustedDevicesList.appendChild(empty);
+    return;
+  }
+  for (const item of rows) {
+    const card = document.createElement("article");
+    card.className = "trusted-device-item";
+
+    const label = document.createElement("strong");
+    label.textContent = String(item.device_label || "Trusted device");
+    card.appendChild(label);
+
+    const meta = document.createElement("p");
+    meta.className = "trusted-device-meta";
+    const lastUsed = item.last_used_at ? `Last used: ${new Date(item.last_used_at).toLocaleString()}` : "Last used: never";
+    const expires = item.expires_at ? `Expires: ${new Date(item.expires_at).toLocaleString()}` : "Expires: n/a";
+    const ip = item.ip_hint ? `IP: ${String(item.ip_hint)}` : "";
+    meta.textContent = [lastUsed, expires, ip].filter(Boolean).join(" | ");
+    card.appendChild(meta);
+
+    const revoke = document.createElement("button");
+    revoke.type = "button";
+    revoke.className = "cmd-btn cmd-btn--dense cmd-btn--danger";
+    revoke.textContent = "Revoke";
+    revoke.addEventListener("click", async () => {
+      try {
+        await api(`/api/v2/security/mfa/trusted-devices/${encodeURIComponent(item.id)}/revoke`, {
+          method: "POST",
+          json: {},
+        });
+        setStatus("Trusted device revoked.", "ok");
+        await loadTrustedDevices();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to revoke trusted device."), "error");
+      }
+    });
+    card.appendChild(revoke);
+    el.trustedDevicesList.appendChild(card);
+  }
+}
+
+async function loadTrustedDevices() {
+  if (!state.user || !el.trustedDevicesList) return;
+  try {
+    const payload = await api("/api/v2/security/mfa/trusted-devices", { logErrors: false });
+    renderTrustedDevices(Array.isArray(payload.items) ? payload.items : []);
+  } catch (err) {
+    renderTrustedDevices([]);
+    setStatus(formatAPIError(err, "Failed to load trusted devices."), "error");
+  }
 }
 
 function requireSelectedMessage() {
@@ -1265,7 +2326,7 @@ async function completeSetup() {
   const password = el.setupPassword.value;
   const mailboxLogin = String(el.setupAdminMailboxLogin?.value || "").trim();
 
-  await api("/api/v1/setup/complete", {
+  const setupPayload = await api("/api/v1/setup/complete", {
     method: "POST",
     json: {
       base_domain: domain,
@@ -1276,9 +2337,22 @@ async function completeSetup() {
     },
   });
 
-  const session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true });
+  const setupStage = authStageFromPayload(setupPayload);
+  if (setupStage.auth_stage !== "authenticated") {
+    await ensureMFAStageAuthenticated(setupStage);
+  }
+
+  const session = await refreshSession({
+    throwOnFail: true,
+    skipUnauthorizedHandling: true,
+    skipMFAHandling: true,
+  });
   if (!session.ok) {
     throw new Error("Setup completed, but browser session was not established. Check HTTP/HTTPS cookie policy and sign in.");
+  }
+  const liveStage = authStageFromPayload(session.user || {});
+  if (liveStage.auth_stage !== "authenticated") {
+    throw new Error("Multi-factor authentication setup is required for the admin account before finishing setup.");
   }
   state.setup.required = false;
   applyNavVisibility();
@@ -1580,15 +2654,19 @@ async function refreshSession(opts = {}) {
   try {
     const me = await api("/api/v1/me", {
       skipUnauthorizedHandling: !!opts.skipUnauthorizedHandling,
+      skipMFAHandling: !!opts.skipMFAHandling,
       logErrors: !opts.skipUnauthorizedHandling,
     });
     state.user = me;
     setStatus(`Signed in as ${me.email}.`, "ok");
     applyNavVisibility();
     await promptRecoveryEmailIfNeeded();
+    await promptLegacyMFAIfNeeded();
+    await loadTrustedDevices();
     return { ok: true, user: me };
   } catch (err) {
     state.auth.recoveryPromptShownForSession = false;
+    state.auth.legacyMFAOfferShownForSession = false;
     state.user = null;
     applyNavVisibility();
     if (opts.throwOnFail) throw err;
@@ -2876,9 +3954,19 @@ function bindUI() {
     e.preventDefault();
     const fd = new FormData(e.target);
     try {
-      await api("/api/v1/login", { method: "POST", json: { email: fd.get("email"), password: fd.get("password") } });
+      const loginPayload = await api("/api/v1/login", {
+        method: "POST",
+        json: {
+          email: fd.get("email"),
+          password: fd.get("password"),
+        },
+      });
+      const loginStage = authStageFromPayload(loginPayload);
+      if (loginStage.auth_stage !== "authenticated") {
+        await ensureMFAStageAuthenticated(loginStage);
+      }
       try {
-        await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true });
+        await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
       } catch (err) {
         if (isSessionErrorCode(err.code)) {
           routeToAuthWithMessage("Login accepted but browser session cookie was not established. Check HTTP/HTTPS cookie policy.", err.code);
@@ -2920,7 +4008,12 @@ function bindUI() {
     try {
       await api("/api/v1/register", {
         method: "POST",
-        json: { email: fd.get("email"), password: fd.get("password"), captcha_token: captchaToken },
+        json: {
+          email: fd.get("email"),
+          password: fd.get("password"),
+          captcha_token: captchaToken,
+          mfa_preference: fd.get("mfa_preference") || "none",
+        },
       });
       setStatus("Registration submitted. Wait for approval.", "ok");
       e.target.reset();
@@ -2951,6 +4044,40 @@ function bindUI() {
       }
     }
   });
+
+  if (el.registerMFAPreference) {
+    el.registerMFAPreference.addEventListener("change", updateRegisterMFAHelp);
+  }
+  updateRegisterMFAHelp();
+
+  if (el.btnTrustedDevicesRefresh) {
+    el.btnTrustedDevicesRefresh.addEventListener("click", async () => {
+      await loadTrustedDevices();
+      setStatus("Trusted devices refreshed.", "ok");
+    });
+  }
+  if (el.btnTrustedDevicesRevokeAll) {
+    el.btnTrustedDevicesRevokeAll.addEventListener("click", async () => {
+      if (!state.user) return;
+      const confirmed = await showConfirmModal({
+        title: "Revoke all trusted devices?",
+        body: "All trusted devices will require MFA again on the next login.",
+        confirmText: "Revoke All",
+        cancelText: "Cancel",
+      });
+      if (!confirmed) return;
+      try {
+        await api("/api/v2/security/mfa/trusted-devices/revoke-all", {
+          method: "POST",
+          json: {},
+        });
+        setStatus("All trusted devices were revoked.", "ok");
+        await loadTrustedDevices();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to revoke trusted devices."), "error");
+      }
+    });
+  }
 
   document.getElementById("form-reset-request").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -3091,7 +4218,15 @@ function bindUI() {
       }
     });
   }
+  if (el.mfaModalOverlay) {
+    el.mfaModalOverlay.addEventListener("click", (event) => {
+      if (event.target === el.mfaModalOverlay) {
+        closeMFAModal({ action: "cancel", value: "" });
+      }
+    });
+  }
   document.addEventListener("keydown", handleUIModalKeydown);
+  document.addEventListener("keydown", handleMFAModalKeydown);
 
   el.tabSetup.onclick = () => {
     if (!state.setup.required) return;
@@ -3106,10 +4241,26 @@ function bindUI() {
     showView("auth");
     setActiveAuthPane("login");
     void initCaptchaUI();
+    if (state.user) {
+      void loadTrustedDevices();
+    }
   };
 
   el.tabMail.onclick = async () => {
     if (!state.user || state.setup.required) return;
+    if (requiresMFAStageAuthentication(state.user)) {
+      try {
+        await ensureMFAStageAuthenticated(state.user);
+        await refreshSession({
+          throwOnFail: true,
+          skipUnauthorizedHandling: true,
+          skipMFAHandling: true,
+        });
+      } catch (err) {
+        presentAPIError(err, "Multi-factor authentication setup is required before opening mail.");
+        return;
+      }
+    }
     closeComposeOverlay(false);
     setActiveTab(el.tabMail);
     showView("mail");
@@ -3124,6 +4275,19 @@ function bindUI() {
 
   el.tabAdmin.onclick = async () => {
     if (!state.user || state.user.role !== "admin" || state.setup.required) return;
+    if (requiresMFAStageAuthentication(state.user)) {
+      try {
+        await ensureMFAStageAuthenticated(state.user);
+        await refreshSession({
+          throwOnFail: true,
+          skipUnauthorizedHandling: true,
+          skipMFAHandling: true,
+        });
+      } catch (err) {
+        presentAPIError(err, "Multi-factor authentication setup is required before opening admin.");
+        return;
+      }
+    }
     closeComposeOverlay(false);
     setActiveTab(el.tabAdmin);
     showView("admin");
@@ -3143,9 +4307,12 @@ function bindUI() {
     }
     stopUpdatePolling();
     state.auth.recoveryPromptShownForSession = false;
+    state.auth.legacyMFAOfferShownForSession = false;
+    state.auth.mfaFlowPromise = null;
     state.user = null;
     state.selectedMessage = null;
     closeComposeOverlay(false);
+    closeMFAModal({ action: "cancel", value: "" });
     applyNavVisibility();
     setActiveTab(el.tabAuth);
     showView("auth");
@@ -3222,6 +4389,24 @@ async function bootstrap() {
     await initCaptchaUI();
     setStatus("Authentication required.");
     return;
+  }
+
+  if (requiresMFAStageAuthentication(session.user || {})) {
+    try {
+      await ensureMFAStageAuthenticated(session.user);
+      const refreshed = await refreshSession({
+        skipUnauthorizedHandling: true,
+        throwOnFail: true,
+        skipMFAHandling: true,
+      });
+      if (!refreshed.ok) {
+        routeToAuthWithMessage("Session refresh failed after multi-factor setup. Sign in again.", "session_invalid");
+        return;
+      }
+    } catch (err) {
+      routeToAuthWithMessage(formatAPIError(err, "Multi-factor authentication is required to continue."), "mfa_required");
+      return;
+    }
   }
 
   setActiveTab(el.tabMail);

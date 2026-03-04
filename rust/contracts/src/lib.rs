@@ -163,8 +163,74 @@ pub mod updater {
     }
 }
 
+pub mod mailsec {
+    use super::*;
+
+    pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
+    pub const CODE_OK: &str = "ok";
+    pub const CODE_INVALID_REQUEST: &str = "invalid_request";
+    pub const CODE_INVALID_FRAME: &str = "invalid_frame";
+    pub const CODE_UNSUPPORTED_OPERATION: &str = "unsupported_operation";
+    pub const CODE_TIMEOUT: &str = "timeout";
+    pub const CODE_INTERNAL_ERROR: &str = "internal_error";
+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    #[serde(deny_unknown_fields)]
+    pub struct Request {
+        pub request_id: String,
+        pub op: String,
+        pub account_id: String,
+        pub message_id: String,
+        pub payload: serde_json::Value,
+        pub deadline_ms: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    #[serde(deny_unknown_fields)]
+    pub struct Response {
+        pub request_id: String,
+        pub ok: bool,
+        pub code: String,
+        #[serde(default)]
+        pub error: String,
+        #[serde(default)]
+        pub result: serde_json::Value,
+    }
+
+    pub fn validate_request(req: &Request) -> Result<(), String> {
+        if req.request_id.trim().is_empty() {
+            return Err("request_id is required".to_string());
+        }
+        if req.op.trim().is_empty() {
+            return Err("op is required".to_string());
+        }
+        if req.account_id.trim().is_empty() {
+            return Err("account_id is required".to_string());
+        }
+        if req.message_id.trim().is_empty() {
+            return Err("message_id is required".to_string());
+        }
+        if req.deadline_ms == 0 {
+            return Err("deadline_ms must be > 0".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn read_frame<R: Read>(reader: R) -> Result<Vec<u8>, String> {
+        super::pam::read_frame(reader, MAX_FRAME_SIZE)
+    }
+
+    pub fn write_frame<W: Write>(writer: W, payload: &[u8]) -> Result<(), String> {
+        if payload.len() > MAX_FRAME_SIZE {
+            return Err("invalid payload length".to_string());
+        }
+        super::pam::write_frame(writer, payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::mailsec;
     use super::pam;
     use super::updater;
 
@@ -183,5 +249,14 @@ mod tests {
             updater::sanitize_path_token(" release/v1.0.0 "),
             "release-v1.0.0"
         );
+    }
+
+    #[test]
+    fn mailsec_frame_round_trip() {
+        let payload = br#"{"op":"mime.parse"}"#;
+        let mut out = Vec::new();
+        mailsec::write_frame(&mut out, payload).expect("write frame");
+        let back = mailsec::read_frame(&out[..]).expect("read frame");
+        assert_eq!(back, payload);
     }
 }

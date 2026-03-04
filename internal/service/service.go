@@ -99,7 +99,7 @@ func hashUA(ua string) string {
 	return hex.EncodeToString(s[:])
 }
 
-func (s *Service) Register(ctx context.Context, email, password, ip, userAgent string, captchaOK bool) error {
+func (s *Service) Register(ctx context.Context, email, password, ip, userAgent string, captchaOK bool, mfaPreference string) error {
 	status, err := s.SetupStatus(ctx)
 	if err != nil {
 		return err
@@ -123,10 +123,11 @@ func (s *Service) Register(ctx context.Context, email, password, ip, userAgent s
 	if err != nil {
 		return err
 	}
-	if _, err := s.st.CreateUser(ctx, email, hash, "user", models.UserPending); err != nil {
+	preference := NormalizeMFAPreference(mfaPreference)
+	if _, err := s.st.CreateUserWithMFA(ctx, email, hash, "user", models.UserPending, preference); err != nil {
 		return err
 	}
-	_, err = s.st.CreateRegistration(ctx, email, ip, hashUA(userAgent), captchaOK)
+	_, err = s.st.CreateRegistrationWithMFA(ctx, email, ip, hashUA(userAgent), captchaOK, preference)
 	return err
 }
 
@@ -184,6 +185,14 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 	}
 
 	now := time.Now().UTC()
+	stage, err := s.ResolveMFAStage(ctx, u, nil)
+	if err != nil {
+		return "", models.User{}, err
+	}
+	var mfaVerifiedAt *time.Time
+	if stage.AuthStage == AuthStageAuthenticated {
+		mfaVerifiedAt = &now
+	}
 	sess := models.Session{
 		ID:            uuid.NewString(),
 		UserID:        u.ID,
@@ -191,6 +200,8 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 		MailSecret:    mailSecret,
 		IPHint:        ip,
 		UserAgentHash: hashUA(userAgent),
+		AuthMethod:    "password",
+		MFAVerifiedAt: mfaVerifiedAt,
 		ExpiresAt:     now.Add(s.cfg.SessionAbsoluteDuration()),
 		IdleExpiresAt: now.Add(s.cfg.SessionIdleDuration()),
 		CreatedAt:     now,
@@ -555,6 +566,7 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 		}
 	}
 	_ = s.st.RevokeUserSessions(ctx, t.UserID)
+	_ = s.st.RevokeAllMFATrustedDevices(ctx, t.UserID)
 	return nil
 }
 
@@ -587,6 +599,7 @@ func (s *Service) AdminResetPassword(ctx context.Context, adminID, userID, newPa
 		}
 	}
 	_ = s.st.RevokeUserSessions(ctx, userID)
+	_ = s.st.RevokeAllMFATrustedDevices(ctx, userID)
 	meta, _ := json.Marshal(map[string]string{
 		"user_id": userID,
 		"mode":    strings.ToLower(strings.TrimSpace(s.cfg.DovecotAuthMode)),
@@ -752,6 +765,25 @@ func (s *Service) CompleteSetup(ctx context.Context, req SetupCompleteRequest, i
 	if err := s.st.UpsertSetting(ctx, "primary_admin_email", adminEmail); err != nil {
 		return "", models.User{}, err
 	}
+	if err := s.st.UpsertSetting(ctx, "enforce_admin_mfa", "1"); err != nil {
+		return "", models.User{}, err
+	}
+	if err := s.st.UpdateUserMFAPreference(ctx, adminUser.ID, MFAPreferenceTOTP); err != nil {
+		return "", models.User{}, err
+	}
+	if err := s.st.SetMFASetupSwitchUsed(ctx, adminUser.ID, false); err != nil {
+		return "", models.User{}, err
+	}
+	if err := s.st.SetUserMFABackupCompleted(ctx, adminUser.ID, false); err != nil {
+		return "", models.User{}, err
+	}
+	if err := s.st.SetLegacyMFAPromptPending(ctx, adminUser.ID, false); err != nil {
+		return "", models.User{}, err
+	}
+	adminUser.MFAPreference = MFAPreferenceTOTP
+	adminUser.MFASetupSwitchUsed = false
+	adminUser.MFABackupCompleted = false
+	adminUser.LegacyMFAPromptPending = false
 	if err := s.st.UpsertSetting(ctx, "setup_completed_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return "", models.User{}, err
 	}

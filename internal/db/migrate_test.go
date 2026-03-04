@@ -188,3 +188,152 @@ func TestCleanupRejectedUsersMigrationRemovesLegacyRows(t *testing.T) {
 		t.Fatalf("expected rejected reset token cleanup, found %d rows", resetCount)
 	}
 }
+
+func TestMFAOnboardingMigrationBackfillsLegacyPromptOnlyForActiveUsersWithoutMFA(t *testing.T) {
+	sqdb, err := OpenSQLite(filepath.Join(t.TempDir(), "mfa017.db"), 1, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqdb.Close() })
+
+	for _, migration := range []string{
+		filepath.Join("..", "..", "migrations", "001_init.sql"),
+		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
+		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
+		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
+		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
+		filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql"),
+		filepath.Join("..", "..", "migrations", "007_mail_accounts.sql"),
+		filepath.Join("..", "..", "migrations", "008_mail_index.sql"),
+		filepath.Join("..", "..", "migrations", "009_preferences_and_search.sql"),
+		filepath.Join("..", "..", "migrations", "010_drafts_schedule.sql"),
+		filepath.Join("..", "..", "migrations", "011_rules_sieve.sql"),
+		filepath.Join("..", "..", "migrations", "012_mfa_totp_webauthn.sql"),
+		filepath.Join("..", "..", "migrations", "013_crypto_keys.sql"),
+		filepath.Join("..", "..", "migrations", "014_session_management.sql"),
+		filepath.Join("..", "..", "migrations", "015_sync_state.sql"),
+		filepath.Join("..", "..", "migrations", "016_quota_and_health.sql"),
+	} {
+		if err := ApplyMigrationFile(sqdb, migration); err != nil {
+			t.Fatalf("apply migration %s: %v", migration, err)
+		}
+	}
+
+	now := time.Now().UTC()
+	_, err = sqdb.Exec(
+		`INSERT INTO users(id,email,password_hash,role,status,provision_state,created_at,mfa_preference,legacy_mfa_prompt_pending)
+		 VALUES
+		 ('u_no_mfa','u_no_mfa@example.com','h','user','active','ok',?,'none',0),
+		 ('u_totp','u_totp@example.com','h','user','active','ok',?,'totp',0),
+		 ('u_webauthn','u_webauthn@example.com','h','user','active','ok',?,'webauthn',0),
+		 ('u_suspended','u_suspended@example.com','h','user','suspended','ok',?,'none',0)`,
+		now, now, now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert users: %v", err)
+	}
+	if _, err := sqdb.Exec(
+		`INSERT INTO mfa_totp(user_id,secret_enc,issuer,account_name,enabled,enrolled_at,updated_at)
+		 VALUES(?,?,?,?,?,?,?)`,
+		"u_totp", "enc", "Despatch", "u_totp@example.com", 1, now, now,
+	); err != nil {
+		t.Fatalf("insert totp: %v", err)
+	}
+	if _, err := sqdb.Exec(
+		`INSERT INTO mfa_webauthn_credentials(id,user_id,credential_id,public_key,sign_count,transports_json,name,created_at)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		"cred1", "u_webauthn", "cred-id-1", "pub", 1, "[]", "Passkey", now,
+	); err != nil {
+		t.Fatalf("insert webauthn: %v", err)
+	}
+
+	if err := ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql")); err != nil {
+		t.Fatalf("apply migration 017: %v", err)
+	}
+
+	for _, col := range []string{"mfa_preference", "legacy_mfa_prompt_pending", "mfa_setup_switch_used"} {
+		if !hasColumn(t, sqdb, "users", col) {
+			t.Fatalf("expected users.%s to exist after migration 017", col)
+		}
+	}
+	if !hasColumn(t, sqdb, "registrations", "mfa_preference") {
+		t.Fatalf("expected registrations.mfa_preference to exist after migration 017")
+	}
+
+	type expected struct {
+		userID string
+		want   int
+	}
+	for _, tc := range []expected{
+		{userID: "u_no_mfa", want: 1},
+		{userID: "u_totp", want: 0},
+		{userID: "u_webauthn", want: 0},
+		{userID: "u_suspended", want: 0},
+	} {
+		var got int
+		if err := sqdb.QueryRow(`SELECT legacy_mfa_prompt_pending FROM users WHERE id=?`, tc.userID).Scan(&got); err != nil {
+			t.Fatalf("read legacy prompt for %s: %v", tc.userID, err)
+		}
+		if got != tc.want {
+			t.Fatalf("unexpected legacy prompt for %s: got=%d want=%d", tc.userID, got, tc.want)
+		}
+	}
+}
+
+func TestMFAUsabilityTrustedDevicesMigrationAddsBackupAndTrustedDeviceSchema(t *testing.T) {
+	sqdb, err := OpenSQLite(filepath.Join(t.TempDir(), "mfa018.db"), 1, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqdb.Close() })
+
+	for _, migration := range []string{
+		filepath.Join("..", "..", "migrations", "001_init.sql"),
+		filepath.Join("..", "..", "migrations", "002_users_mail_login.sql"),
+		filepath.Join("..", "..", "migrations", "003_cleanup_rejected_users.sql"),
+		filepath.Join("..", "..", "migrations", "004_cleanup_rejected_users_casefold.sql"),
+		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
+		filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql"),
+		filepath.Join("..", "..", "migrations", "007_mail_accounts.sql"),
+		filepath.Join("..", "..", "migrations", "008_mail_index.sql"),
+		filepath.Join("..", "..", "migrations", "009_preferences_and_search.sql"),
+		filepath.Join("..", "..", "migrations", "010_drafts_schedule.sql"),
+		filepath.Join("..", "..", "migrations", "011_rules_sieve.sql"),
+		filepath.Join("..", "..", "migrations", "012_mfa_totp_webauthn.sql"),
+		filepath.Join("..", "..", "migrations", "013_crypto_keys.sql"),
+		filepath.Join("..", "..", "migrations", "014_session_management.sql"),
+		filepath.Join("..", "..", "migrations", "015_sync_state.sql"),
+		filepath.Join("..", "..", "migrations", "016_quota_and_health.sql"),
+		filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql"),
+		filepath.Join("..", "..", "migrations", "018_mfa_usability_trusted_devices.sql"),
+	} {
+		if err := ApplyMigrationFile(sqdb, migration); err != nil {
+			t.Fatalf("apply migration %s: %v", migration, err)
+		}
+	}
+
+	if !hasColumn(t, sqdb, "users", "mfa_backup_completed") {
+		t.Fatalf("expected users.mfa_backup_completed to exist after migration 018")
+	}
+	if !hasColumn(t, sqdb, "mfa_trusted_devices", "token_hash") {
+		t.Fatalf("expected mfa_trusted_devices.token_hash to exist after migration 018")
+	}
+
+	now := time.Now().UTC()
+	_, err = sqdb.Exec(
+		`INSERT INTO users(id,email,password_hash,role,status,provision_state,created_at,mfa_preference,legacy_mfa_prompt_pending,mfa_backup_completed)
+		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"u018", "u018@example.com", "h", "user", "active", "ok", now, "none", 0, 1,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqdb.Exec(
+		`INSERT INTO mfa_trusted_devices(id,user_id,token_hash,ua_hash,ip_hint,device_label,created_at,expires_at)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		"td018", "u018", "hash018", "ua018", "127.0.0.1", "Laptop", now, now.Add(30*24*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("insert trusted device: %v", err)
+	}
+}

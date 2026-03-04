@@ -17,6 +17,7 @@ import (
 	"mailclient/internal/service"
 	"mailclient/internal/store"
 	"mailclient/internal/update"
+	"mailclient/internal/workers"
 )
 
 func main() {
@@ -61,6 +62,18 @@ func main() {
 		"migrations/004_cleanup_rejected_users_casefold.sql",
 		"migrations/005_admin_query_indexes.sql",
 		"migrations/006_users_recovery_email.sql",
+		"migrations/007_mail_accounts.sql",
+		"migrations/008_mail_index.sql",
+		"migrations/009_preferences_and_search.sql",
+		"migrations/010_drafts_schedule.sql",
+		"migrations/011_rules_sieve.sql",
+		"migrations/012_mfa_totp_webauthn.sql",
+		"migrations/013_crypto_keys.sql",
+		"migrations/014_session_management.sql",
+		"migrations/015_sync_state.sql",
+		"migrations/016_quota_and_health.sql",
+		"migrations/017_mfa_onboarding_flags.sql",
+		"migrations/018_mfa_usability_trusted_devices.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)
@@ -86,6 +99,7 @@ func main() {
 	sender := notify.NewSender(cfg)
 
 	svc := service.New(cfg, st, mailClient, provisioner, sender)
+	workers.StartMailWorkers(context.Background(), cfg, st)
 	r := api.NewRouter(cfg, svc)
 
 	hsrv := &http.Server{
