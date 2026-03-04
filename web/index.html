@@ -52,7 +52,11 @@
             <form id="form-login" class="stack auth-form">
               <label>Email <input name="email" type="email" required autocomplete="username"></label>
               <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
-              <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
+              <div class="auth-login-actions">
+                <button class="cmd-btn cmd-btn--primary" type="submit">Access Mail</button>
+                <button id="btn-passkey-login" class="cmd-btn" type="button">Sign In With Passkey</button>
+              </div>
+              <p id="passkey-login-hint" class="hint">Passkey login availability is being checked.</p>
             </form>
           </section>
 
@@ -96,11 +100,23 @@
 
           <section id="auth-security-panel" class="auth-security hidden" aria-labelledby="auth-security-title">
             <h3 id="auth-security-title">Security Settings</h3>
-            <p class="hint">Manage trusted devices used to skip MFA for 30 days on this account.</p>
+            <div class="auth-security-block">
+              <h4>Passkeys</h4>
+              <p id="passkeys-note" class="hint">Manage passkeys enrolled for MFA and passkey sign-in.</p>
+              <div id="passkeys-list" class="passkeys-list"></div>
+              <div class="actions">
+                <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Passkeys</button>
+                <button id="btn-passkeys-add" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Add Passkey</button>
+              </div>
+            </div>
+            <div class="auth-security-block">
+              <h4>Trusted Devices</h4>
+              <p class="hint">Trusted devices skip MFA for 30 days on this account.</p>
             <div id="trusted-devices-list" class="trusted-devices-list"></div>
             <div class="actions">
               <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
               <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
+            </div>
             </div>
           </section>
         </article>

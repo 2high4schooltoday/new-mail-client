@@ -8,6 +8,7 @@ const state = {
     lastUnauthorizedAtMs: 0,
     lastUnauthorizedCode: "",
     resetCapabilities: null,
+    capabilities: null,
     recoveryPromptShownForSession: false,
     legacyMFAOfferShownForSession: false,
     mfaFlowPromise: null,
@@ -111,6 +112,9 @@ const el = {
   authPaneLogin: document.getElementById("auth-pane-login"),
   authPaneRegister: document.getElementById("auth-pane-register"),
   authPaneReset: document.getElementById("auth-pane-reset"),
+  loginForm: document.getElementById("form-login"),
+  btnPasskeyLogin: document.getElementById("btn-passkey-login"),
+  passkeyLoginHint: document.getElementById("passkey-login-hint"),
   resetCapabilityNote: document.getElementById("reset-capability-note"),
   mailboxes: document.getElementById("mailboxes"),
   messages: document.getElementById("messages"),
@@ -151,6 +155,10 @@ const el = {
   registerMFAHelp: document.getElementById("register-mfa-help"),
   registerSubmit: document.querySelector("#form-register button[type='submit']"),
   authSecurityPanel: document.getElementById("auth-security-panel"),
+  passkeysNote: document.getElementById("passkeys-note"),
+  passkeysList: document.getElementById("passkeys-list"),
+  btnPasskeysRefresh: document.getElementById("btn-passkeys-refresh"),
+  btnPasskeysAdd: document.getElementById("btn-passkeys-add"),
   trustedDevicesList: document.getElementById("trusted-devices-list"),
   btnTrustedDevicesRefresh: document.getElementById("btn-trusted-devices-refresh"),
   btnTrustedDevicesRevokeAll: document.getElementById("btn-trusted-devices-revoke-all"),
@@ -358,6 +366,89 @@ function updateRegisterMFAHelp() {
   el.registerMFAHelp.textContent = "You can enable MFA later in Security settings.";
 }
 
+function authCapabilityReasonMessage(reason, fallback = "Passkeys are currently unavailable.") {
+  switch (String(reason || "").trim()) {
+    case "mailsec_unavailable":
+      return "Passkeys are unavailable because mailsec is not running.";
+    case "insecure_origin":
+      return "Passkeys require HTTPS, or localhost for local development.";
+    case "rp_mismatch":
+      return "Passkeys are blocked because RP ID does not match this host.";
+    case "origin_mismatch":
+      return "Passkeys are blocked because this origin is not allowed.";
+    case "passwordless_disabled":
+      return "Passkey sign-in is disabled by server feature flag.";
+    default:
+      return fallback;
+  }
+}
+
+function authCapabilities() {
+  if (!state.auth.capabilities || typeof state.auth.capabilities !== "object") {
+    return {};
+  }
+  return state.auth.capabilities;
+}
+
+function renderPasskeyLoginUI() {
+  if (!el.btnPasskeyLogin || !el.passkeyLoginHint) {
+    return;
+  }
+  const caps = authCapabilities();
+  const browserSupported = supportsWebAuthn();
+  const available = browserSupported && !!caps.passkey_passwordless_available;
+  el.btnPasskeyLogin.disabled = !available;
+  if (available) {
+    const usernameless = caps.passkey_usernameless_enabled !== false;
+    el.passkeyLoginHint.textContent = usernameless
+      ? "Passkey login is enabled. Email is optional."
+      : "Passkey login is enabled. Enter email before using passkey.";
+    return;
+  }
+  if (!browserSupported) {
+    el.passkeyLoginHint.textContent = "Passkey login is not supported by this browser.";
+    return;
+  }
+  el.passkeyLoginHint.textContent = authCapabilityReasonMessage(
+    caps.reason,
+    "Passkey login is not available on this server.",
+  );
+}
+
+function renderPasskeySecurityNote() {
+  if (!el.passkeysNote) {
+    return;
+  }
+  const caps = authCapabilities();
+  if (caps.passkey_mfa_available) {
+    el.passkeysNote.textContent = "Passkey MFA is available. You can add, rename, and delete credentials.";
+    return;
+  }
+  el.passkeysNote.textContent = authCapabilityReasonMessage(
+    caps.reason,
+    "Passkey MFA is currently unavailable.",
+  );
+}
+
+async function loadAuthCapabilities() {
+  try {
+    const payload = await api("/api/v1/public/auth/capabilities", { logErrors: false });
+    state.auth.capabilities = payload && typeof payload === "object" ? payload : {};
+  } catch {
+    state.auth.capabilities = {};
+  }
+  renderPasskeyLoginUI();
+  renderPasskeySecurityNote();
+  if (el.btnPasskeysAdd) {
+    const caps = authCapabilities();
+    el.btnPasskeysAdd.disabled = !supportsWebAuthn() || !caps.passkey_mfa_available;
+  }
+  if (state.user) {
+    void loadPasskeyCredentials();
+  }
+  return state.auth.capabilities;
+}
+
 function safeDomID(prefix, raw, fallback = "item") {
   const stem = String(raw || "")
     .toLowerCase()
@@ -417,13 +508,19 @@ function isProtectedAPIPath(path) {
   if (path.startsWith("/api/v1/public/")) return false;
   if (path.startsWith("/api/v1/setup/")) return false;
   if (path === "/api/v1/login" || path === "/api/v1/register" || path === "/api/v1/logout") return false;
+  if (path === "/api/v1/login/passkey/begin" || path === "/api/v1/login/passkey/finish") return false;
   if (path.startsWith("/api/v1/password/reset/")) return false;
   if (path === "/api/v2/login") return false;
+  if (path === "/api/v2/login/passkey/begin" || path === "/api/v2/login/passkey/finish") return false;
   return path.startsWith("/api/v1/") || path.startsWith("/api/v2/");
 }
 
 function isSessionErrorCode(code) {
-  return code === "session_missing" || code === "session_invalid" || code === "unauthorized";
+  return code === "session_missing"
+    || code === "session_invalid"
+    || code === "unauthorized"
+    || code === "mail_secret_required"
+    || code === "mail_auth_missing";
 }
 
 function isMFAStageCode(code) {
@@ -433,6 +530,9 @@ function isMFAStageCode(code) {
 function reauthMessageForCode(code) {
   if (code === "session_missing") {
     return "Session cookie is missing. Check HTTP/HTTPS cookie policy, then sign in again.";
+  }
+  if (code === "mail_secret_required" || code === "mail_auth_missing") {
+    return "Mailbox password is missing for this session. Sign in again or unlock mailbox credentials.";
   }
   return "Session is invalid or expired. Sign in again.";
 }
@@ -446,6 +546,8 @@ function routeToAuthWithMessage(message, code = "") {
   state.auth.legacyMFAOfferShownForSession = false;
   state.auth.mfaFlowPromise = null;
   state.user = null;
+  renderPasskeyCredentials([]);
+  renderTrustedDevices([]);
   closeComposeOverlay(false);
   closeUIModal({ confirmed: false, value: "" });
   closeMFAModal({ action: "cancel", value: "" });
@@ -454,6 +556,7 @@ function routeToAuthWithMessage(message, code = "") {
     setActiveTab(el.tabAuth);
     showView("auth");
     setActiveAuthPane("login");
+    void loadAuthCapabilities();
     void initCaptchaUI();
   }
   if (shouldAnnounce) {
@@ -1465,6 +1568,33 @@ async function runWebAuthnVerifyFlow(rememberDevice = true) {
   });
 }
 
+async function runPasskeyPrimaryLoginFlow() {
+  if (!supportsWebAuthn()) {
+    throw new Error("Passkey login is not supported in this browser.");
+  }
+  const caps = authCapabilities();
+  if (!caps.passkey_passwordless_available) {
+    throw new Error(authCapabilityReasonMessage(caps.reason, "Passkey login is not available."));
+  }
+  const emailValue = String(el.loginForm?.elements?.email?.value || "").trim().toLowerCase();
+  const begin = await api("/api/v1/login/passkey/begin", {
+    method: "POST",
+    json: emailValue ? { email: emailValue } : {},
+  });
+  const options = normalizePublicKeyGetOptions(begin);
+  const credential = await navigator.credentials.get({ publicKey: options });
+  if (!credential) {
+    throw new Error("Passkey login was cancelled.");
+  }
+  return api("/api/v1/login/passkey/finish", {
+    method: "POST",
+    json: Object.assign({}, credentialToPayload(credential), {
+      challenge_id: String(begin.challenge_id || ""),
+      challenge: String(begin.challenge || ""),
+    }),
+  });
+}
+
 async function runMFASetupStage(stage) {
   const method = String(stage.mfa_setup_method || stage.mfa_preference || "").toLowerCase();
   const setupStep = String(stage.mfa_setup_step || "method").toLowerCase();
@@ -2269,6 +2399,119 @@ async function loadTrustedDevices() {
   }
 }
 
+function formatDateTimeOrNA(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "n/a";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+}
+
+function renderPasskeyCredentials(items) {
+  if (!el.passkeysList) return;
+  el.passkeysList.replaceChildren();
+  const rows = Array.isArray(items) ? items : [];
+  if (rows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "No passkeys enrolled.";
+    el.passkeysList.appendChild(empty);
+    return;
+  }
+  for (const item of rows) {
+    const card = document.createElement("article");
+    card.className = "passkey-item";
+
+    const label = document.createElement("strong");
+    label.textContent = String(item.name || "Passkey");
+    card.appendChild(label);
+
+    const meta = document.createElement("p");
+    meta.className = "passkey-meta";
+    const created = `Created: ${formatDateTimeOrNA(item.created_at)}`;
+    const lastUsed = `Last used: ${formatDateTimeOrNA(item.last_used_at)}`;
+    const credID = String(item.credential_id || "").trim();
+    const suffix = credID ? `Credential: ${credID.slice(0, 16)}${credID.length > 16 ? "..." : ""}` : "";
+    meta.textContent = [created, lastUsed, suffix].filter(Boolean).join(" | ");
+    card.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "cmd-btn cmd-btn--dense";
+    rename.textContent = "Rename";
+    rename.addEventListener("click", async () => {
+      const nextName = String(await showPromptModal({
+        title: "Rename Passkey",
+        body: "Set a new label for this passkey.",
+        label: "Passkey name",
+        defaultValue: String(item.name || ""),
+        confirmText: "Save",
+      }) || "").trim();
+      if (!nextName) {
+        return;
+      }
+      try {
+        await api(`/api/v2/security/mfa/webauthn/${encodeURIComponent(item.id)}`, {
+          method: "PATCH",
+          json: { name: nextName },
+        });
+        setStatus("Passkey renamed.", "ok");
+        await loadPasskeyCredentials();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to rename passkey."), "error");
+      }
+    });
+    actions.appendChild(rename);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "cmd-btn cmd-btn--dense cmd-btn--danger";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", async () => {
+      const confirmed = await showConfirmModal({
+        title: "Delete passkey?",
+        body: "This passkey will no longer be usable for MFA or passwordless sign-in.",
+        confirmText: "Delete",
+      });
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await api(`/api/v2/security/mfa/webauthn/${encodeURIComponent(item.id)}`, {
+          method: "DELETE",
+        });
+        setStatus("Passkey deleted.", "ok");
+        await loadPasskeyCredentials();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to delete passkey."), "error");
+      }
+    });
+    actions.appendChild(remove);
+
+    card.appendChild(actions);
+    el.passkeysList.appendChild(card);
+  }
+}
+
+async function loadPasskeyCredentials() {
+  if (!state.user || !el.passkeysList) return;
+  const caps = authCapabilities();
+  if (!caps.passkey_mfa_available) {
+    renderPasskeyCredentials([]);
+    return;
+  }
+  try {
+    const payload = await api("/api/v2/security/mfa/webauthn", { logErrors: false });
+    renderPasskeyCredentials(Array.isArray(payload.items) ? payload.items : []);
+  } catch (err) {
+    renderPasskeyCredentials([]);
+    setStatus(formatAPIError(err, "Failed to load passkeys."), "error");
+  }
+}
+
 function requireSelectedMessage() {
   if (!state.selectedMessage) {
     throw new Error("Select a message first");
@@ -2650,6 +2893,74 @@ async function enterSetupIfRequired() {
   return true;
 }
 
+async function unlockMailSecretForSession() {
+  let errorHint = "";
+  while (true) {
+    const password = await showPromptModal({
+      title: "Unlock Mailbox Password",
+      body: errorHint || "Enter your mailbox password once to unlock message access for this passkey session.",
+      label: "Mailbox Password",
+      inputType: "password",
+      confirmText: "Unlock",
+      cancelText: "Cancel",
+    });
+    if (!password) {
+      throw new Error("Mailbox password is required before mail can be loaded.");
+    }
+    try {
+      await api("/api/v1/session/mail-secret/unlock", {
+        method: "POST",
+        json: { password },
+        skipUnauthorizedHandling: true,
+        skipMFAHandling: true,
+      });
+      setStatus("Mailbox password unlocked for this session.", "ok");
+      return;
+    } catch (err) {
+      if (err.code === "invalid_credentials") {
+        errorHint = "Mailbox password was not accepted. Try again.";
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function ensureMailSecretUnlocked(payload = null) {
+  if (!payload || payload.mail_secret_required !== true) {
+    return;
+  }
+  await unlockMailSecretForSession();
+}
+
+async function finalizePrimaryLogin(loginPayload) {
+  const loginStage = authStageFromPayload(loginPayload);
+  if (loginStage.auth_stage !== "authenticated") {
+    await ensureMFAStageAuthenticated(loginStage);
+  }
+  await ensureMailSecretUnlocked(loginPayload);
+  let session;
+  try {
+    session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
+  } catch (err) {
+    if (isSessionErrorCode(err.code)) {
+      routeToAuthWithMessage("Login accepted but browser session cookie was not established. Check HTTP/HTTPS cookie policy.", err.code);
+      return false;
+    }
+    throw err;
+  }
+  if (session?.user?.mail_secret_required === true) {
+    await unlockMailSecretForSession();
+    session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
+  }
+  await loadMailboxes();
+  await loadMessages();
+  setActiveTab(el.tabMail);
+  showView("mail");
+  setActiveMailPane("messages");
+  return true;
+}
+
 async function refreshSession(opts = {}) {
   try {
     const me = await api("/api/v1/me", {
@@ -2663,6 +2974,7 @@ async function refreshSession(opts = {}) {
     await promptRecoveryEmailIfNeeded();
     await promptLegacyMFAIfNeeded();
     await loadTrustedDevices();
+    await loadPasskeyCredentials();
     return { ok: true, user: me };
   } catch (err) {
     state.auth.recoveryPromptShownForSession = false;
@@ -3682,7 +3994,10 @@ function bindUI() {
   setActiveAdminSection(state.ui.activeAdminSection || "update");
   setActiveMailPane(state.ui.activeMailPane || "mailboxes", { focus: false });
   if (el.authModeLogin) {
-    el.authModeLogin.onclick = () => setActiveAuthPane("login");
+    el.authModeLogin.onclick = () => {
+      setActiveAuthPane("login");
+      void loadAuthCapabilities();
+    };
   }
   if (el.authModeRegister) {
     el.authModeRegister.onclick = () => {
@@ -3950,48 +4265,47 @@ function bindUI() {
     closeOpenRowMenus(null);
   });
 
-  document.getElementById("form-login").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      const loginPayload = await api("/api/v1/login", {
-        method: "POST",
-        json: {
-          email: fd.get("email"),
-          password: fd.get("password"),
-        },
-      });
-      const loginStage = authStageFromPayload(loginPayload);
-      if (loginStage.auth_stage !== "authenticated") {
-        await ensureMFAStageAuthenticated(loginStage);
-      }
+  if (el.loginForm) {
+    el.loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
       try {
-        await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
+        const loginPayload = await api("/api/v1/login", {
+          method: "POST",
+          json: {
+            email: fd.get("email"),
+            password: fd.get("password"),
+          },
+        });
+        await finalizePrimaryLogin(loginPayload);
       } catch (err) {
-        if (isSessionErrorCode(err.code)) {
-          routeToAuthWithMessage("Login accepted but browser session cookie was not established. Check HTTP/HTTPS cookie policy.", err.code);
+        if (err.code === "setup_required") {
+          await enterSetupIfRequired();
           return;
         }
-        throw err;
+        if (err.code === "pam_verifier_unavailable") {
+          const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
+          setStatus(`PAM/IMAP auth backend is unreachable. Check IMAP connectivity or switch local dev to SQL auth mode.${requestRef}`, "error");
+          return;
+        }
+        setStatus(err.message, "error");
       }
-      await loadMailboxes();
-      await loadMessages();
-      setActiveTab(el.tabMail);
-      showView("mail");
-      setActiveMailPane("messages");
-    } catch (err) {
-      if (err.code === "setup_required") {
-        await enterSetupIfRequired();
-        return;
+    });
+  }
+  if (el.btnPasskeyLogin) {
+    el.btnPasskeyLogin.addEventListener("click", async () => {
+      try {
+        const loginPayload = await runPasskeyPrimaryLoginFlow();
+        await finalizePrimaryLogin(loginPayload);
+      } catch (err) {
+        if (err.code === "setup_required") {
+          await enterSetupIfRequired();
+          return;
+        }
+        setStatus(formatAPIError(err, "Passkey login failed."), "error");
       }
-      if (err.code === "pam_verifier_unavailable") {
-        const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
-        setStatus(`PAM/IMAP auth backend is unreachable. Check IMAP connectivity or switch local dev to SQL auth mode.${requestRef}`, "error");
-        return;
-      }
-      setStatus(err.message, "error");
-    }
-  });
+    });
+  }
 
   document.getElementById("form-register").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -4050,6 +4364,33 @@ function bindUI() {
   }
   updateRegisterMFAHelp();
 
+  if (el.btnPasskeysRefresh) {
+    el.btnPasskeysRefresh.addEventListener("click", async () => {
+      await loadPasskeyCredentials();
+      setStatus("Passkeys refreshed.", "ok");
+    });
+  }
+  if (el.btnPasskeysAdd) {
+    el.btnPasskeysAdd.addEventListener("click", async () => {
+      if (!state.user) return;
+      if (!supportsWebAuthn()) {
+        setStatus("Passkey enrollment is not supported in this browser.", "error");
+        return;
+      }
+      try {
+        await runWebAuthnSetupFlow();
+        await refreshSession({
+          throwOnFail: true,
+          skipUnauthorizedHandling: true,
+          skipMFAHandling: true,
+        });
+        await loadPasskeyCredentials();
+        setStatus("Passkey enrolled.", "ok");
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to enroll passkey."), "error");
+      }
+    });
+  }
   if (el.btnTrustedDevicesRefresh) {
     el.btnTrustedDevicesRefresh.addEventListener("click", async () => {
       await loadTrustedDevices();
@@ -4240,9 +4581,11 @@ function bindUI() {
     setActiveTab(el.tabAuth);
     showView("auth");
     setActiveAuthPane("login");
+    void loadAuthCapabilities();
     void initCaptchaUI();
     if (state.user) {
       void loadTrustedDevices();
+      void loadPasskeyCredentials();
     }
   };
 
@@ -4258,6 +4601,23 @@ function bindUI() {
         });
       } catch (err) {
         presentAPIError(err, "Multi-factor authentication setup is required before opening mail.");
+        return;
+      }
+    }
+    if (state.user.mail_secret_required === true) {
+      try {
+        await unlockMailSecretForSession();
+        const refreshed = await refreshSession({
+          throwOnFail: true,
+          skipUnauthorizedHandling: true,
+          skipMFAHandling: true,
+        });
+        if (!refreshed.ok || refreshed.user?.mail_secret_required === true) {
+          routeToAuthWithMessage("Mailbox password unlock failed. Sign in again.", "mail_secret_required");
+          return;
+        }
+      } catch (err) {
+        presentAPIError(err, "Mailbox password is required before opening mail.");
         return;
       }
     }
@@ -4311,6 +4671,8 @@ function bindUI() {
     state.auth.mfaFlowPromise = null;
     state.user = null;
     state.selectedMessage = null;
+    renderPasskeyCredentials([]);
+    renderTrustedDevices([]);
     closeComposeOverlay(false);
     closeMFAModal({ action: "cancel", value: "" });
     applyNavVisibility();
@@ -4371,6 +4733,7 @@ async function bootstrap() {
   bindUI();
   await initCaptchaUI();
   await loadResetCapabilities();
+  await loadAuthCapabilities();
 
   try {
     if (await enterSetupIfRequired()) {
@@ -4386,6 +4749,7 @@ async function bootstrap() {
     setActiveTab(el.tabAuth);
     showView("auth");
     setActiveAuthPane("login");
+    await loadAuthCapabilities();
     await initCaptchaUI();
     setStatus("Authentication required.");
     return;
@@ -4405,6 +4769,24 @@ async function bootstrap() {
       }
     } catch (err) {
       routeToAuthWithMessage(formatAPIError(err, "Multi-factor authentication is required to continue."), "mfa_required");
+      return;
+    }
+  }
+
+  if (state.user && state.user.mail_secret_required === true) {
+    try {
+      await unlockMailSecretForSession();
+      const refreshed = await refreshSession({
+        skipUnauthorizedHandling: true,
+        throwOnFail: true,
+        skipMFAHandling: true,
+      });
+      if (!refreshed.ok || refreshed.user?.mail_secret_required === true) {
+        routeToAuthWithMessage("Mailbox password unlock failed. Sign in again.", "mail_secret_required");
+        return;
+      }
+    } catch (err) {
+      routeToAuthWithMessage(formatAPIError(err, "Mailbox password is required to continue."), "mail_secret_required");
       return;
     }
   }

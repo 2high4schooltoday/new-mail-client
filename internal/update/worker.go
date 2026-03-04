@@ -196,27 +196,51 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if err := copyDir(filepath.Join(payloadRoot, "migrations"), filepath.Join(stageDir, "migrations")); err != nil {
 		return "", false, err
 	}
+	mailSecPayloadPath := filepath.Join(payloadRoot, "mailclient-mailsec-service")
+	mailSecPayloadPresent := false
+	if _, err := os.Stat(mailSecPayloadPath); err == nil {
+		if err := copyFile(mailSecPayloadPath, filepath.Join(stageDir, "mailclient-mailsec-service"), 0o755); err != nil {
+			return "", false, err
+		}
+		mailSecPayloadPresent = true
+	} else if !os.IsNotExist(err) {
+		return "", false, err
+	}
+	mailSecUnitPath := filepath.Join(payloadRoot, "deploy", "mailclient-mailsec.service")
+	mailSecUnitPresent := false
+	if _, err := os.Stat(mailSecUnitPath); err == nil {
+		mailSecUnitPresent = true
+	} else if !os.IsNotExist(err) {
+		return "", false, err
+	}
 
 	prevBin := filepath.Join(m.cfg.UpdateInstallDir, ".prev-mailclient-"+sanitizePathToken(runID))
 	prevWeb := filepath.Join(m.cfg.UpdateInstallDir, ".prev-web-"+sanitizePathToken(runID))
 	prevMig := filepath.Join(m.cfg.UpdateInstallDir, ".prev-migrations-"+sanitizePathToken(runID))
+	prevMailSec := filepath.Join(m.cfg.UpdateInstallDir, ".prev-mailsec-"+sanitizePathToken(runID))
 
 	currentBin := filepath.Join(m.cfg.UpdateInstallDir, "mailclient")
 	currentWeb := filepath.Join(m.cfg.UpdateInstallDir, "web")
 	currentMig := filepath.Join(m.cfg.UpdateInstallDir, "migrations")
+	currentMailSec := filepath.Join(m.cfg.UpdateInstallDir, "mailclient-mailsec-service")
 	stageBin := filepath.Join(stageDir, "mailclient")
 	stageWeb := filepath.Join(stageDir, "web")
 	stageMig := filepath.Join(stageDir, "migrations")
+	stageMailSec := filepath.Join(stageDir, "mailclient-mailsec-service")
 
-	for _, p := range []string{prevBin, prevWeb, prevMig} {
+	for _, p := range []string{prevBin, prevWeb, prevMig, prevMailSec} {
 		_ = os.RemoveAll(p)
 	}
 
 	swapped := false
+	mailSecSwapped := false
 	rollback := func() error {
 		_ = os.RemoveAll(currentWeb)
 		_ = os.RemoveAll(currentMig)
 		_ = os.Remove(currentBin)
+		if mailSecSwapped {
+			_ = os.Remove(currentMailSec)
+		}
 		if _, err := os.Stat(prevWeb); err == nil {
 			if err := os.Rename(prevWeb, currentWeb); err != nil {
 				return err
@@ -230,6 +254,13 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		if _, err := os.Stat(prevBin); err == nil {
 			if err := os.Rename(prevBin, currentBin); err != nil {
 				return err
+			}
+		}
+		if mailSecSwapped {
+			if _, err := os.Stat(prevMailSec); err == nil {
+				if err := os.Rename(prevMailSec, currentMailSec); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -246,6 +277,13 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		_ = rollback()
 		return "", false, err
 	}
+	if mailSecPayloadPresent {
+		if err := swapPathOptional(currentMailSec, stageMailSec, prevMailSec); err != nil {
+			_ = rollback()
+			return "", false, err
+		}
+		mailSecSwapped = true
+	}
 	swapped = true
 
 	if err := chownRuntimeArtifacts(m.cfg.UpdateInstallDir); err != nil {
@@ -253,6 +291,29 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 			return "", false, fmt.Errorf("chown failed: %v; rollback failed: %v", err, rbErr)
 		}
 		return "", true, err
+	}
+	if mailSecUnitPresent {
+		dst := filepath.Join(m.cfg.UpdateSystemdUnitDir, "mailclient-mailsec.service")
+		if err := copyFile(mailSecUnitPath, dst, 0o644); err != nil {
+			if rbErr := rollback(); rbErr != nil {
+				return "", false, fmt.Errorf("mailsec unit install failed: %v; rollback failed: %v", err, rbErr)
+			}
+			return "", true, err
+		}
+		if err := runCmd(ctx, "systemctl", "daemon-reload"); err != nil {
+			if rbErr := rollback(); rbErr != nil {
+				return "", false, fmt.Errorf("mailsec daemon-reload failed: %v; rollback failed: %v", err, rbErr)
+			}
+			return "", true, err
+		}
+	}
+	if mailSecPayloadPresent || mailSecUnitPresent {
+		if err := runCmd(ctx, "systemctl", "enable", "--now", "mailclient-mailsec"); err != nil {
+			if rbErr := rollback(); rbErr != nil {
+				return "", false, fmt.Errorf("mailsec enable failed: %v; rollback failed: %v", err, rbErr)
+			}
+			return "", true, err
+		}
 	}
 	if err := runCmd(ctx, "systemctl", "restart", m.cfg.UpdateServiceName); err != nil {
 		if rbErr := rollback(); rbErr != nil {
@@ -277,6 +338,7 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		return release.TagName, false, err
 	}
 	_ = os.Rename(prevBin, filepath.Join(backupDest, "mailclient"))
+	_ = os.Rename(prevMailSec, filepath.Join(backupDest, "mailclient-mailsec-service"))
 	_ = os.Rename(prevWeb, filepath.Join(backupDest, "web"))
 	_ = os.Rename(prevMig, filepath.Join(backupDest, "migrations"))
 	trimBackups(backupsDir(m.cfg), m.cfg.UpdateBackupKeep)
@@ -562,6 +624,28 @@ func swapPath(current, staged, previous string) error {
 	return nil
 }
 
+func swapPathOptional(current, staged, previous string) error {
+	currentExists := true
+	if _, err := os.Stat(current); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		currentExists = false
+	}
+	if currentExists {
+		if err := os.Rename(current, previous); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(staged, current); err != nil {
+		if currentExists {
+			_ = os.Rename(previous, current)
+		}
+		return err
+	}
+	return nil
+}
+
 func runCmd(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
@@ -637,6 +721,12 @@ func chownRuntimeArtifacts(installDir string) error {
 		filepath.Join(installDir, "mailclient"),
 		filepath.Join(installDir, "web"),
 		filepath.Join(installDir, "migrations"),
+	}
+	mailSecPath := filepath.Join(installDir, "mailclient-mailsec-service")
+	if _, err := os.Stat(mailSecPath); err == nil {
+		paths = append(paths, mailSecPath)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	for _, p := range paths {
 		if err := chownRecursive(p, uid, gid); err != nil {

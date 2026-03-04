@@ -1592,6 +1592,23 @@ func (s *Store) GetMFAWebAuthnCredentialByCredentialID(ctx context.Context, user
 	return item, nil
 }
 
+func (s *Store) GetMFAWebAuthnCredentialByCredentialIDAnyUser(ctx context.Context, credentialID string) (models.MFAWebAuthnCredential, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id,user_id,credential_id,public_key,sign_count,transports_json,name,created_at,last_used_at
+		 FROM mfa_webauthn_credentials
+		 WHERE credential_id=?`,
+		credentialID,
+	)
+	item, err := scanMFAWebAuthnCredential(row)
+	if err == sql.ErrNoRows {
+		return models.MFAWebAuthnCredential{}, ErrNotFound
+	}
+	if err != nil {
+		return models.MFAWebAuthnCredential{}, err
+	}
+	return item, nil
+}
+
 func (s *Store) UpsertMFAWebAuthnCredential(ctx context.Context, in models.MFAWebAuthnCredential) (models.MFAWebAuthnCredential, error) {
 	now := time.Now().UTC()
 	if strings.TrimSpace(in.ID) == "" {
@@ -1651,6 +1668,29 @@ func (s *Store) TouchMFAWebAuthnCredential(ctx context.Context, userID, id strin
 
 func (s *Store) DeleteMFAWebAuthnCredential(ctx context.Context, userID, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM mfa_webauthn_credentials WHERE user_id=? AND id=?`, userID, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RenameMFAWebAuthnCredential(ctx context.Context, userID, id, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("credential name is required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE mfa_webauthn_credentials
+		 SET name=?
+		 WHERE user_id=? AND id=?`,
+		name,
+		userID,
+		id,
+	)
 	if err != nil {
 		return err
 	}

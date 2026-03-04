@@ -107,6 +107,13 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 			comps["smtp"] = map[string]any{"ok": true}
 		}
 
+		authCaps := h.authCapabilities(r)
+		comps["passkey"] = map[string]any{
+			"passkey_mfa_available":          authCaps["passkey_mfa_available"],
+			"passkey_passwordless_available": authCaps["passkey_passwordless_available"],
+			"reason":                         authCaps["reason"],
+		}
+
 		if sqliteOK {
 			ready["status"] = "ready"
 			util.WriteJSON(w, 200, ready)
@@ -119,10 +126,13 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/public/captcha/config", h.PublicCaptchaConfig)
 		r.Get("/public/password-reset/capabilities", h.PublicPasswordResetCapabilities)
+		r.Get("/public/auth/capabilities", h.PublicAuthCapabilities)
 		r.Get("/setup/status", h.SetupStatus)
 		r.With(middleware.RateLimit(h.limiter, "setup_complete", 20, time.Minute, h.cfg.TrustProxy)).Post("/setup/complete", h.SetupComplete)
 		r.With(middleware.RateLimit(h.limiter, "register", 10, time.Minute, h.cfg.TrustProxy)).Post("/register", h.Register)
 		r.With(middleware.RateLimit(h.limiter, "login", 20, time.Minute, h.cfg.TrustProxy)).Post("/login", h.Login)
+		r.With(middleware.RateLimit(h.limiter, "login_passkey_begin_v1", 30, time.Minute, h.cfg.TrustProxy)).Post("/login/passkey/begin", h.V1PasskeyLoginBegin)
+		r.With(middleware.RateLimit(h.limiter, "login_passkey_finish_v1", 30, time.Minute, h.cfg.TrustProxy)).Post("/login/passkey/finish", h.V1PasskeyLoginFinish)
 		r.Post("/logout", h.Logout)
 		r.With(middleware.RateLimit(h.limiter, "reset_request", 10, time.Minute, h.cfg.TrustProxy)).Post("/password/reset/request", h.PasswordResetRequest)
 		r.With(middleware.RateLimit(h.limiter, "reset_confirm_ip", 20, time.Minute, h.cfg.TrustProxy)).Post("/password/reset/confirm", h.PasswordResetConfirm)
@@ -130,6 +140,10 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName, h.cfg.TrustProxy))
 			r.Get("/me", h.Me)
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
+				r.Post("/session/mail-secret/unlock", h.V1SessionMailSecretUnlock)
+			})
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
 				r.Get("/mailboxes", h.ListMailboxes)
@@ -175,12 +189,15 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 	})
 	r.Route("/api/v2", func(r chi.Router) {
 		r.With(middleware.RateLimit(h.limiter, "login_v2", 20, time.Minute, h.cfg.TrustProxy)).Post("/login", h.V2Login)
+		r.With(middleware.RateLimit(h.limiter, "login_passkey_begin_v2", 30, time.Minute, h.cfg.TrustProxy)).Post("/login/passkey/begin", h.V2PasskeyLoginBegin)
+		r.With(middleware.RateLimit(h.limiter, "login_passkey_finish_v2", 30, time.Minute, h.cfg.TrustProxy)).Post("/login/passkey/finish", h.V2PasskeyLoginFinish)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authn(h.svc, h.cfg.SessionCookieName, h.cfg.TrustProxy))
 
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
+				r.Post("/session/mail-secret/unlock", h.V2SessionMailSecretUnlock)
 				r.Post("/mfa/totp/verify", h.V2MFATOTPVerify)
 				r.Post("/mfa/webauthn/begin", h.V2MFAWebAuthnBegin)
 				r.Post("/mfa/webauthn/finish", h.V2MFAWebAuthnFinish)
@@ -195,6 +212,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 			})
 
 			r.Get("/security/mfa/status", h.V2GetMFAStatus)
+			r.Get("/security/mfa/webauthn", h.V2MFAWebAuthnList)
 
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
@@ -252,6 +270,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.Post("/rules/validate", h.V2ValidateRuleScript)
 
 					r.Put("/preferences", h.V2UpdatePreferences)
+					r.Patch("/security/mfa/webauthn/{id}", h.V2MFAWebAuthnRename)
 					r.Delete("/security/mfa/webauthn/{id}", h.V2MFAWebAuthnDelete)
 					r.Post("/security/mfa/trusted-devices/revoke-all", h.V2RevokeAllTrustedDevices)
 					r.Post("/security/mfa/trusted-devices/{id}/revoke", h.V2RevokeTrustedDevice)
@@ -316,6 +335,10 @@ func (h *Handlers) PublicCaptchaConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) PublicPasswordResetCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps := h.svc.PasswordResetCapabilities()
 	util.WriteJSON(w, 200, caps)
+}
+
+func (h *Handlers) PublicAuthCapabilities(w http.ResponseWriter, r *http.Request) {
+	util.WriteJSON(w, 200, h.authCapabilities(r))
 }
 
 func (h *Handlers) SetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -405,7 +428,7 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrfToken := randomToken()
-	_, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
+	sess, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", "cannot finalize setup session", middleware.RequestID(r.Context()))
 		return
@@ -419,6 +442,7 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		"csrf_token": csrfToken,
 	}
 	applyAuthStageFields(out, stage)
+	out["mail_secret_required"] = strings.TrimSpace(sess.MailSecret) == ""
 	util.WriteJSON(w, 200, out)
 }
 
@@ -577,7 +601,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	ip := middleware.ClientIP(r, h.cfg.TrustProxy)
 	_ = h.svc.Store().DeleteRateEvents(r.Context(), ip+"|"+normalizedEmail, "login_failed")
 
-	if _, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user); err != nil {
+	if sess, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user); err != nil {
 		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
 		return
 	} else {
@@ -585,6 +609,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		h.setAuthCookies(w, r, token, csrfToken)
 		payload := map[string]any{"user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken}
 		applyAuthStageFields(payload, stage)
+		payload["mail_secret_required"] = strings.TrimSpace(sess.MailSecret) == ""
 		util.WriteJSON(w, 200, payload)
 		return
 	}
@@ -675,6 +700,7 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 		"status":               u.Status,
 		"recovery_email":       recoveryEmail,
 		"needs_recovery_email": recoveryEmail == "",
+		"mail_secret_required": strings.TrimSpace(sess.MailSecret) == "",
 	}
 	applyAuthStageFields(out, stage)
 	util.WriteJSON(w, 200, out)

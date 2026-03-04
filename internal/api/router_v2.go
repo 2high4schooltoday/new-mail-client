@@ -10,7 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -59,7 +62,7 @@ func (h *Handlers) V2Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrfToken := randomToken()
-	_, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
+	sess, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
 		return
@@ -71,9 +74,362 @@ func (h *Handlers) V2Login(w http.ResponseWriter, r *http.Request) {
 		"role":           user.Role,
 		"csrf_token":     csrfToken,
 		"session_active": true,
+		"mail_secret_required": strings.TrimSpace(sess.MailSecret) == "",
 	}
 	applyAuthStageFields(out, stage)
 	util.WriteJSON(w, 200, out)
+}
+
+func (h *Handlers) V1PasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
+	h.passkeyLoginBegin(w, r)
+}
+
+func (h *Handlers) V2PasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
+	h.passkeyLoginBegin(w, r)
+}
+
+func (h *Handlers) passkeyLoginBegin(w http.ResponseWriter, r *http.Request) {
+	if !h.ensureSetupComplete(w, r) {
+		return
+	}
+	caps := h.authCapabilities(r)
+	if available, _ := caps["passkey_passwordless_available"].(bool); !available {
+		reason := strings.TrimSpace(fmt.Sprintf("%v", caps["reason"]))
+		if reason == "mailsec_unavailable" {
+			util.WriteError(w, http.StatusServiceUnavailable, "mailsec_unavailable", "mailsec service is required for passkey login", middleware.RequestID(r.Context()))
+			return
+		}
+		if reason == "insecure_origin" {
+			util.WriteError(w, http.StatusBadRequest, "webauthn_insecure_origin", "passkey login requires HTTPS or localhost", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, http.StatusServiceUnavailable, "passkey_unavailable", "passkey login is not available", middleware.RequestID(r.Context()))
+		return
+	}
+	webAuthnContext, ok := h.requireWebAuthnContext(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		util.WriteError(w, http.StatusBadRequest, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if !h.cfg.PasskeyUsernamelessEnabled && email == "" {
+		util.WriteError(w, http.StatusBadRequest, "bad_request", "email is required when username-less passkey login is disabled", middleware.RequestID(r.Context()))
+		return
+	}
+
+	_ = h.svc.Store().DeleteSettingsByPrefixOlderThan(r.Context(), passkeyLoginChallengeSettingsPrefix(), time.Now().UTC().Add(-30*time.Minute))
+
+	allowCredentials := make([]map[string]any, 0, 4)
+	allowedCredentialIDs := make([]string, 0, 4)
+	userID := ""
+	if email != "" {
+		if user, err := h.svc.Store().GetUserByEmail(r.Context(), email); err == nil {
+			userID = user.ID
+			creds, err := h.svc.Store().ListMFAWebAuthnCredentials(r.Context(), user.ID)
+			if err == nil {
+				for _, cred := range creds {
+					allowCredentials = append(allowCredentials, map[string]any{
+						"id":         cred.CredentialID,
+						"type":       "public-key",
+						"name":       cred.Name,
+						"transports": parseWebAuthnTransportsJSON(cred.TransportsJSON),
+					})
+					allowedCredentialIDs = append(allowedCredentialIDs, cred.CredentialID)
+				}
+			}
+		}
+	}
+
+	challengeID := uuid.NewString()
+	cookieNonce := randomToken()
+	challenge := randomToken()
+	state := passkeyLoginChallengeState{
+		Challenge:            challenge,
+		RPID:                 webAuthnContext.RPID,
+		Origins:              webAuthnContext.Origins,
+		ExpiresAt:            time.Now().UTC().Add(5 * time.Minute),
+		AttemptCount:         0,
+		MaxAttempts:          5,
+		CookieTokenHash:      trustedDeviceTokenHash(cookieNonce),
+		UserID:               userID,
+		AllowCredentialsJSON: allowedCredentialIDs,
+	}
+	if err := h.storePasskeyLoginChallenge(r.Context(), challengeID, state); err != nil {
+		util.WriteError(w, 500, "webauthn_begin_failed", "cannot persist challenge", middleware.RequestID(r.Context()))
+		return
+	}
+	h.setPasskeyLoginChallengeCookie(w, r, challengeID, cookieNonce, state.ExpiresAt)
+
+	mode := "usernameless"
+	if email != "" {
+		mode = "email_fallback"
+	}
+	beginMeta, _ := json.Marshal(map[string]any{
+		"mode":           mode,
+		"email_provided": email != "",
+	})
+	_ = h.svc.Store().InsertAudit(
+		r.Context(),
+		firstNonEmpty(userID, "anonymous"),
+		"auth.passkey.login.begin",
+		firstNonEmpty(userID, "passkey"),
+		string(beginMeta),
+	)
+	util.WriteJSON(w, 200, map[string]any{
+		"status":       "challenge_created",
+		"mode":         mode,
+		"challenge_id": challengeID,
+		"challenge":    challenge,
+		"timeout_ms":   300000,
+		"rp_id":        webAuthnContext.RPID,
+		"public_key": map[string]any{
+			"challenge":        challenge,
+			"rpId":             webAuthnContext.RPID,
+			"timeout":          300000,
+			"userVerification": "required",
+			"allowCredentials": allowCredentials,
+		},
+		"allow_credentials": allowCredentials,
+	})
+}
+
+func (h *Handlers) V1PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
+	h.passkeyLoginFinish(w, r)
+}
+
+func (h *Handlers) V2PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
+	h.passkeyLoginFinish(w, r)
+}
+
+func (h *Handlers) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
+	if !h.ensureSetupComplete(w, r) {
+		return
+	}
+	caps := h.authCapabilities(r)
+	if available, _ := caps["passkey_passwordless_available"].(bool); !available {
+		util.WriteError(w, http.StatusServiceUnavailable, "passkey_unavailable", "passkey login is not available", middleware.RequestID(r.Context()))
+		return
+	}
+	webAuthnContext, ok := h.requireWebAuthnContext(w, r)
+	if !ok {
+		return
+	}
+
+	challengeID, cookieNonce, ok := h.readPasskeyLoginChallengeCookie(r)
+	if !ok {
+		util.WriteError(w, http.StatusUnauthorized, "webauthn_challenge_invalid", "challenge is missing or expired", middleware.RequestID(r.Context()))
+		return
+	}
+	state, ok, err := h.loadPasskeyLoginChallenge(r.Context(), challengeID)
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_finish_failed", "cannot read challenge state", middleware.RequestID(r.Context()))
+		return
+	}
+	if !ok || time.Now().UTC().After(state.ExpiresAt) {
+		h.clearPasskeyLoginChallengeCookie(w, r)
+		_ = h.deletePasskeyLoginChallenge(r.Context(), challengeID)
+		util.WriteError(w, http.StatusUnauthorized, "webauthn_challenge_invalid", "challenge is missing or expired", middleware.RequestID(r.Context()))
+		return
+	}
+	if subtleConstantCompare(state.CookieTokenHash, trustedDeviceTokenHash(cookieNonce)) != 1 {
+		h.clearPasskeyLoginChallengeCookie(w, r)
+		_ = h.deletePasskeyLoginChallenge(r.Context(), challengeID)
+		util.WriteError(w, http.StatusUnauthorized, "webauthn_challenge_invalid", "challenge is missing or expired", middleware.RequestID(r.Context()))
+		return
+	}
+	state.AttemptCount++
+	if state.MaxAttempts <= 0 {
+		state.MaxAttempts = 5
+	}
+	if state.AttemptCount > state.MaxAttempts {
+		h.clearPasskeyLoginChallengeCookie(w, r)
+		_ = h.deletePasskeyLoginChallenge(r.Context(), challengeID)
+		util.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many requests", middleware.RequestID(r.Context()))
+		return
+	}
+	if err := h.storePasskeyLoginChallenge(r.Context(), challengeID, state); err != nil {
+		util.WriteError(w, 500, "webauthn_finish_failed", "cannot persist challenge state", middleware.RequestID(r.Context()))
+		return
+	}
+
+	var req map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	if payloadChallengeID := strings.TrimSpace(getStringValue(req, "challenge_id")); payloadChallengeID != "" && subtleConstantCompare(payloadChallengeID, challengeID) != 1 {
+		util.WriteError(w, http.StatusUnauthorized, "webauthn_challenge_invalid", "challenge mismatch", middleware.RequestID(r.Context()))
+		return
+	}
+	if payloadChallenge := strings.TrimSpace(getStringValue(req, "challenge")); payloadChallenge != "" && subtleConstantCompare(payloadChallenge, state.Challenge) != 1 {
+		util.WriteError(w, http.StatusUnauthorized, "webauthn_challenge_invalid", "challenge mismatch", middleware.RequestID(r.Context()))
+		return
+	}
+
+	resp := getMapValue(req, "response")
+	credID := getStringValue(req, "credential_id", "raw_id", "rawId", "id")
+	clientDataJSON := getStringValue(resp, "client_data_json", "clientDataJSON")
+	authenticatorData := getStringValue(resp, "authenticator_data", "authenticatorData")
+	signature := getStringValue(resp, "signature")
+	if credID == "" || clientDataJSON == "" || authenticatorData == "" || signature == "" {
+		util.WriteError(w, 400, "bad_request", "credential and response fields are required", middleware.RequestID(r.Context()))
+		return
+	}
+	if !h.cfg.PasskeyUsernamelessEnabled && strings.TrimSpace(state.UserID) == "" {
+		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+		return
+	}
+
+	cred, err := h.svc.Store().GetMFAWebAuthnCredentialByCredentialIDAnyUser(r.Context(), credID)
+	if err != nil {
+		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+		return
+	}
+	if strings.TrimSpace(state.UserID) != "" && subtleConstantCompare(strings.TrimSpace(state.UserID), strings.TrimSpace(cred.UserID)) != 1 {
+		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+		return
+	}
+	if len(state.AllowCredentialsJSON) > 0 {
+		matched := false
+		for _, item := range state.AllowCredentialsJSON {
+			if subtleConstantCompare(strings.TrimSpace(item), strings.TrimSpace(credID)) == 1 {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+			return
+		}
+	}
+
+	user, err := h.svc.Store().GetUserByID(r.Context(), cred.UserID)
+	if err != nil {
+		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+		return
+	}
+	mailsecResult, err := h.callMailSecOperation(r.Context(), "webauthn.assertion.finish", user.ID, map[string]any{
+		"challenge":                     state.Challenge,
+		"rp_id":                         firstNonEmpty(state.RPID, webAuthnContext.RPID),
+		"origins":                       firstNonEmptySlice(state.Origins, webAuthnContext.Origins),
+		"credential_id":                 credID,
+		"client_data_json_b64url":       clientDataJSON,
+		"authenticator_data_b64url":     authenticatorData,
+		"signature_b64url":              signature,
+		"stored_public_key_cose_b64url": cred.PublicKey,
+		"stored_sign_count":             cred.SignCount,
+		"require_user_verification":     true,
+	})
+	if err != nil {
+		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+		return
+	}
+	nextSignCount, signCountOK := getInt64Value(mailsecResult, "sign_count")
+	if !signCountOK || nextSignCount < 0 {
+		util.WriteError(w, 500, "webauthn_finish_failed", "mailsec response missing sign_count", middleware.RequestID(r.Context()))
+		return
+	}
+	if err := h.svc.Store().TouchMFAWebAuthnCredential(r.Context(), cred.UserID, cred.ID, nextSignCount); err != nil {
+		util.WriteError(w, 500, "webauthn_finish_failed", "cannot update credential state", middleware.RequestID(r.Context()))
+		return
+	}
+
+	mailSecret := ""
+	if storedSecret, hasSecret, err := h.svc.Store().GetUserMailSecret(r.Context(), user.ID); err == nil && hasSecret {
+		mailSecret = storedSecret
+	}
+	sessionToken, _, err := h.svc.CreatePasskeySession(
+		r.Context(),
+		user,
+		middleware.ClientIP(r, h.cfg.TrustProxy),
+		r.UserAgent(),
+		mailSecret,
+	)
+	if err != nil {
+		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+		return
+	}
+	csrfToken := randomToken()
+	sess, stage, err := h.resolveLoginStage(r.Context(), w, r, sessionToken, user)
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
+		return
+	}
+	h.setAuthCookies(w, r, sessionToken, csrfToken)
+	h.clearPasskeyLoginChallengeCookie(w, r)
+	_ = h.deletePasskeyLoginChallenge(r.Context(), challengeID)
+
+	meta, _ := json.Marshal(map[string]any{
+		"auth_method": "passkey",
+		"credential":  cred.ID,
+	})
+	_ = h.svc.Store().InsertAudit(r.Context(), user.ID, "auth.passkey.login.finish", user.ID, string(meta))
+
+	out := map[string]any{
+		"user_id":              user.ID,
+		"email":                user.Email,
+		"role":                 user.Role,
+		"csrf_token":           csrfToken,
+		"session_active":       true,
+		"mail_secret_required": strings.TrimSpace(sess.MailSecret) == "",
+	}
+	applyAuthStageFields(out, stage)
+	util.WriteJSON(w, 200, out)
+}
+
+func (h *Handlers) V1SessionMailSecretUnlock(w http.ResponseWriter, r *http.Request) {
+	h.sessionMailSecretUnlock(w, r)
+}
+
+func (h *Handlers) V2SessionMailSecretUnlock(w http.ResponseWriter, r *http.Request) {
+	h.sessionMailSecretUnlock(w, r)
+}
+
+func (h *Handlers) sessionMailSecretUnlock(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.User(r.Context())
+	if !ok {
+		util.WriteError(w, http.StatusUnauthorized, "session_missing", "authentication required", middleware.RequestID(r.Context()))
+		return
+	}
+	sess, ok := middleware.Session(r.Context())
+	if !ok {
+		util.WriteError(w, http.StatusUnauthorized, "session_missing", "authentication required", middleware.RequestID(r.Context()))
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.WriteError(w, http.StatusBadRequest, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	if err := h.svc.UnlockSessionMailSecret(r.Context(), u.ID, sess.ID, req.Password); err != nil {
+		if errors.Is(err, service.ErrPAMVerifierDown) {
+			util.WriteError(w, http.StatusBadGateway, "pam_verifier_unavailable", "cannot validate PAM credentials", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, service.ErrInvalidCredentials) {
+			util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, http.StatusUnauthorized, "session_invalid", "invalid session", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, http.StatusInternalServerError, "mail_secret_unlock_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{
+		"status":               "ok",
+		"mail_secret_required": false,
+	})
 }
 
 func (h *Handlers) V2MFATOTPVerify(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +488,7 @@ func (h *Handlers) V2MFATOTPVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) V2MFAWebAuthnBegin(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.MailSecEnabled {
+	if !h.mailSecRuntimeEnabled() {
 		util.WriteError(w, http.StatusServiceUnavailable, "mailsec_unavailable", "mailsec service is required for webauthn", middleware.RequestID(r.Context()))
 		return
 	}
@@ -151,7 +507,11 @@ func (h *Handlers) V2MFAWebAuthnBegin(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 404, "webauthn_not_enrolled", "no webauthn credentials enrolled", middleware.RequestID(r.Context()))
 		return
 	}
-	rpID, origins := h.webAuthnRPAndOrigins(r)
+	webAuthnContext, ok := h.requireWebAuthnContext(w, r)
+	if !ok {
+		return
+	}
+	rpID, origins := webAuthnContext.RPID, webAuthnContext.Origins
 	challenge := randomToken()
 	state := webAuthnChallengeState{
 		UserID:    u.ID,
@@ -191,8 +551,12 @@ func (h *Handlers) V2MFAWebAuthnBegin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) V2MFAWebAuthnFinish(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.MailSecEnabled {
+	if !h.mailSecRuntimeEnabled() {
 		util.WriteError(w, http.StatusServiceUnavailable, "mailsec_unavailable", "mailsec service is required for webauthn", middleware.RequestID(r.Context()))
+		return
+	}
+	webAuthnContext, ok := h.requireWebAuthnContext(w, r)
+	if !ok {
 		return
 	}
 	u, _ := middleware.User(r.Context())
@@ -236,8 +600,8 @@ func (h *Handlers) V2MFAWebAuthnFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	mailsecResult, err := h.callMailSecOperation(r.Context(), "webauthn.assertion.finish", u.ID, map[string]any{
 		"challenge":                     state.Challenge,
-		"rp_id":                         firstNonEmpty(state.RPID, h.webAuthnRPID(r)),
-		"origins":                       firstNonEmptySlice(state.Origins, h.webAuthnAllowedOrigins(r)),
+		"rp_id":                         firstNonEmpty(state.RPID, webAuthnContext.RPID),
+		"origins":                       firstNonEmptySlice(state.Origins, webAuthnContext.Origins),
 		"credential_id":                 credID,
 		"client_data_json_b64url":       clientDataJSON,
 		"authenticator_data_b64url":     authenticatorData,
@@ -1706,7 +2070,7 @@ func (h *Handlers) V2MFAConfirmTOTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) V2MFAWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.MailSecEnabled {
+	if !h.mailSecRuntimeEnabled() {
 		util.WriteError(w, http.StatusServiceUnavailable, "mailsec_unavailable", "mailsec service is required for webauthn", middleware.RequestID(r.Context()))
 		return
 	}
@@ -1716,7 +2080,11 @@ func (h *Handlers) V2MFAWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Req
 		util.WriteError(w, 500, "webauthn_register_begin_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	rpID, origins := h.webAuthnRPAndOrigins(r)
+	webAuthnContext, ok := h.requireWebAuthnContext(w, r)
+	if !ok {
+		return
+	}
+	rpID, origins := webAuthnContext.RPID, webAuthnContext.Origins
 	challenge := randomToken()
 	state := webAuthnChallengeState{
 		UserID:    u.ID,
@@ -1770,8 +2138,12 @@ func (h *Handlers) V2MFAWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Req
 }
 
 func (h *Handlers) V2MFAWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.MailSecEnabled {
+	if !h.mailSecRuntimeEnabled() {
 		util.WriteError(w, http.StatusServiceUnavailable, "mailsec_unavailable", "mailsec service is required for webauthn", middleware.RequestID(r.Context()))
+		return
+	}
+	webAuthnContext, ok := h.requireWebAuthnContext(w, r)
+	if !ok {
 		return
 	}
 	u, _ := middleware.User(r.Context())
@@ -1810,8 +2182,8 @@ func (h *Handlers) V2MFAWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Re
 	}
 	mailsecResult, err := h.callMailSecOperation(r.Context(), "webauthn.register.finish", u.ID, map[string]any{
 		"challenge":                 state.Challenge,
-		"rp_id":                     firstNonEmpty(state.RPID, h.webAuthnRPID(r)),
-		"origins":                   firstNonEmptySlice(state.Origins, h.webAuthnAllowedOrigins(r)),
+		"rp_id":                     firstNonEmpty(state.RPID, webAuthnContext.RPID),
+		"origins":                   firstNonEmptySlice(state.Origins, webAuthnContext.Origins),
 		"client_data_json_b64url":   clientDataJSON,
 		"attestation_object_b64url": attestationObject,
 		"credential_id":             credentialID,
@@ -1859,6 +2231,12 @@ func (h *Handlers) V2MFAWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Re
 		util.WriteError(w, 500, "webauthn_register_finish_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
+	registerMeta, _ := json.Marshal(map[string]any{
+		"credential":    created.ID,
+		"credential_id": created.CredentialID,
+		"name":          created.Name,
+	})
+	_ = h.svc.Store().InsertAudit(r.Context(), u.ID, "auth.passkey.register", u.ID, string(registerMeta))
 
 	if err := h.svc.Store().SetUserMFABackupCompleted(r.Context(), u.ID, false); err != nil {
 		util.WriteError(w, 500, "webauthn_register_finish_failed", "cannot update mfa backup state", middleware.RequestID(r.Context()))
@@ -2069,7 +2447,48 @@ func (h *Handlers) V2MFAWebAuthnDelete(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 500, "webauthn_delete_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
+	meta, _ := json.Marshal(map[string]any{"credential": id})
+	_ = h.svc.Store().InsertAudit(r.Context(), u.ID, "auth.passkey.delete", u.ID, string(meta))
 	util.WriteJSON(w, 200, map[string]any{"status": "deleted"})
+}
+
+func (h *Handlers) V2MFAWebAuthnList(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	items, err := h.svc.Store().ListMFAWebAuthnCredentials(r.Context(), u.ID)
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_list_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{"items": items})
+}
+
+func (h *Handlers) V2MFAWebAuthnRename(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		util.WriteError(w, 400, "bad_request", "credential id is required", middleware.RequestID(r.Context()))
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		util.WriteError(w, 400, "bad_request", "credential name is required", middleware.RequestID(r.Context()))
+		return
+	}
+	if err := h.svc.Store().RenameMFAWebAuthnCredential(r.Context(), u.ID, id, req.Name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, 404, "credential_not_found", "webauthn credential not found", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, 500, "webauthn_rename_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{"status": "ok"})
 }
 
 func (h *Handlers) V2ListTrustedDevices(w http.ResponseWriter, r *http.Request) {
@@ -2480,7 +2899,7 @@ func (h *Handlers) applyCryptoToSendRequest(ctx context.Context, u models.User, 
 	if cryptoOptionsJSON == "" || cryptoOptionsJSON == "{}" {
 		return req, nil
 	}
-	if !h.cfg.MailSecEnabled {
+	if !h.mailSecRuntimeEnabled() {
 		return req, fmt.Errorf("mailsec service is required for crypto operations")
 	}
 	var opts v2SendCryptoOptions
@@ -2907,12 +3326,39 @@ type webAuthnChallengeState struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type passkeyLoginChallengeState struct {
+	Challenge            string    `json:"challenge"`
+	RPID                 string    `json:"rp_id"`
+	Origins              []string  `json:"origins"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	AttemptCount         int       `json:"attempt_count"`
+	MaxAttempts          int       `json:"max_attempts"`
+	CookieTokenHash      string    `json:"cookie_token_hash"`
+	UserID               string    `json:"user_id"`
+	AllowCredentialsJSON []string  `json:"allow_credentials"`
+}
+
+type webAuthnContext struct {
+	RPID          string
+	Origins       []string
+	RequestOrigin string
+	Reason        string
+}
+
 func webAuthnLoginChallengeSettingKey(sessionID string) string {
 	return "mfa:webauthn:challenge:login:" + strings.TrimSpace(sessionID)
 }
 
 func webAuthnRegisterChallengeSettingKey(userID string) string {
 	return "mfa:webauthn:challenge:register:" + strings.TrimSpace(userID)
+}
+
+func passkeyLoginChallengeSettingsPrefix() string {
+	return "auth:webauthn:challenge:passkey:"
+}
+
+func passkeyLoginChallengeSettingKey(challengeID string) string {
+	return passkeyLoginChallengeSettingsPrefix() + strings.TrimSpace(challengeID)
 }
 
 func mfaTrustedPendingRememberSettingKey(sessionID string) string {
@@ -2948,8 +3394,35 @@ func (h *Handlers) loadWebAuthnChallenge(ctx context.Context, key string) (webAu
 	return state, true, nil
 }
 
+func (h *Handlers) storePasskeyLoginChallenge(ctx context.Context, challengeID string, challenge passkeyLoginChallengeState) error {
+	b, err := json.Marshal(challenge)
+	if err != nil {
+		return err
+	}
+	return h.svc.Store().UpsertSetting(ctx, passkeyLoginChallengeSettingKey(challengeID), string(b))
+}
+
+func (h *Handlers) loadPasskeyLoginChallenge(ctx context.Context, challengeID string) (passkeyLoginChallengeState, bool, error) {
+	raw, ok, err := h.svc.Store().GetSetting(ctx, passkeyLoginChallengeSettingKey(challengeID))
+	if err != nil {
+		return passkeyLoginChallengeState{}, false, err
+	}
+	if !ok || strings.TrimSpace(raw) == "" {
+		return passkeyLoginChallengeState{}, false, nil
+	}
+	var state passkeyLoginChallengeState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return passkeyLoginChallengeState{}, false, err
+	}
+	return state, true, nil
+}
+
+func (h *Handlers) deletePasskeyLoginChallenge(ctx context.Context, challengeID string) error {
+	return h.svc.Store().DeleteSetting(ctx, passkeyLoginChallengeSettingKey(challengeID))
+}
+
 func (h *Handlers) callMailSecOperation(ctx context.Context, op string, accountID string, payload map[string]any) (map[string]any, error) {
-	if !h.cfg.MailSecEnabled {
+	if !h.mailSecRuntimeEnabled() {
 		return nil, fmt.Errorf("mailsec service is disabled")
 	}
 	timeout := time.Duration(h.cfg.MailSecTimeoutMS) * time.Millisecond
@@ -2980,6 +3453,18 @@ func (h *Handlers) callMailSecOperation(ctx context.Context, op string, accountI
 	return resp.Result, nil
 }
 
+func (h *Handlers) mailSecRuntimeEnabled() bool {
+	if h.cfg.MailSecEnabled {
+		return true
+	}
+	socket := strings.TrimSpace(h.cfg.MailSecSocket)
+	if socket == "" {
+		return false
+	}
+	_, err := os.Stat(socket)
+	return err == nil
+}
+
 func (h *Handlers) verifyTOTPCode(ctx context.Context, userID, secret, code string) (bool, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -3007,17 +3492,72 @@ func (h *Handlers) verifyTOTPCode(ctx context.Context, userID, secret, code stri
 	return valid, nil
 }
 
-func (h *Handlers) webAuthnRPAndOrigins(r *http.Request) (string, []string) {
-	rpID := h.webAuthnRPID(r)
-	origins := h.webAuthnAllowedOrigins(r)
-	return rpID, origins
+func (h *Handlers) authCapabilities(r *http.Request) map[string]any {
+	mailsecAvailable := h.mailSecRuntimeEnabled()
+	context := h.resolveWebAuthnContext(r)
+	mfaAvailable := mailsecAvailable && context.Reason == ""
+	passwordlessAvailable := mfaAvailable && h.cfg.PasskeyPasswordlessEnabled
+	reason := ""
+	switch {
+	case !mailsecAvailable:
+		reason = "mailsec_unavailable"
+	case context.Reason != "":
+		reason = context.Reason
+	case !h.cfg.PasskeyPasswordlessEnabled:
+		reason = "passwordless_disabled"
+	}
+	return map[string]any{
+		"passkey_mfa_available":          mfaAvailable,
+		"passkey_passwordless_available": passwordlessAvailable,
+		"passkey_usernameless_enabled":   h.cfg.PasskeyUsernamelessEnabled,
+		"rp_id":                          context.RPID,
+		"allowed_origins":                context.Origins,
+		"reason":                         reason,
+	}
 }
 
 func (h *Handlers) webAuthnRPID(r *http.Request) string {
-	return firstNonEmpty(strings.TrimSpace(h.cfg.BaseDomain), hostWithoutPort(strings.TrimSpace(r.Host)))
+	if raw := normalizeRPIDCandidate(h.cfg.WebAuthnRPID); raw != "" {
+		return raw
+	}
+	if raw, ok, err := h.svc.Store().GetSetting(r.Context(), "base_domain"); err == nil && ok {
+		if normalized := normalizeRPIDCandidate(raw); normalized != "" {
+			return normalized
+		}
+	}
+	if raw := normalizeRPIDCandidate(h.cfg.BaseDomain); raw != "" {
+		return raw
+	}
+	return normalizeRPIDCandidate(hostWithoutPort(strings.TrimSpace(r.Host)))
 }
 
-func (h *Handlers) webAuthnAllowedOrigins(r *http.Request) []string {
+func (h *Handlers) webAuthnAllowedOrigins(r *http.Request, requestOrigin string) []string {
+	if len(h.cfg.WebAuthnAllowedOrigins) > 0 {
+		out := make([]string, 0, len(h.cfg.WebAuthnAllowedOrigins))
+		seen := map[string]struct{}{}
+		for _, item := range h.cfg.WebAuthnAllowedOrigins {
+			origin := normalizeOrigin(item)
+			if origin == "" {
+				continue
+			}
+			if _, ok := seen[origin]; ok {
+				continue
+			}
+			seen[origin] = struct{}{}
+			out = append(out, origin)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	derived := normalizeOrigin(requestOrigin)
+	if derived != "" {
+		return []string{derived}
+	}
+	return nil
+}
+
+func (h *Handlers) requestOrigin(r *http.Request) string {
 	scheme := "https"
 	if h.cfg.TrustProxy {
 		if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfp != "" {
@@ -3032,7 +3572,59 @@ func (h *Handlers) webAuthnAllowedOrigins(r *http.Request) []string {
 	if host == "" {
 		host = h.webAuthnRPID(r)
 	}
-	return []string{fmt.Sprintf("%s://%s", scheme, host)}
+	if host == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s://%s", scheme, host)
+}
+
+func (h *Handlers) resolveWebAuthnContext(r *http.Request) webAuthnContext {
+	rpID := h.webAuthnRPID(r)
+	requestOrigin := h.requestOrigin(r)
+	origins := h.webAuthnAllowedOrigins(r, requestOrigin)
+	resolved := webAuthnContext{
+		RPID:          rpID,
+		Origins:       origins,
+		RequestOrigin: requestOrigin,
+	}
+	if !isWebAuthnSecureOrigin(requestOrigin) {
+		resolved.Reason = "insecure_origin"
+		return resolved
+	}
+	if strings.TrimSpace(rpID) == "" {
+		resolved.Reason = "rp_mismatch"
+		return resolved
+	}
+	if !originInList(requestOrigin, origins) {
+		resolved.Reason = "origin_mismatch"
+		return resolved
+	}
+	host := hostWithoutPort(strings.TrimSpace(r.Host))
+	if host == "" {
+		host = originHost(requestOrigin)
+	}
+	if host != "" && !isLoopbackHost(host) && !hostMatchesRPID(host, rpID) {
+		resolved.Reason = "rp_mismatch"
+		return resolved
+	}
+	return resolved
+}
+
+func (h *Handlers) requireWebAuthnContext(w http.ResponseWriter, r *http.Request) (webAuthnContext, bool) {
+	resolved := h.resolveWebAuthnContext(r)
+	switch resolved.Reason {
+	case "":
+		return resolved, true
+	case "insecure_origin":
+		util.WriteError(w, http.StatusBadRequest, "webauthn_insecure_origin", "webauthn requires HTTPS or localhost", middleware.RequestID(r.Context()))
+	case "rp_mismatch":
+		util.WriteError(w, http.StatusBadRequest, "webauthn_rp_mismatch", "request host does not match configured webauthn rp_id", middleware.RequestID(r.Context()))
+	case "origin_mismatch":
+		util.WriteError(w, http.StatusBadRequest, "webauthn_origin_mismatch", "request origin is not allowed for webauthn", middleware.RequestID(r.Context()))
+	default:
+		util.WriteError(w, http.StatusBadRequest, "webauthn_context_invalid", "webauthn context is invalid", middleware.RequestID(r.Context()))
+	}
+	return webAuthnContext{}, false
 }
 
 func hostWithoutPort(host string) string {
@@ -3040,13 +3632,154 @@ func hostWithoutPort(host string) string {
 	if host == "" {
 		return ""
 	}
-	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") && strings.Count(host, ":") >= 2 {
 		return strings.TrimPrefix(strings.SplitN(host, "]", 2)[0], "[")
 	}
-	if i := strings.LastIndex(host, ":"); i > -1 {
-		return host[:i]
+	if strings.Count(host, ":") == 0 {
+		return strings.ToLower(strings.TrimSpace(host))
 	}
-	return host
+	if strings.Count(host, ":") > 1 {
+		return strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), "]"), "[")
+	}
+	h, _, err := net.SplitHostPort(host)
+	if err == nil {
+		return strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), "]"), "[")
+	}
+	return strings.ToLower(strings.TrimSpace(host))
+}
+
+func normalizeRPIDCandidate(raw string) string {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	value = strings.TrimPrefix(value, "https://")
+	value = strings.TrimPrefix(value, "http://")
+	value = strings.TrimSuffix(value, "/")
+	value = strings.TrimSuffix(value, ".")
+	return hostWithoutPort(value)
+}
+
+func normalizeOrigin(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Scheme)) + "://" + strings.ToLower(strings.TrimSpace(parsed.Host))
+}
+
+func originHost(origin string) string {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return ""
+	}
+	return hostWithoutPort(parsed.Host)
+}
+
+func originInList(origin string, allowed []string) bool {
+	normalizedOrigin := normalizeOrigin(origin)
+	if normalizedOrigin == "" {
+		return false
+	}
+	for _, item := range allowed {
+		if subtleConstantCompare(normalizeOrigin(item), normalizedOrigin) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func isWebAuthnSecureOrigin(origin string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	host := hostWithoutPort(parsed.Host)
+	if scheme == "https" {
+		return true
+	}
+	if scheme != "http" {
+		return false
+	}
+	return isLoopbackHost(host)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func hostMatchesRPID(host, rpID string) bool {
+	h := normalizeRPIDCandidate(host)
+	rp := normalizeRPIDCandidate(rpID)
+	if h == "" || rp == "" {
+		return false
+	}
+	if subtleConstantCompare(h, rp) == 1 {
+		return true
+	}
+	return strings.HasSuffix(h, "."+rp)
+}
+
+func passkeyLoginChallengeCookieName() string {
+	return "mailclient_passkey_challenge"
+}
+
+func (h *Handlers) setPasskeyLoginChallengeCookie(w http.ResponseWriter, r *http.Request, challengeID, nonce string, expiresAt time.Time) {
+	secure := h.cfg.ResolveCookieSecure(r)
+	value := strings.TrimSpace(challengeID) + "." + strings.TrimSpace(nonce)
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     passkeyLoginChallengeCookieName(),
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+		Expires:  expiresAt,
+	})
+}
+
+func (h *Handlers) clearPasskeyLoginChallengeCookie(w http.ResponseWriter, r *http.Request) {
+	secure := h.cfg.ResolveCookieSecure(r)
+	expiredAt := time.Unix(1, 0).UTC()
+	http.SetCookie(w, &http.Cookie{
+		Name:     passkeyLoginChallengeCookieName(),
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  expiredAt,
+	})
+}
+
+func (h *Handlers) readPasskeyLoginChallengeCookie(r *http.Request) (string, string, bool) {
+	cookie, err := r.Cookie(passkeyLoginChallengeCookieName())
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(strings.TrimSpace(cookie.Value), ".", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	challengeID := strings.TrimSpace(parts[0])
+	nonce := strings.TrimSpace(parts[1])
+	if challengeID == "" || nonce == "" {
+		return "", "", false
+	}
+	return challengeID, nonce, true
 }
 
 func getMapValue(m map[string]any, key string) map[string]any {

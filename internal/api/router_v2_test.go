@@ -69,6 +69,7 @@ func newV2RouterWithConfigAndStoreDB(t *testing.T, mutate func(*config.Config)) 
 		filepath.Join("..", "..", "migrations", "016_quota_and_health.sql"),
 		filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql"),
 		filepath.Join("..", "..", "migrations", "018_mfa_usability_trusted_devices.sql"),
+		filepath.Join("..", "..", "migrations", "019_users_mail_secret.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -275,6 +276,7 @@ func loginV2WithResponse(t *testing.T, router http.Handler) (*http.Cookie, *http
 		"password": "SecretPass123!",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/login", bytes.NewReader(body))
+	setTestLoopbackOrigin(req)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -314,6 +316,7 @@ func loginV1WithResponse(t *testing.T, router http.Handler, email, password stri
 		"password": password,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewReader(body))
+	setTestLoopbackOrigin(req)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -347,6 +350,7 @@ func doV1AuthedJSON(t *testing.T, router http.Handler, method, path string, payl
 		body, _ = json.Marshal(payload)
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	setTestLoopbackOrigin(req)
 	req.AddCookie(sess)
 	req.AddCookie(csrf)
 	if method != http.MethodGet {
@@ -365,6 +369,7 @@ func doV2AuthedJSON(t *testing.T, router http.Handler, method, path string, payl
 		body, _ = json.Marshal(payload)
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	setTestLoopbackOrigin(req)
 	req.AddCookie(sess)
 	req.AddCookie(csrf)
 	if method != http.MethodGet {
@@ -374,6 +379,15 @@ func doV2AuthedJSON(t *testing.T, router http.Handler, method, path string, payl
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+func setTestLoopbackOrigin(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Host = "localhost"
+	req.URL.Scheme = "http"
+	req.URL.Host = "localhost"
 }
 
 func TestV2PreferencesFlow(t *testing.T) {
@@ -706,6 +720,162 @@ func TestV2WebAuthnRegistrationAndMFAGate(t *testing.T) {
 	del := doV2AuthedJSON(t, router, http.MethodDelete, "/api/v2/security/mfa/webauthn/"+credentialID, nil, sess, csrf)
 	if del.Code != http.StatusOK {
 		t.Fatalf("expected credential delete 200, got %d body=%s", del.Code, del.Body.String())
+	}
+}
+
+func TestV2PasskeyLoginAndMailSecretUnlockFlow(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router, st := newV2RouterWithConfigAndStore(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+		cfg.PasskeyPasswordlessEnabled = true
+		cfg.PasskeyUsernamelessEnabled = true
+	})
+	admin, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	if _, err := st.UpsertMFAWebAuthnCredential(context.Background(), models.MFAWebAuthnCredential{
+		UserID:         admin.ID,
+		CredentialID:   "cred-passkey-primary",
+		PublicKey:      "Y29zZS1wdWJrZXk",
+		SignCount:      1,
+		TransportsJSON: `["internal"]`,
+		Name:           "Primary Passkey",
+	}); err != nil {
+		t.Fatalf("seed passkey credential: %v", err)
+	}
+
+	beginReq := httptest.NewRequest(http.MethodPost, "/api/v2/login/passkey/begin", bytes.NewReader([]byte(`{}`)))
+	setTestLoopbackOrigin(beginReq)
+	beginReq.Header.Set("Content-Type", "application/json")
+	beginRec := httptest.NewRecorder()
+	router.ServeHTTP(beginRec, beginReq)
+	if beginRec.Code != http.StatusOK {
+		t.Fatalf("expected passkey begin 200, got %d body=%s", beginRec.Code, beginRec.Body.String())
+	}
+	var beginPayload map[string]any
+	if err := json.Unmarshal(beginRec.Body.Bytes(), &beginPayload); err != nil {
+		t.Fatalf("decode passkey begin payload: %v", err)
+	}
+	challengeID, _ := beginPayload["challenge_id"].(string)
+	challenge, _ := beginPayload["challenge"].(string)
+	if strings.TrimSpace(challengeID) == "" || strings.TrimSpace(challenge) == "" {
+		t.Fatalf("expected challenge_id and challenge in begin payload: %v", beginPayload)
+	}
+	var challengeCookie *http.Cookie
+	for _, c := range beginRec.Result().Cookies() {
+		if c.Name == "mailclient_passkey_challenge" {
+			challengeCookie = c
+			break
+		}
+	}
+	if challengeCookie == nil {
+		t.Fatalf("expected passkey challenge cookie to be set")
+	}
+
+	finishBody, _ := json.Marshal(map[string]any{
+		"challenge_id": challengeID,
+		"challenge":    challenge,
+		"id":           "cred-passkey-primary",
+		"rawId":        "cred-passkey-primary",
+		"response": map[string]any{
+			"clientDataJSON":    "Y2xpZW50LWRhdGE",
+			"authenticatorData": "YXV0aGVudGljYXRvci1kYXRh",
+			"signature":         "c2lnbmF0dXJl",
+		},
+	})
+	finishReq := httptest.NewRequest(http.MethodPost, "/api/v2/login/passkey/finish", bytes.NewReader(finishBody))
+	setTestLoopbackOrigin(finishReq)
+	finishReq.Header.Set("Content-Type", "application/json")
+	finishReq.AddCookie(challengeCookie)
+	finishRec := httptest.NewRecorder()
+	router.ServeHTTP(finishRec, finishReq)
+	if finishRec.Code != http.StatusOK {
+		t.Fatalf("expected passkey finish 200, got %d body=%s", finishRec.Code, finishRec.Body.String())
+	}
+	var finishPayload map[string]any
+	if err := json.Unmarshal(finishRec.Body.Bytes(), &finishPayload); err != nil {
+		t.Fatalf("decode passkey finish payload: %v", err)
+	}
+	if stage, _ := finishPayload["auth_stage"].(string); stage != "authenticated" {
+		t.Fatalf("expected authenticated stage after passkey login, got %q payload=%v", stage, finishPayload)
+	}
+	if required, _ := finishPayload["mail_secret_required"].(bool); !required {
+		t.Fatalf("expected mail_secret_required=true for first passkey login without stored secret")
+	}
+
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/v2/login/passkey/finish", bytes.NewReader(finishBody))
+	setTestLoopbackOrigin(replayReq)
+	replayReq.Header.Set("Content-Type", "application/json")
+	replayReq.AddCookie(challengeCookie)
+	replayRec := httptest.NewRecorder()
+	router.ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected replayed passkey finish 401, got %d body=%s", replayRec.Code, replayRec.Body.String())
+	}
+	var replayPayload map[string]any
+	if err := json.Unmarshal(replayRec.Body.Bytes(), &replayPayload); err != nil {
+		t.Fatalf("decode replay payload: %v", err)
+	}
+	if got, _ := replayPayload["code"].(string); got != "webauthn_challenge_invalid" {
+		t.Fatalf("expected webauthn_challenge_invalid on replay, got %q payload=%v", got, replayPayload)
+	}
+
+	var sess, csrf *http.Cookie
+	for _, c := range finishRec.Result().Cookies() {
+		switch c.Name {
+		case "mailclient_session":
+			sess = c
+		case "mailclient_csrf":
+			csrf = c
+		}
+	}
+	if sess == nil || csrf == nil {
+		t.Fatalf("expected session/csrf cookies on passkey finish")
+	}
+
+	mailBeforeUnlock := doV1AuthedJSON(t, router, http.MethodGet, "/api/v1/mailboxes", nil, sess, csrf)
+	if mailBeforeUnlock.Code != http.StatusUnauthorized {
+		t.Fatalf("expected mailbox request 401 before unlock, got %d body=%s", mailBeforeUnlock.Code, mailBeforeUnlock.Body.String())
+	}
+
+	unlock := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/session/mail-secret/unlock", map[string]any{
+		"password": "SecretPass123!",
+	}, sess, csrf)
+	if unlock.Code != http.StatusOK {
+		t.Fatalf("expected mail-secret unlock 200, got %d body=%s", unlock.Code, unlock.Body.String())
+	}
+
+	mailAfterUnlock := doV1AuthedJSON(t, router, http.MethodGet, "/api/v1/mailboxes", nil, sess, csrf)
+	if mailAfterUnlock.Code != http.StatusOK {
+		t.Fatalf("expected mailbox request 200 after unlock, got %d body=%s", mailAfterUnlock.Code, mailAfterUnlock.Body.String())
+	}
+}
+
+func TestV2PasskeyBeginRejectsInsecureOrigin(t *testing.T) {
+	socketPath := startFakeMailSecServer(t)
+	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
+		cfg.MailSecEnabled = true
+		cfg.MailSecSocket = socketPath
+		cfg.MailSecTimeoutMS = 2000
+		cfg.PasskeyPasswordlessEnabled = true
+		cfg.PasskeyUsernamelessEnabled = true
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/login/passkey/begin", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected insecure-origin reject 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got, _ := payload["code"].(string); got != "webauthn_insecure_origin" {
+		t.Fatalf("expected webauthn_insecure_origin code, got %q payload=%v", got, payload)
 	}
 }
 

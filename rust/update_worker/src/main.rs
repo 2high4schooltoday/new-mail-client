@@ -37,6 +37,7 @@ struct Config {
     update_base_dir: PathBuf,
     update_install_dir: PathBuf,
     update_service_name: String,
+    update_systemd_unit_dir: PathBuf,
     listen_addr: String,
 }
 
@@ -233,6 +234,10 @@ impl Config {
             )),
             update_install_dir: PathBuf::from(env_var("UPDATE_INSTALL_DIR", "/opt/mailclient")),
             update_service_name: env_var("UPDATE_SERVICE_NAME", "mailclient"),
+            update_systemd_unit_dir: PathBuf::from(env_var(
+                "UPDATE_SYSTEMD_UNIT_DIR",
+                "/etc/systemd/system",
+            )),
             listen_addr: env_var("LISTEN_ADDR", ":8080"),
         })
     }
@@ -449,6 +454,19 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         &payload_root.join("migrations"),
         &stage_dir.join("migrations"),
     )?;
+    let mailsec_payload = payload_root.join("mailclient-mailsec-service");
+    let mailsec_payload_present = mailsec_payload.exists();
+    if mailsec_payload_present {
+        copy_file(
+            &mailsec_payload,
+            &stage_dir.join("mailclient-mailsec-service"),
+            0o755,
+        )?;
+    }
+    let mailsec_unit_path = payload_root
+        .join("deploy")
+        .join("mailclient-mailsec.service");
+    let mailsec_unit_present = mailsec_unit_path.exists();
 
     let prev_bin = cfg
         .update_install_dir
@@ -467,24 +485,30 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     let prev_mig = cfg
         .update_install_dir
         .join(format!(".prev-migrations-{}", sanitize_path_token(&run_id)));
+    let prev_mailsec = cfg
+        .update_install_dir
+        .join(format!(".prev-mailsec-{}", sanitize_path_token(&run_id)));
 
     let current_bin = cfg.update_install_dir.join("mailclient");
     let current_pam = cfg.update_install_dir.join("mailclient-pam-reset-helper");
     let current_worker = cfg.update_install_dir.join("mailclient-update-worker");
     let current_web = cfg.update_install_dir.join("web");
     let current_mig = cfg.update_install_dir.join("migrations");
+    let current_mailsec = cfg.update_install_dir.join("mailclient-mailsec-service");
 
     let stage_bin = stage_dir.join("mailclient");
     let stage_pam = stage_dir.join("mailclient-pam-reset-helper");
     let stage_worker = stage_dir.join("mailclient-update-worker");
     let stage_web = stage_dir.join("web");
     let stage_mig = stage_dir.join("migrations");
+    let stage_mailsec = stage_dir.join("mailclient-mailsec-service");
 
     let _ = fs::remove_file(&prev_bin);
     let _ = fs::remove_file(&prev_pam);
     let _ = fs::remove_file(&prev_worker);
     let _ = fs::remove_dir_all(&prev_web);
     let _ = fs::remove_dir_all(&prev_mig);
+    let _ = fs::remove_file(&prev_mailsec);
 
     let swap_items = vec![
         (current_bin.clone(), stage_bin, prev_bin.clone()),
@@ -502,10 +526,46 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         }
         swapped.push((current.clone(), previous.clone()));
     }
+    if mailsec_payload_present {
+        if let Err(err) = swap_path_optional(&current_mailsec, &stage_mailsec, &prev_mailsec) {
+            rollback_paths(&swapped)?;
+            return Err(err);
+        }
+        swapped.push((current_mailsec.clone(), prev_mailsec.clone()));
+    }
 
     if let Err(err) = chown_runtime_artifacts(&cfg.update_install_dir) {
         rollback_paths(&swapped)?;
         return Err(WorkerError::Message(format!("chown failed: {err}")));
+    }
+    if mailsec_unit_present {
+        let dst = cfg
+            .update_systemd_unit_dir
+            .join("mailclient-mailsec.service");
+        if let Err(err) = copy_file(&mailsec_unit_path, &dst, 0o644) {
+            rollback_paths(&swapped)?;
+            return Err(WorkerError::Message(format!(
+                "mailsec unit install failed: {err}"
+            )));
+        }
+        if let Err(err) = run_cmd("systemctl", &["daemon-reload"], Duration::from_secs(60)) {
+            rollback_paths(&swapped)?;
+            return Err(WorkerError::Message(format!(
+                "mailsec daemon-reload failed: {err}"
+            )));
+        }
+    }
+    if mailsec_payload_present || mailsec_unit_present {
+        if let Err(err) = run_cmd(
+            "systemctl",
+            &["enable", "--now", "mailclient-mailsec"],
+            Duration::from_secs(60),
+        ) {
+            rollback_paths(&swapped)?;
+            return Err(WorkerError::Message(format!(
+                "mailsec enable failed: {err}"
+            )));
+        }
     }
 
     if let Err(err) = run_cmd(
@@ -545,6 +605,10 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     move_if_exists(&prev_worker, &backup_dest.join("mailclient-update-worker"))?;
     move_if_exists(&prev_web, &backup_dest.join("web"))?;
     move_if_exists(&prev_mig, &backup_dest.join("migrations"))?;
+    move_if_exists(
+        &prev_mailsec,
+        &backup_dest.join("mailclient-mailsec-service"),
+    )?;
 
     trim_backups(&backups_dir(cfg), cfg.update_backup_keep)?;
 
@@ -917,6 +981,20 @@ fn swap_path(current: &Path, staged: &Path, previous: &Path) -> Result<(), Worke
     Ok(())
 }
 
+fn swap_path_optional(current: &Path, staged: &Path, previous: &Path) -> Result<(), WorkerError> {
+    let current_exists = current.exists();
+    if current_exists {
+        fs::rename(current, previous)?;
+    }
+    if let Err(err) = fs::rename(staged, current) {
+        if current_exists {
+            let _ = fs::rename(previous, current);
+        }
+        return Err(WorkerError::Io(err));
+    }
+    Ok(())
+}
+
 fn rollback_paths(swapped: &[(PathBuf, PathBuf)]) -> Result<(), WorkerError> {
     for (current, previous) in swapped.iter().rev() {
         remove_path(current)?;
@@ -986,6 +1064,10 @@ fn chown_runtime_artifacts(install_dir: &Path) -> Result<(), WorkerError> {
 
     for path in paths {
         chown_recursive(&path, uid, gid)?;
+    }
+    let mailsec = install_dir.join("mailclient-mailsec-service");
+    if mailsec.exists() {
+        chown_recursive(&mailsec, uid, gid)?;
     }
 
     Ok(())

@@ -100,6 +100,11 @@ type Config struct {
 	MailSecEnabled   bool
 	MailSecSocket    string
 	MailSecTimeoutMS int
+
+	WebAuthnRPID                 string
+	WebAuthnAllowedOrigins       []string
+	PasskeyPasswordlessEnabled   bool
+	PasskeyUsernamelessEnabled   bool
 }
 
 func Load() (Config, error) {
@@ -191,6 +196,10 @@ func Load() (Config, error) {
 		MailSecEnabled:                  envBool("MAILSEC_ENABLED", false),
 		MailSecSocket:                   env("MAILSEC_SOCKET", "/run/mailclient/mailsec.sock"),
 		MailSecTimeoutMS:                envInt("MAILSEC_TIMEOUT_MS", 5000),
+		WebAuthnRPID:                    strings.TrimSpace(env("WEBAUTHN_RP_ID", "")),
+		WebAuthnAllowedOrigins:          envCSV("WEBAUTHN_ALLOWED_ORIGINS"),
+		PasskeyPasswordlessEnabled:      envBool("PASSKEY_PASSWORDLESS_ENABLED", false),
+		PasskeyUsernamelessEnabled:      envBool("PASSKEY_USERNAMELESS_ENABLED", true),
 	}
 
 	if cfg.SessionIdleMinutes <= 0 || cfg.SessionAbsoluteHour <= 0 {

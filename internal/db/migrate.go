@@ -29,6 +29,8 @@ func ApplyMigrationFile(db *sql.DB, path string) error {
 		`ALTER TABLE users ADD COLUMN legacy_mfa_prompt_pending INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN mfa_setup_switch_used INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN mfa_backup_completed INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE users ADD COLUMN mail_secret_enc TEXT`,
+		`ALTER TABLE users ADD COLUMN mail_secret_updated_at DATETIME`,
 		`ALTER TABLE registrations ADD COLUMN mfa_preference TEXT NOT NULL DEFAULT 'none'`,
 		`CREATE TABLE IF NOT EXISTS mfa_trusted_devices (
 		   id TEXT PRIMARY KEY,

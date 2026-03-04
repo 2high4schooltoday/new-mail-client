@@ -271,6 +271,8 @@ if have_cmd systemctl; then
   safe_systemctl disable mailclient-updater.path
   safe_systemctl stop mailclient-updater.service
   safe_systemctl disable mailclient-updater.service
+  safe_systemctl stop mailclient-mailsec
+  safe_systemctl disable mailclient-mailsec
   safe_systemctl stop mailclient
   safe_systemctl disable mailclient
   if [[ -f /etc/systemd/system/mailclient-updater.path ]]; then
@@ -285,8 +287,14 @@ if have_cmd systemctl; then
   if [[ -f /etc/systemd/system/mailclient-pam-reset-helper.service ]]; then
     run_as_root rm -f /etc/systemd/system/mailclient-pam-reset-helper.service
   fi
+  if [[ -f /etc/systemd/system/mailclient-mailsec.service ]]; then
+    run_as_root rm -f /etc/systemd/system/mailclient-mailsec.service
+  fi
   if [[ -d /etc/systemd/system/mailclient-pam-reset-helper.service.d ]]; then
     run_as_root rm -rf /etc/systemd/system/mailclient-pam-reset-helper.service.d
+  fi
+  if [[ -d /etc/systemd/system/mailclient-mailsec.service.d ]]; then
+    run_as_root rm -rf /etc/systemd/system/mailclient-mailsec.service.d
   fi
   if [[ -d /etc/systemd/system/mailclient-updater.service.d ]]; then
     run_as_root rm -rf /etc/systemd/system/mailclient-updater.service.d

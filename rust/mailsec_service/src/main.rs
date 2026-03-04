@@ -903,8 +903,13 @@ fn smime_encrypt_operation(payload: JsonValue) -> Result<JsonValue, String> {
         return Err("recipient_certs_pem is required".to_string());
     }
     let certs = parse_smime_certs_stack(&req.recipient_certs_pem)?;
-    let pkcs7 = Pkcs7::encrypt(&certs, &plaintext, Cipher::aes_256_cbc(), Pkcs7Flags::BINARY)
-        .map_err(|err| format!("smime encrypt failed: {err}"))?;
+    let pkcs7 = Pkcs7::encrypt(
+        &certs,
+        &plaintext,
+        Cipher::aes_256_cbc(),
+        Pkcs7Flags::BINARY,
+    )
+    .map_err(|err| format!("smime encrypt failed: {err}"))?;
     let smime = pkcs7
         .to_smime(&plaintext, Pkcs7Flags::BINARY)
         .map_err(|err| format!("smime serialization failed: {err}"))?;
@@ -960,14 +965,15 @@ fn smime_verify_operation(payload: JsonValue) -> Result<JsonValue, String> {
     let (pkcs7, indata) =
         Pkcs7::from_smime(&signed).map_err(|err| format!("smime parse failed: {err}"))?;
     let mut out = Vec::new();
-    pkcs7.verify(
-        &trusted,
-        &store,
-        indata.as_deref(),
-        Some(&mut out),
-        Pkcs7Flags::BINARY,
-    )
-    .map_err(|err| format!("smime verify failed: {err}"))?;
+    pkcs7
+        .verify(
+            &trusted,
+            &store,
+            indata.as_deref(),
+            Some(&mut out),
+            Pkcs7Flags::BINARY,
+        )
+        .map_err(|err| format!("smime verify failed: {err}"))?;
 
     let signers = pkcs7
         .signers(&trusted, Pkcs7Flags::empty())
@@ -1029,16 +1035,21 @@ fn parse_pgp_message(raw: &[u8]) -> Result<Message<'_>, String> {
 }
 
 fn parse_smime_cert(cert_pem: &str) -> Result<X509, String> {
-    X509::from_pem(cert_pem.trim().as_bytes()).map_err(|err| format!("invalid smime cert pem: {err}"))
+    X509::from_pem(cert_pem.trim().as_bytes())
+        .map_err(|err| format!("invalid smime cert pem: {err}"))
 }
 
-fn parse_smime_private_key(private_key_pem: &str, passphrase: &str) -> Result<PKey<Private>, String> {
+fn parse_smime_private_key(
+    private_key_pem: &str,
+    passphrase: &str,
+) -> Result<PKey<Private>, String> {
     let pem = private_key_pem.trim().as_bytes();
     if pem.is_empty() {
         return Err("private key is required".to_string());
     }
     if passphrase.trim().is_empty() {
-        PKey::private_key_from_pem(pem).map_err(|err| format!("invalid smime private key pem: {err}"))
+        PKey::private_key_from_pem(pem)
+            .map_err(|err| format!("invalid smime private key pem: {err}"))
     } else {
         PKey::private_key_from_pem_passphrase(pem, passphrase.as_bytes())
             .map_err(|err| format!("invalid smime private key/passphrase: {err}"))
@@ -1058,7 +1069,12 @@ fn parse_smime_certs_stack(cert_pems: &[String]) -> Result<Stack<X509>, String> 
 
 fn cert_fingerprint_sha256(cert: &X509) -> String {
     cert.digest(openssl::hash::MessageDigest::sha256())
-        .map(|digest| digest.iter().map(|b| format!("{:02X}", b)).collect::<String>())
+        .map(|digest| {
+            digest
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<String>()
+        })
         .unwrap_or_default()
 }
 

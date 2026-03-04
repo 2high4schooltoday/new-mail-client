@@ -306,6 +306,7 @@ func TestMFAUsabilityTrustedDevicesMigrationAddsBackupAndTrustedDeviceSchema(t *
 		filepath.Join("..", "..", "migrations", "016_quota_and_health.sql"),
 		filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql"),
 		filepath.Join("..", "..", "migrations", "018_mfa_usability_trusted_devices.sql"),
+		filepath.Join("..", "..", "migrations", "019_users_mail_secret.sql"),
 	} {
 		if err := ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -317,6 +318,12 @@ func TestMFAUsabilityTrustedDevicesMigrationAddsBackupAndTrustedDeviceSchema(t *
 	}
 	if !hasColumn(t, sqdb, "mfa_trusted_devices", "token_hash") {
 		t.Fatalf("expected mfa_trusted_devices.token_hash to exist after migration 018")
+	}
+	if !hasColumn(t, sqdb, "users", "mail_secret_enc") {
+		t.Fatalf("expected users.mail_secret_enc to exist after migration 019")
+	}
+	if !hasColumn(t, sqdb, "users", "mail_secret_updated_at") {
+		t.Fatalf("expected users.mail_secret_updated_at to exist after migration 019")
 	}
 
 	now := time.Now().UTC()

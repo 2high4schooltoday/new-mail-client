@@ -297,15 +297,19 @@ Base: `/api/v1`
 
 - Auth/registration:
   - `GET /public/captcha/config`
+  - `GET /public/auth/capabilities`
   - `GET /setup/status`
   - `POST /setup/complete`
   - `POST /register`
   - `POST /login`
+  - `POST /login/passkey/begin`
+  - `POST /login/passkey/finish`
   - `POST /logout`
   - `POST /password/reset/request`
   - `POST /password/reset/confirm`
 - User mail:
   - `GET /me`
+  - `POST /session/mail-secret/unlock`
   - `GET /mailboxes`
   - `GET /messages`
   - `GET /messages/{id}`
@@ -341,11 +345,14 @@ This release adds a new v2 surface while keeping `/api/v1` unchanged.
 
 - Auth/MFA:
   - `POST /login`
+  - `POST /login/passkey/begin`
+  - `POST /login/passkey/finish`
+  - `POST /session/mail-secret/unlock`
   - `POST /mfa/totp/verify`
   - `POST /mfa/webauthn/begin`
   - `POST /mfa/webauthn/finish`
   - `POST /mfa/recovery-code/verify`
-  - `WebAuthn` and `TOTP` verification can be delegated to `mailsec_service` when `MAILSEC_ENABLED=true`.
+  - `WebAuthn` and `TOTP` flows require `mailsec_service` when `MAILSEC_ENABLED=true`.
 - Accounts and identities:
   - `GET /accounts`
   - `POST /accounts`
@@ -392,10 +399,12 @@ This release adds a new v2 surface while keeping `/api/v1` unchanged.
   - `GET /preferences`
   - `PUT /preferences`
   - `GET /security/mfa/status`
+  - `GET /security/mfa/webauthn`
   - `POST /security/mfa/totp/enroll`
   - `POST /security/mfa/totp/confirm`
   - `POST /security/mfa/webauthn/register/begin`
   - `POST /security/mfa/webauthn/register/finish`
+  - `PATCH /security/mfa/webauthn/{id}`
   - `DELETE /security/mfa/webauthn/{id}`
   - `GET /security/sessions`
   - `POST /security/sessions/{id}/revoke`

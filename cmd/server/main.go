@@ -74,6 +74,7 @@ func main() {
 		"migrations/016_quota_and_health.sql",
 		"migrations/017_mfa_onboarding_flags.sql",
 		"migrations/018_mfa_usability_trusted_devices.sql",
+		"migrations/019_users_mail_secret.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)

@@ -76,13 +76,15 @@ jobs:
               if [[ "${RUST_TARGET}" == "aarch64-unknown-linux-gnu" ]]; then
                 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
               fi
-              cargo build --release --target "${RUST_TARGET}" -p pam_reset_helper -p update_worker
+              cargo build --release --target "${RUST_TARGET}" -p pam_reset_helper -p update_worker -p mailsec_service
             )
             cp "rust/target/${RUST_TARGET}/release/pam_reset_helper" "${PKG_DIR}/mailclient-pam-reset-helper"
             cp "rust/target/${RUST_TARGET}/release/update_worker" "${PKG_DIR}/mailclient-update-worker"
+            cp "rust/target/${RUST_TARGET}/release/mailsec_service" "${PKG_DIR}/mailclient-mailsec-service"
             cp -R web "${PKG_DIR}/web"
             cp -R migrations "${PKG_DIR}/migrations"
-            tar -C "${PKG_DIR}" -czf "dist/mailclient-linux-${ARCH}.tar.gz" mailclient mailclient-pam-reset-helper mailclient-update-worker web migrations
+            cp -R deploy "${PKG_DIR}/deploy"
+            tar -C "${PKG_DIR}" -czf "dist/mailclient-linux-${ARCH}.tar.gz" mailclient mailclient-pam-reset-helper mailclient-update-worker mailclient-mailsec-service web migrations deploy
           done
           (
             cd dist

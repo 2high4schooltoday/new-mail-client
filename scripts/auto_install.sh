@@ -2028,6 +2028,9 @@ set_env_var "$OUT_ENV" "PAM_RESET_HELPER_SOCKET" "/run/mailclient/pam-reset-help
 set_env_var "$OUT_ENV" "PAM_RESET_HELPER_TIMEOUT_SEC" "5"
 set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_UID" "-1"
 set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "-1"
+set_env_var "$OUT_ENV" "MAILSEC_ENABLED" "true"
+set_env_var "$OUT_ENV" "MAILSEC_SOCKET" "/run/mailclient/mailsec.sock"
+set_env_var "$OUT_ENV" "MAILSEC_TIMEOUT_MS" "5000"
 
 log "Generated $OUT_ENV"
 log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
@@ -2134,17 +2137,17 @@ ensure_rust_toolchain "$RUST_TARGET"
   cd "$ROOT_DIR/rust"
   MAILCLIENT_BUILD_VERSION="$BUILD_VERSION" \
   MAILCLIENT_BUILD_COMMIT="$BUILD_COMMIT" \
-  cargo build --release --locked --target "$RUST_TARGET" -p pam_reset_helper -p update_worker
+  cargo build --release --locked --target "$RUST_TARGET" -p pam_reset_helper -p update_worker -p mailsec_service
 ) || (
   warn "Initial Rust privileged binary build failed; refreshing stable toolchain and retrying once."
   ensure_rust_toolchain "$RUST_TARGET"
   cd "$ROOT_DIR/rust"
   MAILCLIENT_BUILD_VERSION="$BUILD_VERSION" \
   MAILCLIENT_BUILD_COMMIT="$BUILD_COMMIT" \
-  cargo build --release --locked --target "$RUST_TARGET" -p pam_reset_helper -p update_worker
+  cargo build --release --locked --target "$RUST_TARGET" -p pam_reset_helper -p update_worker -p mailsec_service
 )
 RUST_BIN_DIR="$ROOT_DIR/rust/target/$RUST_TARGET/release"
-if [[ ! -x "$RUST_BIN_DIR/pam_reset_helper" || ! -x "$RUST_BIN_DIR/update_worker" ]]; then
+if [[ ! -x "$RUST_BIN_DIR/pam_reset_helper" || ! -x "$RUST_BIN_DIR/update_worker" || ! -x "$RUST_BIN_DIR/mailsec_service" ]]; then
   err "Rust privileged binaries were not produced in $RUST_BIN_DIR"
   exit 1
 fi
@@ -2164,6 +2167,7 @@ set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "$MAILCLIENT_GID"
 "${PREFIX[@]}" install -m 0755 "$ROOT_DIR/mailclient" /opt/mailclient/mailclient
 "${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/pam_reset_helper" /opt/mailclient/mailclient-pam-reset-helper
 "${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/update_worker" /opt/mailclient/mailclient-update-worker
+"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/mailsec_service" /opt/mailclient/mailclient-mailsec-service
 "${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/mailclient/.env
 "${PREFIX[@]}" rm -rf /opt/mailclient/web /opt/mailclient/migrations
 "${PREFIX[@]}" cp -R "$ROOT_DIR/web" /opt/mailclient/web
@@ -2176,9 +2180,10 @@ set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "$MAILCLIENT_GID"
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.path" /etc/systemd/system/mailclient-updater.path
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-pam-reset-helper.service" /etc/systemd/system/mailclient-pam-reset-helper.service
 "${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-pam-reset-helper.socket" /etc/systemd/system/mailclient-pam-reset-helper.socket
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-mailsec.service" /etc/systemd/system/mailclient-mailsec.service
 "${PREFIX[@]}" chown -R mailclient:mailclient /opt/mailclient /var/lib/mailclient
-"${PREFIX[@]}" chown root:root /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker
-"${PREFIX[@]}" chmod 0755 /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker
+"${PREFIX[@]}" chown root:root /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker /opt/mailclient/mailclient-mailsec-service
+"${PREFIX[@]}" chmod 0755 /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker /opt/mailclient/mailclient-mailsec-service
 "${PREFIX[@]}" chown root:root /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 "${PREFIX[@]}" chmod 0750 /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
 "${PREFIX[@]}" chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
@@ -2189,6 +2194,7 @@ finish_stage_ok
 begin_stage "service_install_start" "Service Install and Start" "10"
 "${PREFIX[@]}" systemctl daemon-reload
 "${PREFIX[@]}" systemctl enable --now mailclient
+"${PREFIX[@]}" systemctl enable --now mailclient-mailsec
 "${PREFIX[@]}" systemctl enable --now mailclient-updater.path
 "${PREFIX[@]}" systemctl enable --now mailclient-pam-reset-helper.socket
 
@@ -2239,6 +2245,11 @@ fi
 if ! wait_for_condition "mailclient service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
   err "mailclient service is not active after install."
   err "Run: systemctl status mailclient --no-pager"
+  exit 1
+fi
+if ! wait_for_condition "mailclient mailsec service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient-mailsec; then
+  err "mailclient-mailsec service is not active after install."
+  err "Run: systemctl status mailclient-mailsec --no-pager"
   exit 1
 fi
 

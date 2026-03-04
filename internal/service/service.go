@@ -183,6 +183,9 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 	if err != nil {
 		return "", models.User{}, err
 	}
+	if err := s.st.UpsertUserMailSecret(ctx, u.ID, mailSecret); err != nil {
+		return "", models.User{}, err
+	}
 
 	now := time.Now().UTC()
 	stage, err := s.ResolveMFAStage(ctx, u, nil)
@@ -212,6 +215,86 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 	}
 	_ = s.st.TouchUserLastLogin(ctx, u.ID, now)
 	return raw, u, nil
+}
+
+func (s *Service) CreatePasskeySession(ctx context.Context, user models.User, ip, userAgent, mailSecret string) (string, models.Session, error) {
+	if user.Status != models.UserActive && user.Role != "admin" {
+		return "", models.Session{}, ErrForbidden
+	}
+	raw, tokenHash, err := auth.NewOpaqueToken()
+	if err != nil {
+		return "", models.Session{}, err
+	}
+	now := time.Now().UTC()
+	sess := models.Session{
+		ID:            uuid.NewString(),
+		UserID:        user.ID,
+		TokenHash:     tokenHash,
+		MailSecret:    strings.TrimSpace(mailSecret),
+		IPHint:        ip,
+		UserAgentHash: hashUA(userAgent),
+		AuthMethod:    "passkey",
+		MFAVerifiedAt: &now,
+		ExpiresAt:     now.Add(s.cfg.SessionAbsoluteDuration()),
+		IdleExpiresAt: now.Add(s.cfg.SessionIdleDuration()),
+		CreatedAt:     now,
+		LastSeenAt:    now,
+	}
+	if err := s.st.CreateSession(ctx, sess); err != nil {
+		return "", models.Session{}, err
+	}
+	_ = s.st.TouchUserLastLogin(ctx, user.ID, now)
+	return raw, sess, nil
+}
+
+func (s *Service) UnlockSessionMailSecret(ctx context.Context, userID, sessionID, password string) error {
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return ErrInvalidCredentials
+	}
+	u, err := s.st.GetUserByID(ctx, userID)
+	if err != nil {
+		return ErrInvalidCredentials
+	}
+	if s.usesPAMAuth() {
+		stored := ""
+		if u.MailLogin != nil {
+			stored = *u.MailLogin
+		}
+		acceptedLogin, err := s.verifyMailCredentials(ctx, u.Email, password, "", stored)
+		if err != nil {
+			if isMailConnectivityError(err) {
+				return fmt.Errorf("%w: %v", ErrPAMVerifierDown, err)
+			}
+			return ErrInvalidCredentials
+		}
+		currentLogin := strings.TrimSpace(stored)
+		if strings.TrimSpace(acceptedLogin) != currentLogin {
+			if err := s.st.UpdateUserMailLogin(ctx, u.ID, acceptedLogin); err != nil {
+				return err
+			}
+		}
+	} else {
+		if !auth.VerifyPassword(u.PasswordHash, password) {
+			return ErrInvalidCredentials
+		}
+	}
+	mailSecret, err := util.EncryptString(s.encryptKey, password)
+	if err != nil {
+		return err
+	}
+	if err := s.st.UpsertUserMailSecret(ctx, u.ID, mailSecret); err != nil {
+		return err
+	}
+	if err := s.st.UpdateSessionMailSecret(ctx, sessionID, mailSecret); err != nil {
+		return err
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"session_id": sessionID,
+		"mode":       strings.ToLower(strings.TrimSpace(s.cfg.DovecotAuthMode)),
+	})
+	s.insertAuditBestEffort(ctx, u.ID, "auth.mail_secret.unlock", u.ID, string(meta))
+	return nil
 }
 
 func (s *Service) ValidateSession(ctx context.Context, rawToken string) (models.User, models.Session, error) {
@@ -557,6 +640,9 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 	if err := s.st.UpdateUserPasswordHash(ctx, t.UserID, h); err != nil {
 		return err
 	}
+	if mailSecret, encErr := util.EncryptString(s.encryptKey, newPassword); encErr == nil {
+		_ = s.st.UpsertUserMailSecret(ctx, t.UserID, mailSecret)
+	}
 	if !s.usesPAMAuth() {
 		if err := s.provision.UpsertActiveUser(ctx, u.Email, h); err != nil {
 			msg := err.Error()
@@ -589,6 +675,9 @@ func (s *Service) AdminResetPassword(ctx context.Context, adminID, userID, newPa
 	}
 	if err := s.st.UpdateUserPasswordHash(ctx, userID, h); err != nil {
 		return err
+	}
+	if mailSecret, encErr := util.EncryptString(s.encryptKey, newPassword); encErr == nil {
+		_ = s.st.UpsertUserMailSecret(ctx, userID, mailSecret)
 	}
 	if !s.usesPAMAuth() {
 		if err := s.provision.UpsertActiveUser(ctx, u.Email, h); err != nil {

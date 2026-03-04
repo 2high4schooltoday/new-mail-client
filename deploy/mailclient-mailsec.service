@@ -1,0 +1,23 @@
+[Unit]
+Description=Mailclient Mail Security Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mailclient
+EnvironmentFile=/opt/mailclient/.env
+ExecStart=/opt/mailclient/mailclient-mailsec-service
+User=mailclient
+Group=mailclient
+RuntimeDirectory=mailclient
+RuntimeDirectoryMode=0770
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -199,6 +199,15 @@ func (s *Store) DeleteSetting(ctx context.Context, key string) error {
 	return err
 }
 
+func (s *Store) DeleteSettingsByPrefixOlderThan(ctx context.Context, prefix string, before time.Time) error {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE key LIKE ? AND updated_at < ?`, prefix+"%", before.UTC())
+	return err
+}
+
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (models.User, error) {
 	u, err := scanUserCore(s.db.QueryRowContext(ctx,
 		`SELECT id,email,recovery_email,mail_login,mfa_preference,legacy_mfa_prompt_pending,mfa_setup_switch_used,mfa_backup_completed,password_hash,role,status,provision_state,provision_error,created_at,approved_at,approved_by,last_login_at
@@ -257,6 +266,31 @@ func (s *Store) UpdateUserMailLogin(ctx context.Context, userID, mailLogin strin
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET mail_login=? WHERE id=?`, mailLogin, userID)
 	return err
+}
+
+func (s *Store) UpsertUserMailSecret(ctx context.Context, userID, mailSecretEnc string) error {
+	mailSecretEnc = strings.TrimSpace(mailSecretEnc)
+	now := time.Now().UTC()
+	if mailSecretEnc == "" {
+		_, err := s.db.ExecContext(ctx, `UPDATE users SET mail_secret_enc=NULL, mail_secret_updated_at=NULL WHERE id=?`, userID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET mail_secret_enc=?, mail_secret_updated_at=? WHERE id=?`, mailSecretEnc, now, userID)
+	return err
+}
+
+func (s *Store) GetUserMailSecret(ctx context.Context, userID string) (string, bool, error) {
+	var raw sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT mail_secret_enc FROM users WHERE id=?`, userID).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, ErrNotFound
+		}
+		return "", false, err
+	}
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return "", false, nil
+	}
+	return strings.TrimSpace(raw.String), true, nil
 }
 
 func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, userID, recoveryEmail string) error {
@@ -764,6 +798,18 @@ func (s *Store) TouchSession(ctx context.Context, id string, idleExpiry time.Tim
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at=?, idle_expires_at=? WHERE id=?`, now, idleExpiry, id)
 	return err
+}
+
+func (s *Store) UpdateSessionMailSecret(ctx context.Context, sessionID, mailSecret string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET mail_secret=? WHERE id=?`, strings.TrimSpace(mailSecret), sessionID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) RevokeSession(ctx context.Context, id string) error {
