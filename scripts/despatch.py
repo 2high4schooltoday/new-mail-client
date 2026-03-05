@@ -94,6 +94,7 @@ from tui.system_ops import (
     CancelToken,
     detect_arch,
     detect_host,
+    detect_letsencrypt_cert_pair,
     detect_paths,
     detect_proxy_candidates,
     detect_service_state,
@@ -121,6 +122,45 @@ STAGE_META: dict[str, tuple[str, str]] = {
     "summary": ("[SUM]", "info"),
     "diagnostics": ("[DOC]", "primary"),
 }
+
+
+def _autofill_proxy_tls_paths(spec: InstallSpec) -> bool:
+    if not spec.proxy_setup or not spec.proxy_tls:
+        return False
+    server_name = (spec.proxy_server_name or spec.base_domain or "").strip()
+    if not server_name:
+        return False
+    if spec.proxy_cert and spec.proxy_key:
+        return False
+    cert, key = detect_letsencrypt_cert_pair(server_name)
+    changed = False
+    if cert and not spec.proxy_cert:
+        spec.proxy_cert = cert
+        changed = True
+    if key and not spec.proxy_key:
+        spec.proxy_key = key
+        changed = True
+    return changed
+
+
+def _seed_proxy_tls_defaults(spec: InstallSpec) -> bool:
+    server_name = (spec.proxy_server_name or spec.base_domain or "").strip()
+    if not server_name:
+        return False
+    cert, key = detect_letsencrypt_cert_pair(server_name)
+    if not cert or not key:
+        return False
+    changed = False
+    if not spec.proxy_cert:
+        spec.proxy_cert = cert
+        changed = True
+    if not spec.proxy_key:
+        spec.proxy_key = key
+        changed = True
+    if spec.proxy_setup and not spec.proxy_tls:
+        spec.proxy_tls = True
+        changed = True
+    return changed
 
 
 @dataclass
@@ -153,6 +193,8 @@ class DespatchTUI:
             proxy_server=proxies[0] if proxies else "nginx",
             proxy_server_name=default_domain,
         )
+        _seed_proxy_tls_defaults(self.install_spec)
+        _autofill_proxy_tls_paths(self.install_spec)
         self.uninstall_spec = UninstallSpec()
 
         self.mode = "home"
@@ -907,7 +949,18 @@ class DespatchTUI:
             return
         idx = clamp(idx, 0, len(opts) - 1)
         setattr(self._editor_obj(), field_name, opts[idx])
+        if self.editor and self.editor.operation == "install":
+            self._apply_install_autofill(field_name)
         self.ui.status_line = f"{field.label} set to {opts[idx]}"
+
+    def _apply_install_autofill(self, field_name: str) -> None:
+        if field_name not in {"proxy_setup", "proxy_tls", "proxy_server_name", "base_domain", "proxy_cert", "proxy_key"}:
+            return
+        before = (self.install_spec.proxy_cert, self.install_spec.proxy_key)
+        if _autofill_proxy_tls_paths(self.install_spec):
+            after = (self.install_spec.proxy_cert, self.install_spec.proxy_key)
+            if after != before:
+                self.ui.status_line = "Auto-detected TLS cert/key from /etc/letsencrypt/live."
 
     def _edit_field(self, field: FieldDef) -> None:
         obj = self._editor_obj()
@@ -927,6 +980,8 @@ class DespatchTUI:
                     self.ui.status_line = f"{field.label} unchanged."
                     return
             setattr(obj, field.name, next_value)
+            if self.editor and self.editor.operation == "install":
+                self._apply_install_autofill(field.name)
             self.ui.status_line = f"{field.label} set to {'Enabled' if next_value else 'Disabled'}"
             return
         if field.ftype == "choice":
@@ -935,6 +990,8 @@ class DespatchTUI:
                 self.ui.status_line = f"{field.label} unchanged."
                 return
             setattr(obj, field.name, selected)
+            if self.editor and self.editor.operation == "install":
+                self._apply_install_autofill(field.name)
             self.ui.status_line = f"{field.label} set to {selected}"
             return
         value = self._prompt_line(field.label, str(current))
@@ -942,6 +999,8 @@ class DespatchTUI:
             self.ui.status_line = f"{field.label} unchanged."
             return
         setattr(obj, field.name, value)
+        if self.editor and self.editor.operation == "install":
+            self._apply_install_autofill(field.name)
         self.ui.status_line = f"{field.label} updated."
 
     def _prompt_line(self, label: str, initial: str) -> str | None:
@@ -1136,6 +1195,7 @@ class DespatchTUI:
         self.ui.status_line = f"Running {operation}..."
 
         if operation == "install":
+            _autofill_proxy_tls_paths(self.install_spec)
             preflight_error = self._check_install_preflight()
             if preflight_error is not None:
                 apply_runner_event(self.run_state, {"type": "run_start", "run_id": run_id, "operation": operation})
@@ -1373,12 +1433,15 @@ def _plain_edit_install(spec: InstallSpec) -> bool:
         cur = getattr(spec, field.name)
         if field.ftype == "bool":
             setattr(spec, field.name, not bool(cur))
+            _autofill_proxy_tls_paths(spec)
             continue
         if field.ftype == "choice":
             choice_idx = _plain_choose(field.label, list(field.options))
             setattr(spec, field.name, list(field.options)[choice_idx])
+            _autofill_proxy_tls_paths(spec)
             continue
         setattr(spec, field.name, _plain_edit_value(field.label, str(cur)))
+        _autofill_proxy_tls_paths(spec)
 
 
 def _plain_edit_uninstall(spec: UninstallSpec) -> bool:
@@ -1419,6 +1482,8 @@ def run_plain_console() -> int:
         proxy_server=proxies[0] if proxies else "nginx",
         proxy_server_name=default_domain,
     )
+    _seed_proxy_tls_defaults(install_spec)
+    _autofill_proxy_tls_paths(install_spec)
     uninstall_spec = UninstallSpec()
 
     while True:
@@ -1473,20 +1538,26 @@ def run_plain_console_legacy() -> int:
     if choice == "1":
         hostname = socket.gethostname()
         default_domain = hostname if "." in hostname else "example.com"
+        base_domain = _prompt_text("Base domain", default_domain)
+        proxy_server_name = _prompt_text("Proxy server name", base_domain)
+        auto_cert, auto_key = detect_letsencrypt_cert_pair(proxy_server_name or base_domain)
+        proxy_tls_default = bool(auto_cert and auto_key)
         spec = InstallSpec(
-            base_domain=_prompt_text("Base domain", default_domain),
+            base_domain=base_domain,
             listen_addr=_prompt_text("Listen address", ":8080"),
             install_service=_prompt_bool("Install systemd service", True),
             proxy_setup=_prompt_bool("Configure reverse proxy", True),
             proxy_server=_prompt_text("Proxy server", "nginx"),
-            proxy_server_name=_prompt_text("Proxy server name", default_domain),
-            proxy_tls=_prompt_bool("Enable proxy TLS", False),
+            proxy_server_name=proxy_server_name,
+            proxy_tls=_prompt_bool("Enable proxy TLS", proxy_tls_default),
             dovecot_auth_mode=_prompt_text("Dovecot auth mode (pam/sql)", "pam"),
             run_diagnose=_prompt_bool("Run diagnose at end", True),
         )
         if spec.proxy_tls:
-            spec.proxy_cert = _prompt_text("TLS cert path", f"/etc/letsencrypt/live/{spec.proxy_server_name}/fullchain.pem")
-            spec.proxy_key = _prompt_text("TLS key path", f"/etc/letsencrypt/live/{spec.proxy_server_name}/privkey.pem")
+            cert_default = auto_cert or f"/etc/letsencrypt/live/{spec.proxy_server_name}/fullchain.pem"
+            key_default = auto_key or f"/etc/letsencrypt/live/{spec.proxy_server_name}/privkey.pem"
+            spec.proxy_cert = _prompt_text("TLS cert path", cert_default)
+            spec.proxy_key = _prompt_text("TLS key path", key_default)
         if spec.dovecot_auth_mode == "sql":
             spec.dovecot_auth_db_driver = _prompt_text("Dovecot SQL driver", "mysql")
             spec.dovecot_auth_db_dsn = _prompt_text("Dovecot SQL DSN", "")

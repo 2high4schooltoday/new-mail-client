@@ -786,6 +786,71 @@ detect_web_servers() {
   printf '%s\n' "${found[@]}"
 }
 
+is_loopback_host() {
+  local host
+  host="$(lower "$(trim "${1:-}")")"
+  case "$host" in
+    127.0.0.1|localhost|::1|"[::1]") return 0 ;;
+  esac
+  return 1
+}
+
+detect_letsencrypt_tls_pair() {
+  local server_name="$1"
+  local live_dir="/etc/letsencrypt/live"
+  local cert key candidate walk
+  declare -A seen=()
+  local candidates=()
+
+  server_name="$(lower "$(trim "${server_name:-}")")"
+  [[ -d "$live_dir" ]] || return 1
+  [[ -n "$server_name" ]] || return 1
+  if [[ "$server_name" == \*.* ]]; then
+    server_name="${server_name#*.}"
+  fi
+
+  candidates+=("$server_name")
+  walk="$server_name"
+  while [[ "$walk" == *.* ]]; do
+    walk="${walk#*.}"
+    candidates+=("$walk")
+  done
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ -n "${seen[$candidate]:-}" ]]; then
+      continue
+    fi
+    seen[$candidate]=1
+    cert="${live_dir}/${candidate}/fullchain.pem"
+    key="${live_dir}/${candidate}/privkey.pem"
+    if [[ -f "$cert" && -f "$key" ]]; then
+      printf '%s\n%s\n' "$cert" "$key"
+      return 0
+    fi
+  done
+
+  for candidate in "$live_dir"/*; do
+    [[ -d "$candidate" ]] || continue
+    cert="${candidate}/fullchain.pem"
+    key="${candidate}/privkey.pem"
+    if [[ -f "$cert" && -f "$key" ]]; then
+      printf '%s\n%s\n' "$cert" "$key"
+      return 0
+    fi
+  done
+  return 1
+}
+
+derive_imap_insecure_skip_verify() {
+  local host="$1" imap_tls="$2" imap_starttls="$3"
+  if is_loopback_host "$host" && { [[ "$imap_tls" == "true" ]] || [[ "$imap_starttls" == "true" ]]; }; then
+    printf 'true'
+    return
+  fi
+  printf 'false'
+}
+
 ensure_proxy_tooling() {
   local server="$1" os_id="$2"
   case "$server" in
@@ -1784,13 +1849,36 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
       fi
       if [[ "$PROXY_SETUP" -eq 1 ]]; then
         PROXY_SERVER_NAME="$(prompt_input "Public server name for reverse proxy" "$BASE_DOMAIN")"
-        if prompt_yes_no "Enable TLS in reverse proxy config now (requires existing cert files)?" 0; then
+        TLS_CERT_DEFAULT="/etc/letsencrypt/live/${PROXY_SERVER_NAME}/fullchain.pem"
+        TLS_KEY_DEFAULT="/etc/letsencrypt/live/${PROXY_SERVER_NAME}/privkey.pem"
+        TLS_PROMPT_DEFAULT=0
+        if mapfile -t TLS_PAIR < <(detect_letsencrypt_tls_pair "$PROXY_SERVER_NAME"); then
+          if [[ "${#TLS_PAIR[@]}" -ge 2 ]]; then
+            TLS_CERT_DEFAULT="${TLS_PAIR[0]}"
+            TLS_KEY_DEFAULT="${TLS_PAIR[1]}"
+            TLS_PROMPT_DEFAULT=1
+            log "Auto-detected TLS certificate and key from /etc/letsencrypt/live for ${PROXY_SERVER_NAME}."
+          fi
+        fi
+        if prompt_yes_no "Enable TLS in reverse proxy config now (requires existing cert files)?" "$TLS_PROMPT_DEFAULT"; then
           PROXY_TLS=1
           while true; do
-            PROXY_CERT="$(prompt_input "TLS certificate file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/fullchain.pem")"
-            PROXY_KEY="$(prompt_input "TLS private key file" "/etc/letsencrypt/live/${PROXY_SERVER_NAME}/privkey.pem")"
+            PROXY_CERT="$(prompt_input "TLS certificate file" "$TLS_CERT_DEFAULT")"
+            PROXY_KEY="$(prompt_input "TLS private key file" "$TLS_KEY_DEFAULT")"
             if [[ -f "$PROXY_CERT" && -f "$PROXY_KEY" ]]; then
               break
+            fi
+            if mapfile -t TLS_PAIR < <(detect_letsencrypt_tls_pair "$PROXY_SERVER_NAME"); then
+              if [[ "${#TLS_PAIR[@]}" -ge 2 ]]; then
+                PROXY_CERT="${TLS_PAIR[0]}"
+                PROXY_KEY="${TLS_PAIR[1]}"
+                TLS_CERT_DEFAULT="$PROXY_CERT"
+                TLS_KEY_DEFAULT="$PROXY_KEY"
+                if [[ -f "$PROXY_CERT" && -f "$PROXY_KEY" ]]; then
+                  log "Auto-recovered TLS paths from /etc/letsencrypt/live."
+                  break
+                fi
+              fi
             fi
             warn "TLS files missing. cert_exists=$( [[ -f "$PROXY_CERT" ]] && echo yes || echo no ), key_exists=$( [[ -f "$PROXY_KEY" ]] && echo yes || echo no )"
             if ! prompt_yes_no "Re-enter TLS paths?" 1; then
@@ -1932,13 +2020,14 @@ fi
 
 IMAP_PORT="$(detect_imap_port)"
 SMTP_PORT="$(detect_smtp_port)"
+IMAP_HOST="127.0.0.1"
 IMAP_TLS="true"
 IMAP_STARTTLS="false"
 if [[ "$IMAP_PORT" == "143" ]]; then
   IMAP_TLS="false"
   IMAP_STARTTLS="true"
 fi
-IMAP_INSECURE_SKIP_VERIFY="false"
+IMAP_INSECURE_SKIP_VERIFY="$(derive_imap_insecure_skip_verify "$IMAP_HOST" "$IMAP_TLS" "$IMAP_STARTTLS")"
 SMTP_TLS="false"
 SMTP_STARTTLS="true"
 if [[ "$SMTP_PORT" == "465" ]]; then
@@ -1976,7 +2065,7 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
   set_env_var "$OUT_ENV" "TRUST_PROXY" "true"
 fi
 
-set_env_var "$OUT_ENV" "IMAP_HOST" "127.0.0.1"
+set_env_var "$OUT_ENV" "IMAP_HOST" "$IMAP_HOST"
 set_env_var "$OUT_ENV" "IMAP_PORT" "$IMAP_PORT"
 set_env_var "$OUT_ENV" "IMAP_TLS" "$IMAP_TLS"
 set_env_var "$OUT_ENV" "IMAP_STARTTLS" "$IMAP_STARTTLS"
@@ -2041,8 +2130,12 @@ set_env_var "$OUT_ENV" "MAILSEC_SOCKET" "/run/despatch/mailsec.sock"
 set_env_var "$OUT_ENV" "MAILSEC_TIMEOUT_MS" "5000"
 
 log "Generated $OUT_ENV"
-log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
-log "TLS certificate verification for IMAP/SMTP is enabled by default."
+log "Detected IMAP ${IMAP_HOST}:${IMAP_PORT} and SMTP 127.0.0.1:${SMTP_PORT}"
+if [[ "$IMAP_INSECURE_SKIP_VERIFY" == "true" ]]; then
+  warn "IMAP host is loopback with TLS/STARTTLS enabled; auto-setting IMAP_INSECURE_SKIP_VERIFY=true to avoid local certificate SAN mismatches."
+else
+  log "TLS certificate verification for IMAP/SMTP is enabled by default."
+fi
 log "Deployment mode: $DEPLOY_MODE"
 log "Cookie secure mode: $COOKIE_SECURE_MODE"
 if [[ "$DEPLOY_MODE" == "proxy" && "$PROXY_TLS" != "1" ]]; then

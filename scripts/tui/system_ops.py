@@ -109,6 +109,41 @@ def detect_proxy_candidates() -> list[str]:
     return out
 
 
+def detect_letsencrypt_cert_pair(server_name: str, live_dir: Path | None = None) -> tuple[str, str]:
+    server = (server_name or "").strip().lower()
+    if not server:
+        return "", ""
+    if live_dir is None:
+        live_dir = Path("/etc/letsencrypt/live")
+    if not live_dir.is_dir():
+        return "", ""
+
+    candidates: list[str] = []
+    if server.startswith("*."):
+        server = server[2:]
+    candidates.append(server)
+    walk = server
+    while "." in walk:
+        walk = walk.split(".", 1)[1]
+        if walk not in candidates:
+            candidates.append(walk)
+
+    for name in candidates:
+        cert = live_dir / name / "fullchain.pem"
+        key = live_dir / name / "privkey.pem"
+        if cert.is_file() and key.is_file():
+            return str(cert), str(key)
+
+    for entry in sorted(live_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        cert = entry / "fullchain.pem"
+        key = entry / "privkey.pem"
+        if cert.is_file() and key.is_file():
+            return str(cert), str(key)
+    return "", ""
+
+
 def stream_command(
     cmd: list[str],
     cwd: Path,

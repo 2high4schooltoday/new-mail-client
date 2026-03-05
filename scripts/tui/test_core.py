@@ -10,6 +10,7 @@ from scripts.tui.logstore import LogStore
 from scripts.tui.models import AppPaths
 from scripts.tui.runner import OperationRunner
 from scripts.tui.state import apply_runner_event, new_run_state
+from scripts.tui.system_ops import detect_letsencrypt_cert_pair
 
 
 class InstallSpecTests(unittest.TestCase):
@@ -157,6 +158,36 @@ class RunnerTests(unittest.TestCase):
                 runner._health_url_for_listen("[::1]:8080"),
                 "http://[::1]:8080/health/live",
             )
+
+
+class SystemOpsTests(unittest.TestCase):
+    def test_detect_letsencrypt_cert_pair_prefers_exact_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            live = Path(td)
+            exact = live / "mail.example.com"
+            fallback = live / "example.com"
+            exact.mkdir(parents=True)
+            fallback.mkdir(parents=True)
+            (exact / "fullchain.pem").write_text("cert", encoding="utf-8")
+            (exact / "privkey.pem").write_text("key", encoding="utf-8")
+            (fallback / "fullchain.pem").write_text("cert", encoding="utf-8")
+            (fallback / "privkey.pem").write_text("key", encoding="utf-8")
+
+            cert, key = detect_letsencrypt_cert_pair("mail.example.com", live)
+            self.assertEqual(cert, str(exact / "fullchain.pem"))
+            self.assertEqual(key, str(exact / "privkey.pem"))
+
+    def test_detect_letsencrypt_cert_pair_falls_back_to_parent_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            live = Path(td)
+            parent = live / "example.com"
+            parent.mkdir(parents=True)
+            (parent / "fullchain.pem").write_text("cert", encoding="utf-8")
+            (parent / "privkey.pem").write_text("key", encoding="utf-8")
+
+            cert, key = detect_letsencrypt_cert_pair("mail.example.com", live)
+            self.assertEqual(cert, str(parent / "fullchain.pem"))
+            self.assertEqual(key, str(parent / "privkey.pem"))
 
 
 if __name__ == "__main__":
