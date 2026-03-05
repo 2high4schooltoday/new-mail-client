@@ -2,7 +2,10 @@ package update
 
 import (
 	"context"
+	"crypto/ed25519"
+	crand "crypto/rand"
 	"errors"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/store"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/store"
 )
 
 func newUpdateTestStore(t *testing.T) *store.Store {
@@ -59,19 +62,19 @@ func TestQueueApplyValidationAndInProgress(t *testing.T) {
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		t.Fatalf("mkdir unit dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(unitDir, "mailclient-updater.path"), []byte("ok"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
 		t.Fatalf("write unit file: %v", err)
 	}
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
-		UpdateRepoName:         "new-mail-client",
+		UpdateRepoName:         "despatch",
 		UpdateCheckIntervalMin: 60,
 		UpdateHTTPTimeoutSec:   10,
 		UpdateBackupKeep:       3,
 		UpdateBaseDir:          filepath.Join(base, "update"),
 		UpdateInstallDir:       filepath.Join(base, "install"),
-		UpdateServiceName:      "mailclient",
+		UpdateServiceName:      "despatch",
 		UpdateSystemdUnitDir:   unitDir,
 	}
 	mgr := NewManager(cfg)
@@ -98,19 +101,19 @@ func TestQueueApplyIgnoresUnreadableStatusFile(t *testing.T) {
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		t.Fatalf("mkdir unit dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(unitDir, "mailclient-updater.path"), []byte("ok"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
 		t.Fatalf("write unit file: %v", err)
 	}
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
-		UpdateRepoName:         "new-mail-client",
+		UpdateRepoName:         "despatch",
 		UpdateCheckIntervalMin: 60,
 		UpdateHTTPTimeoutSec:   10,
 		UpdateBackupKeep:       3,
 		UpdateBaseDir:          filepath.Join(base, "update"),
 		UpdateInstallDir:       filepath.Join(base, "install"),
-		UpdateServiceName:      "mailclient",
+		UpdateServiceName:      "despatch",
 		UpdateSystemdUnitDir:   unitDir,
 	}
 	mgr := NewManager(cfg)
@@ -133,7 +136,7 @@ func TestGitHubLatestReleaseWithETag(t *testing.T) {
 	t.Parallel()
 	serverETag := `"abc123"`
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/2high4schooltoday/new-mail-client/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/2high4schooltoday/despatch/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("If-None-Match") == serverETag {
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -147,7 +150,7 @@ func TestGitHubLatestReleaseWithETag(t *testing.T) {
 
 	cfg := config.Config{
 		UpdateRepoOwner:      "2high4schooltoday",
-		UpdateRepoName:       "new-mail-client",
+		UpdateRepoName:       "despatch",
 		UpdateHTTPTimeoutSec: 5,
 	}
 	gh := newGitHubClient(cfg)
@@ -178,10 +181,10 @@ func TestGitHubLatestReleaseWithETag(t *testing.T) {
 func TestGitHubLatestReleaseFallsBackToPrereleaseWhenLatest404(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/2high4schooltoday/new-mail-client/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/2high4schooltoday/despatch/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	mux.HandleFunc("/repos/2high4schooltoday/new-mail-client/releases", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/2high4schooltoday/despatch/releases", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
 			{"tag_name":"v1.0.0-alpha.1.1","name":"Alpha 1.0.0_01","published_at":"2026-03-01T12:29:38Z","html_url":"https://example.test/release-1","draft":false,"prerelease":true,"assets":[]},
@@ -193,7 +196,7 @@ func TestGitHubLatestReleaseFallsBackToPrereleaseWhenLatest404(t *testing.T) {
 
 	cfg := config.Config{
 		UpdateRepoOwner:      "2high4schooltoday",
-		UpdateRepoName:       "new-mail-client",
+		UpdateRepoName:       "despatch",
 		UpdateHTTPTimeoutSec: 5,
 	}
 	gh := newGitHubClient(cfg)
@@ -215,10 +218,10 @@ func TestArchiveAssetCandidatesIncludeArchAliases(t *testing.T) {
 	t.Parallel()
 	candidates := archiveAssetCandidates("arm64")
 	joined := strings.Join(candidates, ",")
-	if !strings.Contains(joined, "mailclient-linux-arm64.tar.gz") {
+	if !strings.Contains(joined, "despatch-linux-arm64.tar.gz") {
 		t.Fatalf("missing arm64 archive candidate: %v", candidates)
 	}
-	if !strings.Contains(joined, "mailclient-linux-aarch64.tar.gz") {
+	if !strings.Contains(joined, "despatch-linux-aarch64.tar.gz") {
 		t.Fatalf("missing aarch64 alias candidate: %v", candidates)
 	}
 }
@@ -227,7 +230,7 @@ func TestResolveArchiveAssetUsesArchAlias(t *testing.T) {
 	t.Parallel()
 	release := githubRelease{
 		Assets: []githubReleaseAsset{
-			{Name: "mailclient-linux-aarch64.tar.gz", URL: "https://example.test/aarch64.tar.gz"},
+			{Name: "despatch-linux-aarch64.tar.gz", URL: "https://example.test/aarch64.tar.gz"},
 			{Name: "checksums.txt", URL: "https://example.test/checksums.txt"},
 		},
 	}
@@ -235,7 +238,7 @@ func TestResolveArchiveAssetUsesArchAlias(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected alias archive resolution to succeed")
 	}
-	if name != "mailclient-linux-aarch64.tar.gz" {
+	if name != "despatch-linux-aarch64.tar.gz" {
 		t.Fatalf("unexpected archive name: %q", name)
 	}
 	if url != "https://example.test/aarch64.tar.gz" {
@@ -263,7 +266,7 @@ func TestIsReadOnlyOrPermissionError(t *testing.T) {
 		want bool
 	}{
 		{name: "permission", err: os.ErrPermission, want: true},
-		{name: "read_only_fs", err: &os.PathError{Op: "open", Path: "/etc/systemd/system/mailclient-mailsec.service", Err: syscall.EROFS}, want: true},
+		{name: "read_only_fs", err: &os.PathError{Op: "open", Path: "/etc/systemd/system/despatch-mailsec.service", Err: syscall.EROFS}, want: true},
 		{name: "other", err: errors.New("boom"), want: false},
 	}
 	for _, tt := range tests {
@@ -300,5 +303,55 @@ func TestIsSystemdLoadStateKnown(t *testing.T) {
 				t.Fatalf("isSystemdLoadStateKnown(%q) = %v, want %v", tt.state, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestVerifyChecksumSignature(t *testing.T) {
+	t.Parallel()
+	pub, priv, err := ed25519.GenerateKey(crand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	otherPub, _, err := ed25519.GenerateKey(crand.Reader)
+	if err != nil {
+		t.Fatalf("generate secondary keypair: %v", err)
+	}
+
+	tmp := t.TempDir()
+	checksumPath := filepath.Join(tmp, "checksums.txt")
+	if err := os.WriteFile(checksumPath, []byte("abc123  despatch-linux-amd64.tar.gz\n"), 0o640); err != nil {
+		t.Fatalf("write checksum: %v", err)
+	}
+
+	sig := ed25519.Sign(priv, []byte("abc123  despatch-linux-amd64.tar.gz\n"))
+	sigPath := filepath.Join(tmp, "checksums.txt.sig")
+	if err := os.WriteFile(sigPath, sig, 0o640); err != nil {
+		t.Fatalf("write signature: %v", err)
+	}
+	pubKey := base64.StdEncoding.EncodeToString(pub)
+	if err := verifyChecksumSignature(checksumPath, sigPath, []string{pubKey}); err != nil {
+		t.Fatalf("expected signature verification success, got: %v", err)
+	}
+
+	if err := os.WriteFile(checksumPath, []byte("tampered\n"), 0o640); err != nil {
+		t.Fatalf("write tampered checksum: %v", err)
+	}
+	if err := verifyChecksumSignature(checksumPath, sigPath, []string{pubKey}); err == nil {
+		t.Fatalf("expected verification to fail for tampered checksum")
+	}
+
+	if err := os.WriteFile(checksumPath, []byte("abc123  despatch-linux-amd64.tar.gz\n"), 0o640); err != nil {
+		t.Fatalf("restore checksum: %v", err)
+	}
+	otherKey := base64.StdEncoding.EncodeToString(otherPub)
+	if err := verifyChecksumSignature(checksumPath, sigPath, []string{otherKey}); err == nil {
+		t.Fatalf("expected verification to fail with wrong key")
+	}
+
+	if err := os.WriteFile(sigPath, []byte(base64.StdEncoding.EncodeToString(sig)), 0o640); err != nil {
+		t.Fatalf("write base64 signature: %v", err)
+	}
+	if err := verifyChecksumSignature(checksumPath, sigPath, []string{pubKey}); err != nil {
+		t.Fatalf("expected base64 signature verification success, got: %v", err)
 	}
 }

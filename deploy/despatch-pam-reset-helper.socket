@@ -1,0 +1,13 @@
+[Unit]
+Description=Despatch PAM Reset Helper Socket
+PartOf=despatch-pam-reset-helper.service
+
+[Socket]
+ListenStream=/run/despatch/pam-reset-helper.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=despatch
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

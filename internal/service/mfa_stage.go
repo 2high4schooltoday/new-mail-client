@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"mailclient/internal/models"
+	"despatch/internal/models"
 )
 
 const (
@@ -121,22 +121,5 @@ func (s *Service) ResolveMFAStage(ctx context.Context, user models.User, sess *m
 }
 
 func (s *Service) isAdminMFAEnforced(ctx context.Context) (bool, error) {
-	raw, ok, err := s.st.GetSetting(ctx, "enforce_admin_mfa")
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		if setupRaw, setupOK, setupErr := s.st.GetSetting(ctx, "setup_completed_at"); setupErr != nil {
-			return false, setupErr
-		} else if setupOK && strings.TrimSpace(setupRaw) != "" {
-			return true, nil
-		}
-		return false, nil
-	}
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "yes", "on", "required", "enforced":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return s.AdminMFARequired(ctx)
 }

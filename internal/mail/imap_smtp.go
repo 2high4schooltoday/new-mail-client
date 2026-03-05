@@ -21,7 +21,7 @@ import (
 	imapclient "github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message/mail"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 const (

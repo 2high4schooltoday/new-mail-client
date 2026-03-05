@@ -13,39 +13,39 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
-type sendTestMailClient struct {
+type sendTestDespatch struct {
 	mu           sync.Mutex
 	sendErr      error
 	capturedReq  mail.SendRequest
 	capturedUser string
 }
 
-func (m *sendTestMailClient) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
+func (m *sendTestDespatch) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
 	return []mail.Mailbox{{Name: "INBOX", Messages: 1}}, nil
 }
 
-func (m *sendTestMailClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
+func (m *sendTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }
 
-func (m *sendTestMailClient) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
+func (m *sendTestDespatch) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
 	return mail.Message{}, nil
 }
 
-func (m *sendTestMailClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
+func (m *sendTestDespatch) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }
 
-func (m *sendTestMailClient) Send(ctx context.Context, user, pass string, req mail.SendRequest) error {
+func (m *sendTestDespatch) Send(ctx context.Context, user, pass string, req mail.SendRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.capturedUser = user
@@ -53,29 +53,29 @@ func (m *sendTestMailClient) Send(ctx context.Context, user, pass string, req ma
 	return m.sendErr
 }
 
-func (m *sendTestMailClient) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {
+func (m *sendTestDespatch) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {
 	return nil
 }
 
-func (m *sendTestMailClient) Move(ctx context.Context, user, pass, id, mailbox string) error {
+func (m *sendTestDespatch) Move(ctx context.Context, user, pass, id, mailbox string) error {
 	return nil
 }
 
-func (m *sendTestMailClient) GetAttachment(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentContent, error) {
+func (m *sendTestDespatch) GetAttachment(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentContent, error) {
 	return mail.AttachmentContent{}, nil
 }
 
-func (m *sendTestMailClient) GetAttachmentStream(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentMeta, io.ReadCloser, error) {
+func (m *sendTestDespatch) GetAttachmentStream(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentMeta, io.ReadCloser, error) {
 	return mail.AttachmentMeta{}, nil, errors.New("not implemented")
 }
 
-func (m *sendTestMailClient) snapshot() (string, mail.SendRequest) {
+func (m *sendTestDespatch) snapshot() (string, mail.SendRequest) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.capturedUser, m.capturedReq
 }
 
-func newSendRouter(t *testing.T, mailClient mail.Client, mailLogin string) http.Handler {
+func newSendRouter(t *testing.T, despatch mail.Client, mailLogin string) http.Handler {
 	t.Helper()
 	sqdb, err := db.OpenSQLite(filepath.Join(t.TempDir(), "app.db"), 1, 1, time.Minute)
 	if err != nil {
@@ -116,8 +116,8 @@ func newSendRouter(t *testing.T, mailClient mail.Client, mailLogin string) http.
 	cfg := config.Config{
 		ListenAddr:          ":8080",
 		BaseDomain:          "example.com",
-		SessionCookieName:   "mailclient_session",
-		CSRFCookieName:      "mailclient_csrf",
+		SessionCookieName:   "despatch_session",
+		CSRFCookieName:      "despatch_csrf",
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",
@@ -128,7 +128,7 @@ func newSendRouter(t *testing.T, mailClient mail.Client, mailLogin string) http.
 		DovecotAuthMode:     "sql",
 	}
 
-	svc := service.New(cfg, st, mailClient, mail.NoopProvisioner{}, nil)
+	svc := service.New(cfg, st, despatch, mail.NoopProvisioner{}, nil)
 	return NewRouter(cfg, svc)
 }
 
@@ -149,10 +149,10 @@ func loginForSend(t *testing.T, router http.Handler) (*http.Cookie, *http.Cookie
 	var sessionCookie *http.Cookie
 	var csrfCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "mailclient_session" {
+		if c.Name == "despatch_session" {
 			sessionCookie = c
 		}
-		if c.Name == "mailclient_csrf" {
+		if c.Name == "despatch_csrf" {
 			csrfCookie = c
 		}
 	}
@@ -178,10 +178,10 @@ func postSendJSON(t *testing.T, router http.Handler, sessionCookie, csrfCookie *
 }
 
 func TestSendSMTPPolicyErrorMappedTo422(t *testing.T) {
-	mailClient := &sendTestMailClient{
+	despatch := &sendTestDespatch{
 		sendErr: mail.WrapSMTPSenderRejected(errors.New("sender address rejected: not owned by user")),
 	}
-	router := newSendRouter(t, mailClient, "webmaster")
+	router := newSendRouter(t, despatch, "webmaster")
 	sessionCookie, csrfCookie := loginForSend(t, router)
 
 	body, _ := json.Marshal(map[string]any{
@@ -201,7 +201,7 @@ func TestSendSMTPPolicyErrorMappedTo422(t *testing.T) {
 		t.Fatalf("expected smtp_sender_rejected, got %q body=%s", apiErr.Code, rec.Body.String())
 	}
 
-	user, req := mailClient.snapshot()
+	user, req := despatch.snapshot()
 	if user != "webmaster" {
 		t.Fatalf("expected SMTP auth user to use mail_login, got %q", user)
 	}
@@ -211,10 +211,10 @@ func TestSendSMTPPolicyErrorMappedTo422(t *testing.T) {
 }
 
 func TestSendGenericSMTPErrorMappedTo502(t *testing.T) {
-	mailClient := &sendTestMailClient{
+	despatch := &sendTestDespatch{
 		sendErr: errors.New("upstream smtp timeout"),
 	}
-	router := newSendRouter(t, mailClient, "")
+	router := newSendRouter(t, despatch, "")
 	sessionCookie, csrfCookie := loginForSend(t, router)
 
 	body, _ := json.Marshal(map[string]any{
@@ -236,8 +236,8 @@ func TestSendGenericSMTPErrorMappedTo502(t *testing.T) {
 }
 
 func TestSendIgnoresClientFromField(t *testing.T) {
-	mailClient := &sendTestMailClient{}
-	router := newSendRouter(t, mailClient, "")
+	despatch := &sendTestDespatch{}
+	router := newSendRouter(t, despatch, "")
 	sessionCookie, csrfCookie := loginForSend(t, router)
 
 	body, _ := json.Marshal(map[string]any{
@@ -251,7 +251,7 @@ func TestSendIgnoresClientFromField(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	user, req := mailClient.snapshot()
+	user, req := despatch.snapshot()
 	if user != "admin@example.com" {
 		t.Fatalf("expected SMTP auth user to default to account email, got %q", user)
 	}

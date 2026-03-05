@@ -40,6 +40,7 @@ jobs:
           ./scripts/check_ui_selector_contract.sh
           ./scripts/check_surface_depth.sh
           ./scripts/check_no_native_dialogs.sh
+          ./scripts/check_no_runtime_artifacts.sh
 
       - name: Rust dependency audit
         run: |
@@ -52,8 +53,14 @@ jobs:
           )
 
       - name: Build release archives
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          if [[ -z "${UPDATE_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "UPDATE_SIGNING_PRIVATE_KEY secret is required for release signing" >&2
+            exit 1
+          fi
           VERSION="${GITHUB_REF_NAME:-dev}"
           COMMIT="${GITHUB_SHA}"
           BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -67,36 +74,43 @@ jobs:
               arm64) RUST_TARGET="aarch64-unknown-linux-gnu" ;;
               *) echo "Unsupported ARCH=${ARCH}" >&2; exit 1 ;;
             esac
-            LDFLAGS="-X 'mailclient/internal/version.Version=${VERSION}' -X 'mailclient/internal/version.Commit=${COMMIT}' -X 'mailclient/internal/version.BuildTime=${BUILD_TIME}' -X 'mailclient/internal/version.SourceRepo=${SOURCE_REPO}'"
-            GOOS=linux GOARCH="${ARCH}" go build -ldflags "${LDFLAGS}" -o "${PKG_DIR}/mailclient" ./cmd/server
+            LDFLAGS="-X 'despatch/internal/version.Version=${VERSION}' -X 'despatch/internal/version.Commit=${COMMIT}' -X 'despatch/internal/version.BuildTime=${BUILD_TIME}' -X 'despatch/internal/version.SourceRepo=${SOURCE_REPO}'"
+            GOOS=linux GOARCH="${ARCH}" go build -ldflags "${LDFLAGS}" -o "${PKG_DIR}/despatch" ./cmd/server
             (
               cd rust
-              export MAILCLIENT_BUILD_VERSION="${VERSION}"
-              export MAILCLIENT_BUILD_COMMIT="${COMMIT}"
-              export MAILCLIENT_BUILD_TIME="${BUILD_TIME}"
+              export DESPATCH_BUILD_VERSION="${VERSION}"
+              export DESPATCH_BUILD_COMMIT="${COMMIT}"
+              export DESPATCH_BUILD_TIME="${BUILD_TIME}"
               if [[ "${RUST_TARGET}" == "aarch64-unknown-linux-gnu" ]]; then
                 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
               fi
               cargo build --release --target "${RUST_TARGET}" -p pam_reset_helper -p update_worker -p mailsec_service
             )
-            cp "rust/target/${RUST_TARGET}/release/pam_reset_helper" "${PKG_DIR}/mailclient-pam-reset-helper"
-            cp "rust/target/${RUST_TARGET}/release/update_worker" "${PKG_DIR}/mailclient-update-worker"
-            cp "rust/target/${RUST_TARGET}/release/mailsec_service" "${PKG_DIR}/mailclient-mailsec-service"
+            cp "rust/target/${RUST_TARGET}/release/pam_reset_helper" "${PKG_DIR}/despatch-pam-reset-helper"
+            cp "rust/target/${RUST_TARGET}/release/update_worker" "${PKG_DIR}/despatch-update-worker"
+            cp "rust/target/${RUST_TARGET}/release/mailsec_service" "${PKG_DIR}/despatch-mailsec-service"
             cp -R web "${PKG_DIR}/web"
             cp -R migrations "${PKG_DIR}/migrations"
             cp -R deploy "${PKG_DIR}/deploy"
-            tar -C "${PKG_DIR}" -czf "dist/mailclient-linux-${ARCH}.tar.gz" mailclient mailclient-pam-reset-helper mailclient-update-worker mailclient-mailsec-service web migrations deploy
+            tar -C "${PKG_DIR}" -czf "dist/despatch-linux-${ARCH}.tar.gz" despatch despatch-pam-reset-helper despatch-update-worker despatch-mailsec-service web migrations deploy
           done
           (
             cd dist
-            sha256sum mailclient-linux-amd64.tar.gz mailclient-linux-arm64.tar.gz > checksums.txt
+            sha256sum despatch-linux-amd64.tar.gz despatch-linux-arm64.tar.gz > checksums.txt
+            printf '%s\n' "${UPDATE_SIGNING_PRIVATE_KEY}" > update-signing-key.pem
+            chmod 600 update-signing-key.pem
+            openssl pkey -in update-signing-key.pem -pubout -out update-signing-key.pub.pem
+            openssl pkeyutl -sign -inkey update-signing-key.pem -rawin -in checksums.txt -out checksums.txt.sig
+            openssl pkeyutl -verify -pubin -inkey update-signing-key.pub.pem -rawin -in checksums.txt -sigfile checksums.txt.sig
+            rm -f update-signing-key.pem update-signing-key.pub.pem
           )
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/mailclient-linux-amd64.tar.gz
-            dist/mailclient-linux-arm64.tar.gz
+            dist/despatch-linux-amd64.tar.gz
+            dist/despatch-linux-arm64.tar.gz
             dist/checksums.txt
+            dist/checksums.txt.sig
           generate_release_notes: true

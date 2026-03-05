@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for Despatch update requests
+
+[Path]
+PathExists=/var/lib/despatch/update/request/update-request.json
+PathChanged=/var/lib/despatch/update/request/update-request.json
+Unit=despatch-updater.service
+
+[Install]
+WantedBy=multi-user.target
+

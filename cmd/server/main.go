@@ -7,17 +7,17 @@ import (
 	"os"
 	"time"
 
-	"mailclient/internal/api"
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/notify"
-	"mailclient/internal/pamreset"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/update"
-	"mailclient/internal/workers"
+	"despatch/internal/api"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/notify"
+	"despatch/internal/pamreset"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/update"
+	"despatch/internal/workers"
 )
 
 func main() {
@@ -50,6 +50,9 @@ func main() {
 	if cfg.CookiePolicyWarning != "" {
 		log.Printf("config_warning: %s", cfg.CookiePolicyWarning)
 	}
+	if cfg.MailTLSWarning != "" {
+		log.Printf("config_warning: %s", cfg.MailTLSWarning)
+	}
 	sqdb, err := db.OpenSQLite(cfg.DBPath, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLifetime)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
@@ -75,6 +78,7 @@ func main() {
 		"migrations/017_mfa_onboarding_flags.sql",
 		"migrations/018_mfa_usability_trusted_devices.sql",
 		"migrations/019_users_mail_secret.sql",
+		"migrations/020_mail_index_scoped_ids.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)
@@ -82,6 +86,9 @@ func main() {
 	}
 
 	st := store.New(sqdb)
+	if err := st.EnsureScopedIndexedIDs(context.Background()); err != nil {
+		log.Fatalf("scoped indexed id migration: %v", err)
+	}
 	if cfg.BootstrapAdminEmail != "" && cfg.BootstrapAdminPassword != "" {
 		hash, err := auth.HashPassword(cfg.BootstrapAdminPassword)
 		if err != nil {
@@ -92,14 +99,14 @@ func main() {
 		}
 	}
 
-	mailClient := mail.NewIMAPSMTPClient(cfg)
+	despatch := mail.NewIMAPSMTPClient(cfg)
 	provisioner, err := mail.NewProvisioner(cfg)
 	if err != nil {
 		log.Fatalf("provisioner: %v", err)
 	}
 	sender := notify.NewSender(cfg)
 
-	svc := service.New(cfg, st, mailClient, provisioner, sender)
+	svc := service.New(cfg, st, despatch, provisioner, sender)
 	if senderState, err := svc.EnsurePasswordResetSenderIdentity(context.Background()); err != nil {
 		log.Printf("password_reset_sender_init_failed address=%s err=%v", senderState.Address, err)
 	} else {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/store"
+	"despatch/internal/store"
 )
 
 func TestApplyMigrationFileAddsCompatibilityColumnsForLegacySchema(t *testing.T) {
@@ -307,6 +307,7 @@ func TestMFAUsabilityTrustedDevicesMigrationAddsBackupAndTrustedDeviceSchema(t *
 		filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql"),
 		filepath.Join("..", "..", "migrations", "018_mfa_usability_trusted_devices.sql"),
 		filepath.Join("..", "..", "migrations", "019_users_mail_secret.sql"),
+		filepath.Join("..", "..", "migrations", "020_mail_index_scoped_ids.sql"),
 	} {
 		if err := ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)

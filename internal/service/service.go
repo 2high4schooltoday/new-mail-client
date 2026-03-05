@@ -15,14 +15,14 @@ import (
 
 	"github.com/google/uuid"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/mail"
-	"mailclient/internal/models"
-	"mailclient/internal/notify"
-	"mailclient/internal/pamreset"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/mail"
+	"despatch/internal/models"
+	"despatch/internal/notify"
+	"despatch/internal/pamreset"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
 var (
@@ -481,11 +481,16 @@ func (s *Service) ListAudit(ctx context.Context, query models.AuditQuery) ([]mod
 }
 
 func (s *Service) PasswordResetCapabilities(ctx context.Context) PasswordResetCapabilities {
+	publicResetEnabled := s.cfg.PasswordResetPublicEnabled
+	if enabled, err := s.PublicPasswordResetEnabled(ctx); err == nil {
+		publicResetEnabled = enabled
+	}
+
 	delivery := strings.TrimSpace(strings.ToLower(s.cfg.PasswordResetSender))
 	if delivery == "" {
 		delivery = "log"
 	}
-	if !s.cfg.PasswordResetPublicEnabled {
+	if !publicResetEnabled {
 		delivery = "disabled"
 	}
 
@@ -498,7 +503,7 @@ func (s *Service) PasswordResetCapabilities(ctx context.Context) PasswordResetCa
 			Ready:   false,
 		}
 	}
-	selfServiceEnabled := s.cfg.PasswordResetPublicEnabled
+	selfServiceEnabled := publicResetEnabled
 	adminResetEnabled := true
 	if s.usesPAMAuth() {
 		selfServiceEnabled = selfServiceEnabled && s.cfg.PAMResetHelperEnabled
@@ -749,6 +754,14 @@ func (s *Service) RetryProvisionUser(ctx context.Context, adminID, userID string
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
+	publicResetEnabled, err := s.PublicPasswordResetEnabled(ctx)
+	if err != nil {
+		return ErrPasswordResetUnavailable
+	}
+	if !publicResetEnabled {
+		return ErrPasswordResetUnavailable
+	}
+
 	caps := s.PasswordResetCapabilities(ctx)
 	if !caps.SelfServiceEnabled {
 		return ErrPasswordResetUnavailable
@@ -779,7 +792,8 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 }
 
 func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPassword string) error {
-	if !s.cfg.PasswordResetPublicEnabled {
+	publicResetEnabled, err := s.PublicPasswordResetEnabled(ctx)
+	if err != nil || !publicResetEnabled {
 		return ErrPasswordResetUnavailable
 	}
 	if err := s.ValidatePassword(newPassword); err != nil {

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"mailclient/internal/version"
+	"despatch/internal/version"
 )
 
 var (

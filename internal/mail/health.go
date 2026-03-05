@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 func ProbeIMAP(ctx context.Context, cfg config.Config) error {

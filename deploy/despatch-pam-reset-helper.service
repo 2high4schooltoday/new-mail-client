@@ -1,13 +1,13 @@
 [Unit]
-Description=Mailclient PAM Reset Helper
-After=mailclient-pam-reset-helper.socket
-Requires=mailclient-pam-reset-helper.socket
+Description=Despatch PAM Reset Helper
+After=despatch-pam-reset-helper.socket
+Requires=despatch-pam-reset-helper.socket
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/mailclient
-EnvironmentFile=/opt/mailclient/.env
-ExecStart=/opt/mailclient/mailclient-pam-reset-helper
+WorkingDirectory=/opt/despatch
+EnvironmentFile=/opt/despatch/.env
+ExecStart=/opt/despatch/despatch-pam-reset-helper
 User=root
 Group=root
 NoNewPrivileges=true

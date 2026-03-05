@@ -37,10 +37,37 @@ test('desktop ux pass', async ({ page }) => {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(250);
 
+  await page.click('#tab-settings');
+  await page.waitForTimeout(700);
+  await expect(page.locator('.settings-layout')).toHaveCount(1);
+  await page.screenshot({ path: '/tmp/ux-desktop-settings-signin.png', fullPage: true });
+
+  await page.click('#settings-nav-devices');
+  await page.waitForTimeout(350);
+  await page.screenshot({ path: '/tmp/ux-desktop-settings-devices.png', fullPage: true });
+
+  await page.click('#settings-nav-sessions');
+  await page.waitForTimeout(350);
+  await page.screenshot({ path: '/tmp/ux-desktop-settings-sessions.png', fullPage: true });
+
+  await page.fill('#settings-search-input', 'passkey');
+  await page.waitForTimeout(250);
+  if (await page.locator('#settings-search-results .settings-search-result').count()) {
+    await page.locator('#settings-search-results .settings-search-result').first().click();
+    await page.waitForTimeout(250);
+  }
+
   await page.click('#tab-admin');
   await page.waitForTimeout(700);
   await expect(page.locator('.admin-layout')).toHaveCount(1);
-  await page.screenshot({ path: '/tmp/ux-desktop-admin-update.png', fullPage: true });
+  await page.screenshot({ path: '/tmp/ux-desktop-admin-system.png', fullPage: true });
+
+  await page.fill('#admin-search-input', 'feature flags');
+  await page.waitForTimeout(250);
+  if (await page.locator('#admin-search-results .settings-search-result').count()) {
+    await page.locator('#admin-search-results .settings-search-result').first().click();
+    await page.waitForTimeout(250);
+  }
 
   await page.click('#admin-nav-registrations');
   await page.fill('#admin-reg-q', 'test');
@@ -88,7 +115,17 @@ test('mobile ux pass', async ({ browser }) => {
   await expect(page.locator('#view-mail')).toBeVisible();
   await page.screenshot({ path: '/tmp/ux-mobile-mail.png', fullPage: true });
 
+  await page.click('#tab-settings');
+  await page.waitForTimeout(500);
+  await expect(page.locator('.settings-layout')).toHaveCount(1);
+  await page.screenshot({ path: '/tmp/ux-mobile-settings.png', fullPage: true });
+
+  await page.click('#settings-nav-devices');
+  await page.waitForTimeout(250);
+
   if (await page.locator('.mailbox-list button').count()) {
+    await page.click('#tab-mail');
+    await page.waitForTimeout(250);
     await page.locator('.mailbox-list button').first().click();
     await page.waitForTimeout(300);
     await page.screenshot({ path: '/tmp/ux-mobile-messages.png', fullPage: true });

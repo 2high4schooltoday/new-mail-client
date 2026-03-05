@@ -8,7 +8,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,17 +23,17 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 
-	"mailclient/internal/captcha"
-	"mailclient/internal/config"
-	"mailclient/internal/mail"
-	"mailclient/internal/middleware"
-	"mailclient/internal/models"
-	"mailclient/internal/rate"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/update"
-	"mailclient/internal/util"
-	"mailclient/internal/version"
+	"despatch/internal/captcha"
+	"despatch/internal/config"
+	"despatch/internal/mail"
+	"despatch/internal/middleware"
+	"despatch/internal/models"
+	"despatch/internal/rate"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/update"
+	"despatch/internal/util"
+	"despatch/internal/version"
 )
 
 type Handlers struct {
@@ -115,13 +114,19 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 		}
 		resetCaps := h.svc.PasswordResetCapabilities(r.Context())
 		resetSenderOK := resetCaps.SenderStatus == "ready" || resetCaps.SenderStatus == "external"
+		publicResetEnabled := false
+		if enabled, err := h.svc.PublicPasswordResetEnabled(r.Context()); err == nil {
+			publicResetEnabled = enabled
+		} else {
+			publicResetEnabled = h.cfg.PasswordResetPublicEnabled
+		}
 		comps["password_reset_sender"] = map[string]any{
 			"ok":      resetSenderOK,
 			"status":  resetCaps.SenderStatus,
 			"reason":  resetCaps.SenderReason,
 			"address": resetCaps.SenderAddress,
 		}
-		if h.cfg.PasswordResetPublicEnabled && !resetSenderOK {
+		if publicResetEnabled && !resetSenderOK {
 			sqliteOK = false
 		}
 
@@ -181,6 +186,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.Get("/system/mail-health", h.AdminMailHealth)
 					r.Get("/system/version", h.AdminVersion)
 					r.Get("/system/update/status", h.AdminUpdateStatus)
+					r.Get("/system/feature-flags", h.AdminListFeatureFlags)
 					r.Group(func(r chi.Router) {
 						r.Use(middleware.CSRFFromCookie(h.cfg.CSRFCookieName))
 						r.Post("/registrations/{id}/approve", h.AdminApproveRegistration)
@@ -193,6 +199,8 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 						r.Post("/users/{id}/retry-provision", h.AdminRetryProvisionUser)
 						r.With(middleware.RateLimit(h.limiter, "update_check", 20, time.Minute, h.cfg.TrustProxy)).Post("/system/update/check", h.AdminUpdateCheck)
 						r.With(middleware.RateLimit(h.limiter, "update_apply", 10, time.Minute, h.cfg.TrustProxy)).Post("/system/update/apply", h.AdminUpdateApply)
+						r.Post("/system/feature-flags/{id}", h.AdminSetFeatureFlag)
+						r.Post("/system/feature-flags/{id}/reset", h.AdminResetFeatureFlag)
 					})
 				})
 			})
@@ -370,8 +378,8 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		AdminPassword     string `json:"admin_password"`
 		Region            string `json:"region"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	token, user, err := h.svc.CompleteSetup(r.Context(), service.SetupCompleteRequest{
@@ -439,7 +447,11 @@ func (h *Handlers) SetupComplete(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, status, code, msg, middleware.RequestID(r.Context()))
 		return
 	}
-	csrfToken := randomToken()
+	csrfToken, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", "failed to generate token", middleware.RequestID(r.Context()))
+		return
+	}
 	sess, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", "cannot finalize setup session", middleware.RequestID(r.Context()))
@@ -463,8 +475,8 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	captchaOK := !h.cfg.CaptchaEnabled
@@ -569,8 +581,8 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	token, user, err := h.svc.Login(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent())
@@ -626,7 +638,11 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
 		return
 	} else {
-		csrfToken := randomToken()
+		csrfToken, tokenErr := randomToken()
+		if tokenErr != nil {
+			util.WriteError(w, 500, "internal_error", "failed to generate token", middleware.RequestID(r.Context()))
+			return
+		}
 		h.setAuthCookies(w, r, token, csrfToken)
 		payload := map[string]any{"user_id": user.ID, "email": user.Email, "role": user.Role, "csrf_token": csrfToken}
 		applyAuthStageFields(payload, stage)
@@ -652,8 +668,8 @@ func (h *Handlers) PasswordResetRequest(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Email string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	norm := strings.ToLower(strings.TrimSpace(req.Email))
@@ -682,8 +698,8 @@ func (h *Handlers) PasswordResetConfirm(w http.ResponseWriter, r *http.Request) 
 		Token       string `json:"token"`
 		NewPassword string `json:"new_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	tokenKey := h.resetTokenPrefixRateKey(req.Token)
@@ -733,8 +749,8 @@ func (h *Handlers) MeUpdateRecoveryEmail(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		RecoveryEmail string `json:"recovery_email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	normalized, err := h.svc.UpdateRecoveryEmail(r.Context(), u.ID, req.RecoveryEmail)
@@ -830,8 +846,12 @@ func (h *Handlers) handleSend(w http.ResponseWriter, r *http.Request, inReply st
 		h.writeMailAuthError(w, r, err)
 		return
 	}
-	req, err := decodeSendRequest(r)
+	req, err := decodeSendRequest(w, r)
 	if err != nil {
+		if errors.Is(err, errJSONTooLarge) {
+			writeJSONDecodeError(w, r, err)
+			return
+		}
 		util.WriteError(w, 400, "bad_request", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
@@ -861,8 +881,8 @@ func (h *Handlers) SetMessageFlags(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flags []string `json:"flags"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	mailLogin := service.MailIdentity(u)
@@ -884,8 +904,8 @@ func (h *Handlers) MoveMessage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Mailbox string `json:"mailbox"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	mailLogin := service.MailIdentity(u)
@@ -1004,8 +1024,8 @@ func (h *Handlers) AdminRejectRegistration(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if err := h.svc.RejectRegistration(r.Context(), admin.ID, id, req.Reason); err != nil {
@@ -1034,8 +1054,8 @@ func (h *Handlers) AdminBulkRegistrationDecision(w http.ResponseWriter, r *http.
 		Decision string   `json:"decision"`
 		Reason   string   `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	decision := strings.TrimSpace(strings.ToLower(req.Decision))
@@ -1138,8 +1158,8 @@ func (h *Handlers) AdminBulkUserAction(w http.ResponseWriter, r *http.Request) {
 		IDs    []string `json:"ids"`
 		Action string   `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	action := strings.TrimSpace(strings.ToLower(req.Action))
@@ -1176,8 +1196,8 @@ func (h *Handlers) AdminResetPassword(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		NewPassword string `json:"new_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if req.NewPassword == "" {
@@ -1291,8 +1311,8 @@ func (h *Handlers) AdminUpdateApply(w http.ResponseWriter, r *http.Request) {
 		TargetVersion string `json:"target_version"`
 	}
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+		if err := decodeJSON(w, r, &req, jsonLimitAuthControl, true); err != nil {
+			writeJSONDecodeError(w, r, err)
 			return
 		}
 	}
@@ -1323,6 +1343,70 @@ func (h *Handlers) AdminUpdateApply(w http.ResponseWriter, r *http.Request) {
 		"requested_at":   applyReq.RequestedAt,
 		"target_version": applyReq.TargetVersion,
 	})
+}
+
+func (h *Handlers) AdminListFeatureFlags(w http.ResponseWriter, r *http.Request) {
+	items, err := h.svc.ListFeatureFlags(r.Context())
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{"items": items})
+}
+
+func (h *Handlers) AdminSetFeatureFlag(w http.ResponseWriter, r *http.Request) {
+	admin, _ := middleware.User(r.Context())
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		util.WriteError(w, 400, "bad_request", "feature flag id is required", middleware.RequestID(r.Context()))
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
+		return
+	}
+	if req.Enabled == nil {
+		util.WriteError(w, 400, "bad_request", "enabled is required", middleware.RequestID(r.Context()))
+		return
+	}
+	item, err := h.svc.SetFeatureFlag(r.Context(), admin.ID, id, *req.Enabled)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrFeatureFlagNotFound):
+			util.WriteError(w, 404, "feature_flag_not_found", "feature flag not found", middleware.RequestID(r.Context()))
+		case errors.Is(err, service.ErrFeatureFlagReadOnly):
+			util.WriteError(w, 400, "feature_flag_read_only", "feature flag is read-only", middleware.RequestID(r.Context()))
+		default:
+			util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		}
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{"status": "updated", "item": item})
+}
+
+func (h *Handlers) AdminResetFeatureFlag(w http.ResponseWriter, r *http.Request) {
+	admin, _ := middleware.User(r.Context())
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		util.WriteError(w, 400, "bad_request", "feature flag id is required", middleware.RequestID(r.Context()))
+		return
+	}
+	item, err := h.svc.ResetFeatureFlag(r.Context(), admin.ID, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrFeatureFlagNotFound):
+			util.WriteError(w, 404, "feature_flag_not_found", "feature flag not found", middleware.RequestID(r.Context()))
+		case errors.Is(err, service.ErrFeatureFlagReadOnly):
+			util.WriteError(w, 400, "feature_flag_read_only", "feature flag is read-only", middleware.RequestID(r.Context()))
+		default:
+			util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		}
+		return
+	}
+	util.WriteJSON(w, 200, map[string]any{"status": "reset", "item": item})
 }
 
 func parsePagination(r *http.Request) (int, int) {
@@ -1365,10 +1449,13 @@ func parseDateParam(raw string, endOfDay bool) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-func randomToken() string {
+func randomToken() (string, error) {
 	buf := make([]byte, 32)
-	_, _ = rand.Read(buf)
-	return base64.RawURLEncoding.EncodeToString(buf)
+	if _, err := rand.Read(buf); err != nil {
+		log.Printf("auth_rng_failure error=%v", err)
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func trustedDeviceTokenHash(token string) string {
@@ -1395,7 +1482,7 @@ func trustedDeviceLabel(userAgent string) string {
 func (h *Handlers) trustedDeviceCookieName() string {
 	name := strings.TrimSpace(h.cfg.MFATrustedCookieName)
 	if name == "" {
-		return "mailclient_mfa_trusted"
+		return "despatch_mfa_trusted"
 	}
 	return name
 }
@@ -1435,9 +1522,12 @@ func (h *Handlers) clearTrustedDeviceCookie(w http.ResponseWriter, r *http.Reque
 
 func (h *Handlers) issueTrustedDevice(ctx context.Context, w http.ResponseWriter, r *http.Request, userID string) error {
 	now := time.Now().UTC()
-	token := randomToken()
+	token, err := randomToken()
+	if err != nil {
+		return err
+	}
 	expiresAt := now.Add(trustedDeviceTTL)
-	_, err := h.svc.Store().CreateMFATrustedDevice(ctx, models.MFATrustedDevice{
+	_, err = h.svc.Store().CreateMFATrustedDevice(ctx, models.MFATrustedDevice{
 		ID:          uuid.NewString(),
 		UserID:      userID,
 		TokenHash:   trustedDeviceTokenHash(token),
@@ -1457,9 +1547,12 @@ func (h *Handlers) issueTrustedDevice(ctx context.Context, w http.ResponseWriter
 
 func (h *Handlers) rotateTrustedDevice(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, trustedDeviceID string) error {
 	now := time.Now().UTC()
-	token := randomToken()
+	token, err := randomToken()
+	if err != nil {
+		return err
+	}
 	expiresAt := now.Add(trustedDeviceTTL)
-	_, err := h.svc.Store().RotateMFATrustedDeviceToken(
+	_, err = h.svc.Store().RotateMFATrustedDeviceToken(
 		ctx,
 		userID,
 		trustedDeviceID,
@@ -1530,9 +1623,9 @@ func (h *Handlers) setAuthCookies(w http.ResponseWriter, r *http.Request, sessio
 	})
 	// Frontend currently reads a fixed cookie name for CSRF. Mirror the configured
 	// CSRF token into the legacy default name for compatibility with custom configs.
-	if strings.TrimSpace(h.cfg.CSRFCookieName) != "mailclient_csrf" {
+	if strings.TrimSpace(h.cfg.CSRFCookieName) != "despatch_csrf" {
 		http.SetCookie(w, &http.Cookie{
-			Name:     "mailclient_csrf",
+			Name:     "despatch_csrf",
 			Value:    csrfToken,
 			Path:     "/",
 			HttpOnly: false,
@@ -1567,9 +1660,9 @@ func (h *Handlers) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 		Expires:  expiredAt,
 	})
 	// Clear the legacy mirror cookie too so browsers don't keep stale CSRF tokens.
-	if strings.TrimSpace(h.cfg.CSRFCookieName) != "mailclient_csrf" {
+	if strings.TrimSpace(h.cfg.CSRFCookieName) != "despatch_csrf" {
 		http.SetCookie(w, &http.Cookie{
-			Name:     "mailclient_csrf",
+			Name:     "despatch_csrf",
 			Value:    "",
 			Path:     "/",
 			HttpOnly: false,
@@ -1581,7 +1674,7 @@ func (h *Handlers) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func decodeSendRequest(r *http.Request) (mail.SendRequest, error) {
+func decodeSendRequest(w http.ResponseWriter, r *http.Request) (mail.SendRequest, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		if err := r.ParseMultipartForm(maxUploadAttachmentBytes); err != nil {
@@ -1621,7 +1714,7 @@ func decodeSendRequest(r *http.Request) (mail.SendRequest, error) {
 		Subject string   `json:"subject"`
 		Body    string   `json:"body"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
 		return mail.SendRequest{}, err
 	}
 	return mail.SendRequest{To: req.To, Subject: req.Subject, Body: req.Body}, nil

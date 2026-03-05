@@ -6,7 +6,7 @@ var (
 	Version    = "dev"
 	Commit     = "unknown"
 	BuildTime  = ""
-	SourceRepo = "https://github.com/2high4schooltoday/new-mail-client"
+	SourceRepo = "https://github.com/2high4schooltoday/despatch"
 )
 
 type Info struct {
@@ -30,7 +30,7 @@ func Current() Info {
 		out.Commit = "unknown"
 	}
 	if out.SourceRepo == "" {
-		out.SourceRepo = "https://github.com/2high4schooltoday/new-mail-client"
+		out.SourceRepo = "https://github.com/2high4schooltoday/despatch"
 	}
 	return out
 }

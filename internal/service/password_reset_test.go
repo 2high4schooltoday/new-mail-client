@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/models"
-	"mailclient/internal/store"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/models"
+	"despatch/internal/store"
 )
 
 type captureResetSender struct {

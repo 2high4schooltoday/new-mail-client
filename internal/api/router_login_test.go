@@ -13,22 +13,22 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
-type pamLoginTestMailClient struct {
+type pamLoginTestDespatch struct {
 	acceptPassword string
 	acceptedUsers  map[string]bool
 	failWith       error
 }
 
-func (m pamLoginTestMailClient) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
+func (m pamLoginTestDespatch) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
 	if m.failWith != nil {
 		return nil, m.failWith
 	}
@@ -41,39 +41,39 @@ func (m pamLoginTestMailClient) ListMailboxes(ctx context.Context, user, pass st
 	return []mail.Mailbox{{Name: "INBOX", Messages: 1}}, nil
 }
 
-func (m pamLoginTestMailClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
+func (m pamLoginTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }
 
-func (m pamLoginTestMailClient) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
+func (m pamLoginTestDespatch) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
 	return mail.Message{}, nil
 }
 
-func (m pamLoginTestMailClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
+func (m pamLoginTestDespatch) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }
 
-func (m pamLoginTestMailClient) Send(ctx context.Context, user, pass string, req mail.SendRequest) error {
+func (m pamLoginTestDespatch) Send(ctx context.Context, user, pass string, req mail.SendRequest) error {
 	return nil
 }
 
-func (m pamLoginTestMailClient) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {
+func (m pamLoginTestDespatch) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {
 	return nil
 }
 
-func (m pamLoginTestMailClient) Move(ctx context.Context, user, pass, id, mailbox string) error {
+func (m pamLoginTestDespatch) Move(ctx context.Context, user, pass, id, mailbox string) error {
 	return nil
 }
 
-func (m pamLoginTestMailClient) GetAttachment(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentContent, error) {
+func (m pamLoginTestDespatch) GetAttachment(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentContent, error) {
 	return mail.AttachmentContent{}, nil
 }
 
-func (m pamLoginTestMailClient) GetAttachmentStream(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentMeta, io.ReadCloser, error) {
+func (m pamLoginTestDespatch) GetAttachmentStream(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentMeta, io.ReadCloser, error) {
 	return mail.AttachmentMeta{}, nil, errors.New("not implemented")
 }
 
-func newPAMLoginRouter(t *testing.T, mailClient mail.Client) (http.Handler, *sql.DB) {
+func newPAMLoginRouter(t *testing.T, despatch mail.Client) (http.Handler, *sql.DB) {
 	t.Helper()
 	sqdb, err := db.OpenSQLite(filepath.Join(t.TempDir(), "app.db"), 1, 1, time.Minute)
 	if err != nil {
@@ -105,8 +105,8 @@ func newPAMLoginRouter(t *testing.T, mailClient mail.Client) (http.Handler, *sql
 	cfg := config.Config{
 		ListenAddr:          ":8080",
 		BaseDomain:          "example.com",
-		SessionCookieName:   "mailclient_session",
-		CSRFCookieName:      "mailclient_csrf",
+		SessionCookieName:   "despatch_session",
+		CSRFCookieName:      "despatch_csrf",
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",
@@ -117,12 +117,12 @@ func newPAMLoginRouter(t *testing.T, mailClient mail.Client) (http.Handler, *sql
 		DovecotAuthMode:     "pam",
 	}
 
-	svc := service.New(cfg, st, mailClient, mail.NoopProvisioner{}, nil)
+	svc := service.New(cfg, st, despatch, mail.NoopProvisioner{}, nil)
 	return NewRouter(cfg, svc), sqdb
 }
 
 func TestLoginPAMVerifierUnavailableReturnsBadGatewayAndDoesNotIncrementRateEvent(t *testing.T) {
-	router, sqdb := newPAMLoginRouter(t, pamLoginTestMailClient{
+	router, sqdb := newPAMLoginRouter(t, pamLoginTestDespatch{
 		failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused"),
 	})
 
@@ -156,7 +156,7 @@ func TestLoginPAMVerifierUnavailableReturnsBadGatewayAndDoesNotIncrementRateEven
 }
 
 func TestLoginInvalidCredentialsIncrementsRateEvent(t *testing.T) {
-	router, sqdb := newPAMLoginRouter(t, pamLoginTestMailClient{
+	router, sqdb := newPAMLoginRouter(t, pamLoginTestDespatch{
 		acceptPassword: "SecretPass123!",
 		acceptedUsers:  map[string]bool{"admin@example.com": true},
 	})

@@ -37,7 +37,7 @@ class LogStore:
 
     @staticmethod
     def _resolve_log_dir(log_dir: Path | None) -> tuple[Path, str]:
-        fallback = Path.home() / ".cache" / "mailclient-tui" / "logs"
+        fallback = Path.home() / ".cache" / "despatch-tui" / "logs"
         candidates: list[Path] = []
         if log_dir is not None:
             candidates.append(log_dir)

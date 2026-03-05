@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/service"
+	"despatch/internal/store"
 )
 
 func newCookieRouter(t *testing.T, cookieMode string, trustProxy bool) http.Handler {
@@ -49,8 +49,8 @@ func newCookieRouter(t *testing.T, cookieMode string, trustProxy bool) http.Hand
 	cfg := config.Config{
 		ListenAddr:          ":8080",
 		BaseDomain:          "example.com",
-		SessionCookieName:   "mailclient_session",
-		CSRFCookieName:      "mailclient_csrf",
+		SessionCookieName:   "despatch_session",
+		CSRFCookieName:      "despatch_csrf",
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",
@@ -82,7 +82,7 @@ func loginAndGetSessionCookie(t *testing.T, router http.Handler, forwardedProto 
 		t.Fatalf("expected login 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "mailclient_session" {
+		if c.Name == "despatch_session" {
 			return c
 		}
 	}
@@ -114,7 +114,7 @@ func TestLoginCookieSecureAlwaysAndSessionMe(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
-	req.AddCookie(&http.Cookie{Name: "mailclient_session", Value: sessionCookie.Value})
+	req.AddCookie(&http.Cookie{Name: "despatch_session", Value: sessionCookie.Value})
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

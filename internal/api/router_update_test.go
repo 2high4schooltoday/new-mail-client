@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/models"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/models"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
 type updateTestFixture struct {
@@ -68,7 +68,7 @@ func newUpdateFixture(t *testing.T, enabled bool, configured bool) updateTestFix
 		if err := os.MkdirAll(unitDir, 0o755); err != nil {
 			t.Fatalf("mkdir unit dir: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(unitDir, "mailclient-updater.path"), []byte("ok"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
 			t.Fatalf("write updater unit marker: %v", err)
 		}
 	}
@@ -76,8 +76,8 @@ func newUpdateFixture(t *testing.T, enabled bool, configured bool) updateTestFix
 	cfg := config.Config{
 		ListenAddr:             ":8080",
 		BaseDomain:             "example.com",
-		SessionCookieName:      "mailclient_session",
-		CSRFCookieName:         "mailclient_csrf",
+		SessionCookieName:      "despatch_session",
+		CSRFCookieName:         "despatch_csrf",
 		SessionIdleMinutes:     30,
 		SessionAbsoluteHour:    24,
 		SessionEncryptKey:      "this_is_a_valid_long_session_encrypt_key_123456",
@@ -88,13 +88,13 @@ func newUpdateFixture(t *testing.T, enabled bool, configured bool) updateTestFix
 		DovecotAuthMode:        "sql",
 		UpdateEnabled:          enabled,
 		UpdateRepoOwner:        "2high4schooltoday",
-		UpdateRepoName:         "new-mail-client",
+		UpdateRepoName:         "despatch",
 		UpdateCheckIntervalMin: 60,
 		UpdateHTTPTimeoutSec:   10,
 		UpdateBackupKeep:       3,
 		UpdateBaseDir:          updateBase,
 		UpdateInstallDir:       filepath.Join(base, "install"),
-		UpdateServiceName:      "mailclient",
+		UpdateServiceName:      "despatch",
 		UpdateSystemdUnitDir:   unitDir,
 	}
 	svc := service.New(cfg, st, nil, nil, nil)
@@ -121,10 +121,10 @@ func loginCookies(t *testing.T, router http.Handler, email, password string) (*h
 	var sessionCookie *http.Cookie
 	var csrfCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "mailclient_session" {
+		if c.Name == "despatch_session" {
 			sessionCookie = c
 		}
-		if c.Name == "mailclient_csrf" {
+		if c.Name == "despatch_csrf" {
 			csrfCookie = c
 		}
 	}

@@ -9,7 +9,7 @@ import (
 	"net/smtp"
 	"strings"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 type Sender interface {

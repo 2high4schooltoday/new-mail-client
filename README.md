@@ -12,7 +12,7 @@ Lightweight self-hosted webmail and admin system for existing Postfix + Dovecot 
 - Admin user lifecycle controls: approve/reject/suspend/unsuspend/reset password.
 - Rejected registration policy: rejected pending users are removed from active `users` records (legacy cleanup migration included).
 - Password reset token flow.
-- Audit log endpoint + admin UI table.
+- Audit log endpoint + admin UI list/detail drill-down.
 - Real IMAP integration (list/search/read/flags/move).
 - Real SMTP submission with optional STARTTLS/TLS and attachment send.
 - Dovecot auth SQL provisioning adapter (MySQL/Postgres via `database/sql`).
@@ -55,22 +55,25 @@ Run these before packaging a release:
 ## Web UI model
 - Navigation state is context-aware:
   - Pre-auth: `Auth` only.
-  - Authenticated: `Mail`, `Account`, and `Admin` (admin role only).
+  - Authenticated: `Mail`, `Settings`, and `Admin` (admin role only).
   - Setup-required: `Setup` only.
 - Setup Assistant (OOBE) follows a linear, single-decision-per-screen template:
   - No inner title bar/chrome.
   - Back and discard controls are inside the setup window.
   - Primary action stays anchored at the bottom-right.
   - Global topbar is hidden while setup is required.
-- Selector-contract CI gate protects critical Setup/Auth/Account style selectors from shipping out-of-sync with markup.
+- Selector-contract CI gate protects critical Setup/Auth/Settings/Admin selectors from shipping out-of-sync with markup.
 - Auth uses the same calm OOBE-style template with task selectors (not tabs):
   - `Sign In`
   - `Register` (with CAPTCHA when enabled, recovery email required)
   - `Password Reset`
-- Account security is isolated from pre-auth flows:
-  - Passkey management (MFA + passkey sign-in capability context)
-  - Trusted device management (with current-device marker)
-  - Session management (with current-session marker)
+- Settings uses macOS-style domain navigation with shallow depth (sidebar + vertical sections):
+  - `Sign-In`: passkeys and passkey detail pages
+  - `Devices`: trusted devices and device detail pages
+  - `Sessions`: active sessions and session detail pages
+- Admin keeps a separate domain sidebar:
+  - `Users`, `Registrations`, `System`, `Audit Log`
+  - `System` includes software updates and feature flag controls
 - Passkey sign-in UX:
   - single passkey action button
   - username-less account discovery when enabled
@@ -97,7 +100,7 @@ Plain console-only menu (Bash, dependency-free):
 - `./scripts/tui_plain.sh`
 
 Standalone dashboard via `wget`:
-- `wget -O despatch.py https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/despatch.py && chmod +x despatch.py && ./despatch.py`
+- `wget -O despatch.py https://raw.githubusercontent.com/2high4schooltoday/despatch/main/scripts/despatch.py && chmod +x despatch.py && ./despatch.py`
 
 Standalone mode (run from any Linux server path):
 - download `scripts/auto_install.sh` and run it
@@ -115,6 +118,11 @@ What it auto-detects:
 - sensible default domain from host (`/etc/mailname` or FQDN)
 - installed reverse proxy (`nginx` or `apache2`) and can configure it automatically
 
+TLS default posture:
+- Installer keeps IMAP/SMTP certificate verification enabled by default (including loopback).
+- Prefer certificate SAN/FQDN alignment over `*_INSECURE_SKIP_VERIFY=true`.
+- Non-loopback `*_INSECURE_SKIP_VERIFY=true` is rejected unless `MAIL_ALLOW_INSECURE_SKIP_VERIFY_NON_LOOPBACK=true` is explicitly set.
+
 Installer deployment modes:
 - `proxy` mode (recommended): app binds to `127.0.0.1:8080`, reverse proxy serves public traffic on `80/443`.
 - `direct` mode: app serves directly on `:8080`.
@@ -129,7 +137,7 @@ Note: fully custom SQL/auth setups may still need manual `.env` tweaks.
 PAM mode notes:
 - Set `DOVECOT_AUTH_MODE=pam` (installer now prompts and writes this automatically).
 - In PAM mode, web login is validated against IMAP credentials (Dovecot/PAM), not local hash only.
-- Password reset endpoints use the local privileged helper (`mailclient-pam-reset-helper`) when `PAM_RESET_HELPER_ENABLED=true`.
+- Password reset endpoints use the local privileged helper (`despatch-pam-reset-helper`) when `PAM_RESET_HELPER_ENABLED=true`.
 - Public reset request endpoint remains account-enumeration safe (generic acceptance response when enabled).
 - Recovery email must be different from login email. Existing users with missing/invalid recovery email are prompted after sign-in (soft prompt, skippable per session).
 - PAM password reset now falls back to account email when `mail_login` is unset.
@@ -153,14 +161,14 @@ From local checkout:
 - `./scripts/uninstall.sh`
 
 Standalone from server console (`wget`):
-- `wget -O uninstall.sh https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/uninstall.sh && chmod +x uninstall.sh && ./uninstall.sh`
+- `wget -O uninstall.sh https://raw.githubusercontent.com/2high4schooltoday/despatch/main/scripts/uninstall.sh && chmod +x uninstall.sh && ./uninstall.sh`
 
 ## Internet access diagnostics
 Run connectivity doctor at any time:
 - `./scripts/diagnose_access.sh`
 
 It checks:
-- `mailclient` service health and local `/health/live`
+- `despatch` service health and local `/health/live`
 - reverse proxy status/routing (Nginx/Apache2)
 - listening ports
 - `ufw` rules
@@ -170,26 +178,34 @@ It checks:
 Admin panel can check GitHub Releases and queue manual upgrades.
 
 Requires updater units:
-- `mailclient-updater.path`
-- `mailclient-updater.service`
+- `despatch-updater.path`
+- `despatch-updater.service`
 
 Privileged binaries installed by current releases:
-- `/opt/mailclient/mailclient-pam-reset-helper`
-- `/opt/mailclient/mailclient-update-worker`
+- `/opt/despatch/despatch-pam-reset-helper`
+- `/opt/despatch/despatch-update-worker`
 
 Default runtime paths:
-- request: `/var/lib/mailclient/update/request/update-request.json`
-- status: `/var/lib/mailclient/update/status/update-status.json`
-- lock: `/var/lib/mailclient/update/lock/update.lock`
-- backups: `/var/lib/mailclient/update/backups/`
+- request: `/var/lib/despatch/update/request/update-request.json`
+- status: `/var/lib/despatch/update/status/update-status.json`
+- lock: `/var/lib/despatch/update/lock/update.lock`
+- backups: `/var/lib/despatch/update/backups/`
+
+Hardened ownership/mode matrix:
+- `/opt/despatch` and shipped binaries: `root:root`, binaries `0755`
+- `/opt/despatch/.env`: `root:despatch`, `0640` (read-only for app user)
+- `/var/lib/despatch/update/request` and `/status`: `root:despatch`, `0770`, files `0660`
+- `/var/lib/despatch/update/lock`, `/work`, `/backups`: `root:root`, `0750`
 
 If update check/apply shows `permission denied` on update status/request files, repair ownership:
 
 ```bash
-sudo chown -R mailclient:mailclient /var/lib/mailclient/update/request /var/lib/mailclient/update/status
-sudo chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
-sudo find /var/lib/mailclient/update/request /var/lib/mailclient/update/status -type f -exec chmod 0660 {} \;
-sudo systemctl restart mailclient mailclient-updater.path
+sudo chown root:despatch /var/lib/despatch/update/request /var/lib/despatch/update/status
+sudo chmod 0770 /var/lib/despatch/update/request /var/lib/despatch/update/status
+sudo find /var/lib/despatch/update/request /var/lib/despatch/update/status -type f -exec chown root:despatch {} \; -exec chmod 0660 {} \;
+sudo chown root:root /var/lib/despatch/update/lock /var/lib/despatch/update/work /var/lib/despatch/update/backups
+sudo chmod 0750 /var/lib/despatch/update/lock /var/lib/despatch/update/work /var/lib/despatch/update/backups
+sudo systemctl restart despatch despatch-updater.path
 ```
 
 Relevant `.env` options:
@@ -200,6 +216,14 @@ Relevant `.env` options:
 - `UPDATE_HTTP_TIMEOUT_SEC`
 - `UPDATE_GITHUB_TOKEN` (optional)
 - `UPDATE_BACKUP_KEEP`
+- `UPDATE_REQUIRE_SIGNATURE` (default: `true`)
+- `UPDATE_SIGNATURE_ASSET` (default: `checksums.txt.sig`)
+- `UPDATE_SIGNING_PUBLIC_KEYS` (comma-separated Ed25519 public keys, base64)
+
+Updater authenticity policy:
+- `checksums.txt` must have a valid detached Ed25519 signature before archive hash validation.
+- Signature verification fails closed when `UPDATE_REQUIRE_SIGNATURE=true`.
+- Keep at least one current key in `UPDATE_SIGNING_PUBLIC_KEYS`; during rotation, publish old+new keys together.
 
 PAM helper options:
 - `PAM_RESET_HELPER_ENABLED`
@@ -208,14 +232,19 @@ PAM helper options:
 - `PAM_RESET_ALLOWED_UID`
 - `PAM_RESET_ALLOWED_GID`
 
+Secret rotation required on upgrade from older builds:
+- Older revisions tracked runtime artifacts (`.env`, `data/app.db*`) in git history.
+- Rotate at minimum: `SESSION_ENCRYPT_KEY`, `UPDATE_GITHUB_TOKEN`, CAPTCHA secrets, SMTP/API credentials.
+- Revoke active sessions after key rotation.
+
 Emergency fallback to Go privileged paths (single host rollback):
 
 ```bash
-sudo install -D -m 0644 /opt/mailclient/deploy/fallback/mailclient-pam-reset-helper-go.override.conf /etc/systemd/system/mailclient-pam-reset-helper.service.d/override.conf
-sudo install -D -m 0644 /opt/mailclient/deploy/fallback/mailclient-updater-go.override.conf /etc/systemd/system/mailclient-updater.service.d/override.conf
+sudo install -D -m 0644 /opt/despatch/deploy/fallback/despatch-pam-reset-helper-go.override.conf /etc/systemd/system/despatch-pam-reset-helper.service.d/override.conf
+sudo install -D -m 0644 /opt/despatch/deploy/fallback/despatch-updater-go.override.conf /etc/systemd/system/despatch-updater.service.d/override.conf
 sudo systemctl daemon-reload
-sudo systemctl restart mailclient-pam-reset-helper.socket mailclient-pam-reset-helper.service
-sudo systemctl restart mailclient-updater.path
+sudo systemctl restart despatch-pam-reset-helper.socket despatch-pam-reset-helper.service
+sudo systemctl restart despatch-updater.path
 ```
 
 ## CAPTCHA with CAP standalone (Ubuntu)
@@ -274,7 +303,7 @@ sudo docker run --rm -v cap-data:/a -v cap_cap-data:/b alpine sh -lc 'ls -la /a;
 ```
 - Keep one canonical CAP data volume (recommended: `cap-data`).
 - If keys exist in a different volume than the running container mount, migrate once and remove stale volume references.
-- Ensure `CAPTCHA_SITE_KEY` in `/opt/mailclient/.env` matches the key in CAP dashboard on the mounted volume.
+- Ensure `CAPTCHA_SITE_KEY` in `/opt/despatch/.env` matches the key in CAP dashboard on the mounted volume.
 - Ensure `CAPTCHA_SECRET` is the per-site verification secret (not CAP admin key).
 
 Failure policy is fail-closed for registration:
@@ -285,23 +314,23 @@ Failure policy is fail-closed for registration:
 If sending fails with `smtp_sender_rejected` or `smtp_error` related to sender identity, run:
 
 ```bash
-sudo grep -E '^(DOVECOT_AUTH_MODE|APP_DB_PATH)=' /opt/mailclient/.env
-DB_PATH="$(sudo awk -F= '/^APP_DB_PATH=/{print $2}' /opt/mailclient/.env)"
-if [[ "$DB_PATH" != /* ]]; then DB_PATH="/opt/mailclient/${DB_PATH#./}"; fi
+sudo grep -E '^(DOVECOT_AUTH_MODE|APP_DB_PATH)=' /opt/despatch/.env
+DB_PATH="$(sudo awk -F= '/^APP_DB_PATH=/{print $2}' /opt/despatch/.env)"
+if [[ "$DB_PATH" != /* ]]; then DB_PATH="/opt/despatch/${DB_PATH#./}"; fi
 sudo sqlite3 "$DB_PATH" "SELECT email, COALESCE(mail_login,'') AS mail_login FROM users ORDER BY created_at DESC LIMIT 20;"
 ```
 
 Quick local send smoke test through API:
 
 ```bash
-curl -sS -c /tmp/mailclient.cookies -H 'Content-Type: application/json' \
+curl -sS -c /tmp/despatch.cookies -H 'Content-Type: application/json' \
   -d '{"email":"admin@example.com","password":"YOUR_PASSWORD"}' \
   http://127.0.0.1:8080/api/v1/login >/dev/null
-CSRF="$(awk '$6=="mailclient_csrf"{print $7}' /tmp/mailclient.cookies)"
-curl -i -b /tmp/mailclient.cookies -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+CSRF="$(awk '$6=="despatch_csrf"{print $7}' /tmp/despatch.cookies)"
+curl -i -b /tmp/despatch.cookies -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
   -d '{"to":["postmaster@example.com"],"subject":"probe","body":"probe"}' \
   http://127.0.0.1:8080/api/v1/messages/send
-sudo journalctl -u mailclient -n 200 --no-pager | grep -E 'messages/send|smtp_sender_rejected|smtp_error' || true
+sudo journalctl -u despatch -n 200 --no-pager | grep -E 'messages/send|smtp_sender_rejected|smtp_error' || true
 ```
 
 ## Dovecot provisioning notes
@@ -363,6 +392,10 @@ Base: `/api/v1`
   - `GET /admin/system/update/status`
   - `POST /admin/system/update/check`
   - `POST /admin/system/update/apply`
+  - `GET /admin/system/feature-flags`
+  - `POST /admin/system/feature-flags/{id}` with body `{ "enabled": true|false }`
+  - `POST /admin/system/feature-flags/{id}/reset`
+  - Feature flag items include: `id,name,description,category,enabled,default_enabled,source,editable,requires_restart,note`
 
 ### API v2 foundation
 Base: `/api/v2`

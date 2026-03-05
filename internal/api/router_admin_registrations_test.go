@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/models"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/models"
+	"despatch/internal/service"
+	"despatch/internal/store"
 )
 
 func newAdminRegistrationRouter(t *testing.T) (http.Handler, *store.Store) {
@@ -58,8 +58,8 @@ func newAdminRegistrationRouterWithDB(t *testing.T) (http.Handler, *store.Store,
 	cfg := config.Config{
 		ListenAddr:          ":8080",
 		BaseDomain:          "example.com",
-		SessionCookieName:   "mailclient_session",
-		CSRFCookieName:      "mailclient_csrf",
+		SessionCookieName:   "despatch_session",
+		CSRFCookieName:      "despatch_csrf",
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",
@@ -70,7 +70,7 @@ func newAdminRegistrationRouterWithDB(t *testing.T) (http.Handler, *store.Store,
 		DovecotAuthMode:     "sql",
 	}
 
-	svc := service.New(cfg, st, &sendTestMailClient{}, mail.NoopProvisioner{}, nil)
+	svc := service.New(cfg, st, &sendTestDespatch{}, mail.NoopProvisioner{}, nil)
 	return NewRouter(cfg, svc), st, sqdb
 }
 

@@ -26,7 +26,7 @@ EOF
 
 service_state() {
   if have_cmd systemctl; then
-    systemctl is-active mailclient 2>/dev/null || true
+    systemctl is-active despatch 2>/dev/null || true
   else
     printf 'n/a'
   fi
@@ -37,9 +37,9 @@ show_status() {
   echo "Service state: $(service_state)"
   echo
   if have_cmd systemctl; then
-    systemctl status mailclient --no-pager || true
+    systemctl status despatch --no-pager || true
     echo
-    journalctl -u mailclient -n 40 --no-pager || true
+    journalctl -u despatch -n 40 --no-pager || true
   else
     echo "systemctl is not available on this host."
   fi

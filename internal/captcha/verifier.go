@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 var (

@@ -1,0 +1,24 @@
+[Unit]
+Description=Despatch Privileged Update Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/despatch
+EnvironmentFile=/opt/despatch/.env
+ExecStart=/opt/despatch/despatch-update-worker
+User=root
+Group=root
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/despatch
+ReadWritePaths=/var/lib/despatch/update/request
+ReadWritePaths=/var/lib/despatch/update/status
+ReadWritePaths=/var/lib/despatch/update/lock
+ReadWritePaths=/var/lib/despatch/update/work
+ReadWritePaths=/var/lib/despatch/update/backups
+ReadWritePaths=/etc/systemd/system

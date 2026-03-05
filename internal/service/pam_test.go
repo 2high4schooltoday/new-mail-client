@@ -8,21 +8,21 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/models"
-	"mailclient/internal/store"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/models"
+	"despatch/internal/store"
 )
 
-type pamTestMailClient struct {
+type pamTestDespatch struct {
 	acceptPassword string
 	acceptedUsers  map[string]bool
 	failWith       error
 }
 
-func (m pamTestMailClient) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
+func (m pamTestDespatch) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
 	if m.failWith != nil {
 		return nil, m.failWith
 	}
@@ -34,28 +34,28 @@ func (m pamTestMailClient) ListMailboxes(ctx context.Context, user, pass string)
 	}
 	return []mail.Mailbox{{Name: "INBOX", Messages: 1}}, nil
 }
-func (m pamTestMailClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
+func (m pamTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }
-func (m pamTestMailClient) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
+func (m pamTestDespatch) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
 	return mail.Message{}, nil
 }
-func (m pamTestMailClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
+func (m pamTestDespatch) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }
-func (m pamTestMailClient) Send(ctx context.Context, user, pass string, req mail.SendRequest) error {
+func (m pamTestDespatch) Send(ctx context.Context, user, pass string, req mail.SendRequest) error {
 	return nil
 }
-func (m pamTestMailClient) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {
+func (m pamTestDespatch) SetFlags(ctx context.Context, user, pass, id string, flags []string) error {
 	return nil
 }
-func (m pamTestMailClient) Move(ctx context.Context, user, pass, id, mailbox string) error {
+func (m pamTestDespatch) Move(ctx context.Context, user, pass, id, mailbox string) error {
 	return nil
 }
-func (m pamTestMailClient) GetAttachment(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentContent, error) {
+func (m pamTestDespatch) GetAttachment(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentContent, error) {
 	return mail.AttachmentContent{}, nil
 }
-func (m pamTestMailClient) GetAttachmentStream(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentMeta, io.ReadCloser, error) {
+func (m pamTestDespatch) GetAttachmentStream(ctx context.Context, user, pass, attachmentID string) (mail.AttachmentMeta, io.ReadCloser, error) {
 	return mail.AttachmentMeta{}, nil, errors.New("not implemented")
 }
 
@@ -102,7 +102,7 @@ func newPAMTestService(t *testing.T, acceptedPass string, acceptedUsers ...strin
 	for _, v := range acceptedUsers {
 		accepted[v] = true
 	}
-	svc := New(cfg, st, pamTestMailClient{acceptPassword: acceptedPass, acceptedUsers: accepted}, mail.NoopProvisioner{}, nil)
+	svc := New(cfg, st, pamTestDespatch{acceptPassword: acceptedPass, acceptedUsers: accepted}, mail.NoopProvisioner{}, nil)
 	return svc, st
 }
 
@@ -164,7 +164,7 @@ func TestPAMModeLoginDetectsConnectivityErrors(t *testing.T) {
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 	}
-	svc := New(cfg, st, pamTestMailClient{failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused")}, mail.NoopProvisioner{}, nil)
+	svc := New(cfg, st, pamTestDespatch{failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused")}, mail.NoopProvisioner{}, nil)
 
 	localHash, err := auth.HashPassword("AnyPassword123!")
 	if err != nil {
@@ -261,7 +261,7 @@ func TestPAMSetupDetectsConnectivityErrors(t *testing.T) {
 		SessionAbsoluteHour: 24,
 		BaseDomain:          "example.com",
 	}
-	svc := New(cfg, st, pamTestMailClient{failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused")}, mail.NoopProvisioner{}, nil)
+	svc := New(cfg, st, pamTestDespatch{failWith: errors.New("dial tcp 127.0.0.1:993: connect: connection refused")}, mail.NoopProvisioner{}, nil)
 
 	_, _, err = svc.CompleteSetup(ctx, SetupCompleteRequest{
 		BaseDomain:    "example.com",

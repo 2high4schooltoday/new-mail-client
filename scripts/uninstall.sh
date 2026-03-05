@@ -105,14 +105,14 @@ env_key_for_prompt() {
   local prompt="$1"
   case "$prompt" in
     "Continue with uninstall?") echo "DESPATCH_CONFIRM_UNINSTALL" ;;
-    "Backup /opt/mailclient/.env before removal?") echo "DESPATCH_BACKUP_ENV" ;;
-    "Backup /var/lib/mailclient before removal?") echo "DESPATCH_BACKUP_DATA" ;;
-    "Remove installed app files from /opt/mailclient ?") echo "DESPATCH_REMOVE_APP_FILES" ;;
-    "Remove app data from /var/lib/mailclient ?") echo "DESPATCH_REMOVE_APP_DATA" ;;
-    "Remove system user 'mailclient'?") echo "DESPATCH_REMOVE_SYSTEM_USER" ;;
-    "Remove mailclient reverse-proxy site config from Nginx (if present)?") echo "DESPATCH_REMOVE_NGINX_SITE" ;;
-    "Remove mailclient reverse-proxy site config from Apache2 (if present)?") echo "DESPATCH_REMOVE_APACHE_SITE" ;;
-    "Remove standalone installer checkout /opt/mailclient-installer ?") echo "DESPATCH_REMOVE_CHECKOUT" ;;
+    "Backup /opt/despatch/.env before removal?") echo "DESPATCH_BACKUP_ENV" ;;
+    "Backup /var/lib/despatch before removal?") echo "DESPATCH_BACKUP_DATA" ;;
+    "Remove installed app files from /opt/despatch ?") echo "DESPATCH_REMOVE_APP_FILES" ;;
+    "Remove app data from /var/lib/despatch ?") echo "DESPATCH_REMOVE_APP_DATA" ;;
+    "Remove system user 'despatch'?") echo "DESPATCH_REMOVE_SYSTEM_USER" ;;
+    "Remove despatch reverse-proxy site config from Nginx (if present)?") echo "DESPATCH_REMOVE_NGINX_SITE" ;;
+    "Remove despatch reverse-proxy site config from Apache2 (if present)?") echo "DESPATCH_REMOVE_APACHE_SITE" ;;
+    "Remove standalone installer checkout /opt/despatch-installer ?") echo "DESPATCH_REMOVE_CHECKOUT" ;;
     *) echo "" ;;
   esac
 }
@@ -165,8 +165,8 @@ timestamp() {
 
 backup_path() {
   local path="$1"
-  local dst="/var/backups/mailclient/$(basename "$path").$(timestamp)"
-  run_as_root mkdir -p /var/backups/mailclient
+  local dst="/var/backups/despatch/$(basename "$path").$(timestamp)"
+  run_as_root mkdir -p /var/backups/despatch
   if [[ -d "$path" ]]; then
     run_as_root cp -a "$path" "$dst"
   else
@@ -183,11 +183,11 @@ safe_systemctl() {
 }
 
 cleanup_nginx_proxy() {
-  local conf="/etc/nginx/sites-available/mailclient.conf"
-  local enabled="/etc/nginx/sites-enabled/mailclient.conf"
+  local conf="/etc/nginx/sites-available/despatch.conf"
+  local enabled="/etc/nginx/sites-enabled/despatch.conf"
 
   if [[ ! -f "$conf" && ! -L "$enabled" ]]; then
-    warn "Nginx mailclient site config not found; skipping."
+    warn "Nginx despatch site config not found; skipping."
     return
   fi
 
@@ -196,25 +196,25 @@ cleanup_nginx_proxy() {
     run_as_root nginx -t
     safe_systemctl reload nginx
   fi
-  log "Removed mailclient nginx site config."
+  log "Removed despatch nginx site config."
 }
 
 cleanup_apache_proxy() {
-  local conf="/etc/apache2/sites-available/mailclient.conf"
+  local conf="/etc/apache2/sites-available/despatch.conf"
   if [[ ! -f "$conf" ]]; then
-    warn "Apache2 mailclient site config not found; skipping."
+    warn "Apache2 despatch site config not found; skipping."
     return
   fi
 
   if have_cmd a2dissite; then
-    run_as_root a2dissite mailclient.conf >/dev/null 2>&1 || true
+    run_as_root a2dissite despatch.conf >/dev/null 2>&1 || true
   fi
   run_as_root rm -f "$conf"
   if have_cmd apache2ctl; then
     run_as_root apache2ctl configtest
     safe_systemctl reload apache2
   fi
-  log "Removed mailclient apache2 site config."
+  log "Removed despatch apache2 site config."
 }
 
 remove_path_if_exists() {
@@ -227,12 +227,12 @@ remove_path_if_exists() {
   fi
 }
 
-remove_mailclient_user() {
-  if id -u mailclient >/dev/null 2>&1; then
-    run_as_root userdel mailclient >/dev/null 2>&1 || true
-    log "Removed system user: mailclient"
+remove_despatch_user() {
+  if id -u despatch >/dev/null 2>&1; then
+    run_as_root userdel despatch >/dev/null 2>&1 || true
+    log "Removed system user: despatch"
   else
-    warn "System user mailclient not found; skipping."
+    warn "System user despatch not found; skipping."
   fi
 }
 
@@ -251,56 +251,56 @@ begin_stage "preflight" "Preflight" "10"
 finish_stage_ok
 
 begin_stage "backups" "Backup Selected Files" "20"
-if [[ -f /opt/mailclient/.env ]] && prompt_yes_no "Backup /opt/mailclient/.env before removal?" 1; then
-  backup_path /opt/mailclient/.env
+if [[ -f /opt/despatch/.env ]] && prompt_yes_no "Backup /opt/despatch/.env before removal?" 1; then
+  backup_path /opt/despatch/.env
 fi
 
-if [[ -d /var/lib/mailclient ]] && prompt_yes_no "Backup /var/lib/mailclient before removal?" 1; then
-  backup_path /var/lib/mailclient
+if [[ -d /var/lib/despatch ]] && prompt_yes_no "Backup /var/lib/despatch before removal?" 1; then
+  backup_path /var/lib/despatch
 fi
 finish_stage_ok
 
 begin_stage "service" "Service Teardown" "25"
 log "Removing service files..."
 if have_cmd systemctl; then
-  safe_systemctl stop mailclient-pam-reset-helper.socket
-  safe_systemctl disable mailclient-pam-reset-helper.socket
-  safe_systemctl stop mailclient-pam-reset-helper.service
-  safe_systemctl disable mailclient-pam-reset-helper.service
-  safe_systemctl stop mailclient-updater.path
-  safe_systemctl disable mailclient-updater.path
-  safe_systemctl stop mailclient-updater.service
-  safe_systemctl disable mailclient-updater.service
-  safe_systemctl stop mailclient-mailsec
-  safe_systemctl disable mailclient-mailsec
-  safe_systemctl stop mailclient
-  safe_systemctl disable mailclient
-  if [[ -f /etc/systemd/system/mailclient-updater.path ]]; then
-    run_as_root rm -f /etc/systemd/system/mailclient-updater.path
+  safe_systemctl stop despatch-pam-reset-helper.socket
+  safe_systemctl disable despatch-pam-reset-helper.socket
+  safe_systemctl stop despatch-pam-reset-helper.service
+  safe_systemctl disable despatch-pam-reset-helper.service
+  safe_systemctl stop despatch-updater.path
+  safe_systemctl disable despatch-updater.path
+  safe_systemctl stop despatch-updater.service
+  safe_systemctl disable despatch-updater.service
+  safe_systemctl stop despatch-mailsec
+  safe_systemctl disable despatch-mailsec
+  safe_systemctl stop despatch
+  safe_systemctl disable despatch
+  if [[ -f /etc/systemd/system/despatch-updater.path ]]; then
+    run_as_root rm -f /etc/systemd/system/despatch-updater.path
   fi
-  if [[ -f /etc/systemd/system/mailclient-updater.service ]]; then
-    run_as_root rm -f /etc/systemd/system/mailclient-updater.service
+  if [[ -f /etc/systemd/system/despatch-updater.service ]]; then
+    run_as_root rm -f /etc/systemd/system/despatch-updater.service
   fi
-  if [[ -f /etc/systemd/system/mailclient-pam-reset-helper.socket ]]; then
-    run_as_root rm -f /etc/systemd/system/mailclient-pam-reset-helper.socket
+  if [[ -f /etc/systemd/system/despatch-pam-reset-helper.socket ]]; then
+    run_as_root rm -f /etc/systemd/system/despatch-pam-reset-helper.socket
   fi
-  if [[ -f /etc/systemd/system/mailclient-pam-reset-helper.service ]]; then
-    run_as_root rm -f /etc/systemd/system/mailclient-pam-reset-helper.service
+  if [[ -f /etc/systemd/system/despatch-pam-reset-helper.service ]]; then
+    run_as_root rm -f /etc/systemd/system/despatch-pam-reset-helper.service
   fi
-  if [[ -f /etc/systemd/system/mailclient-mailsec.service ]]; then
-    run_as_root rm -f /etc/systemd/system/mailclient-mailsec.service
+  if [[ -f /etc/systemd/system/despatch-mailsec.service ]]; then
+    run_as_root rm -f /etc/systemd/system/despatch-mailsec.service
   fi
-  if [[ -d /etc/systemd/system/mailclient-pam-reset-helper.service.d ]]; then
-    run_as_root rm -rf /etc/systemd/system/mailclient-pam-reset-helper.service.d
+  if [[ -d /etc/systemd/system/despatch-pam-reset-helper.service.d ]]; then
+    run_as_root rm -rf /etc/systemd/system/despatch-pam-reset-helper.service.d
   fi
-  if [[ -d /etc/systemd/system/mailclient-mailsec.service.d ]]; then
-    run_as_root rm -rf /etc/systemd/system/mailclient-mailsec.service.d
+  if [[ -d /etc/systemd/system/despatch-mailsec.service.d ]]; then
+    run_as_root rm -rf /etc/systemd/system/despatch-mailsec.service.d
   fi
-  if [[ -d /etc/systemd/system/mailclient-updater.service.d ]]; then
-    run_as_root rm -rf /etc/systemd/system/mailclient-updater.service.d
+  if [[ -d /etc/systemd/system/despatch-updater.service.d ]]; then
+    run_as_root rm -rf /etc/systemd/system/despatch-updater.service.d
   fi
-  if [[ -f /etc/systemd/system/mailclient.service ]]; then
-    run_as_root rm -f /etc/systemd/system/mailclient.service
+  if [[ -f /etc/systemd/system/despatch.service ]]; then
+    run_as_root rm -f /etc/systemd/system/despatch.service
   fi
   run_as_root systemctl daemon-reload
 else
@@ -309,28 +309,28 @@ fi
 finish_stage_ok
 
 begin_stage "cleanup" "Filesystem Cleanup" "35"
-if prompt_yes_no "Remove installed app files from /opt/mailclient ?" 1; then
-  remove_path_if_exists /opt/mailclient
+if prompt_yes_no "Remove installed app files from /opt/despatch ?" 1; then
+  remove_path_if_exists /opt/despatch
 fi
 
-if prompt_yes_no "Remove app data from /var/lib/mailclient ?" 1; then
-  remove_path_if_exists /var/lib/mailclient
+if prompt_yes_no "Remove app data from /var/lib/despatch ?" 1; then
+  remove_path_if_exists /var/lib/despatch
 fi
 
-if prompt_yes_no "Remove system user 'mailclient'?" 1; then
-  remove_mailclient_user
+if prompt_yes_no "Remove system user 'despatch'?" 1; then
+  remove_despatch_user
 fi
 
-if prompt_yes_no "Remove mailclient reverse-proxy site config from Nginx (if present)?" 1; then
+if prompt_yes_no "Remove despatch reverse-proxy site config from Nginx (if present)?" 1; then
   cleanup_nginx_proxy
 fi
 
-if prompt_yes_no "Remove mailclient reverse-proxy site config from Apache2 (if present)?" 1; then
+if prompt_yes_no "Remove despatch reverse-proxy site config from Apache2 (if present)?" 1; then
   cleanup_apache_proxy
 fi
 
-if [[ -d /opt/mailclient-installer ]] && prompt_yes_no "Remove standalone installer checkout /opt/mailclient-installer ?" 0; then
-  remove_path_if_exists /opt/mailclient-installer
+if [[ -d /opt/despatch-installer ]] && prompt_yes_no "Remove standalone installer checkout /opt/despatch-installer ?" 0; then
+  remove_path_if_exists /opt/despatch-installer
 fi
 finish_stage_ok
 
@@ -342,7 +342,7 @@ Uninstall complete.
 Not touched:
   - Postfix services/config
   - Dovecot services/config
-  - Nginx/Apache2 packages (only optional mailclient site entries)
+  - Nginx/Apache2 packages (only optional despatch site entries)
   - Dovecot auth database
   - TLS/certbot packages and certificates
 

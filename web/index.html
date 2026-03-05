@@ -23,7 +23,7 @@
           <button id="tab-setup" class="tab" type="button">Setup</button>
           <button id="tab-auth" class="tab active" type="button">Auth</button>
           <button id="tab-mail" class="tab" type="button">Mail</button>
-          <button id="tab-account" class="tab" type="button">Account</button>
+          <button id="tab-settings" class="tab" type="button">Settings</button>
           <button id="tab-admin" class="tab" type="button">Admin</button>
         </nav>
         <div class="topbar-tools">
@@ -88,7 +88,7 @@
                     <option value="webauthn">Passkey (WebAuthn)</option>
                   </select>
                 </label>
-                <p id="register-mfa-help" class="hint">You can enable MFA later in Account Security.</p>
+                <p id="register-mfa-help" class="hint">You can enable MFA later in Settings > Sign-In.</p>
                 <p class="hint">Use a recovery email different from your login email.</p>
                 <div id="captcha-shell" class="captcha-shell hidden">
                   <p id="captcha-note" class="hint">Complete the challenge to continue registration.</p>
@@ -128,48 +128,81 @@
         </article>
       </section>
 
-      <section id="view-account" class="account-shell hidden">
-        <article class="oobe-window auth-window account-window" aria-labelledby="account-title">
-          <div class="oobe-content auth-content account-panel">
-            <header class="account-header">
-              <h2 id="account-title">Account Security</h2>
-              <p class="hint">Manage passkeys, trusted devices, and signed-in sessions after authentication.</p>
-            </header>
-            <div class="account-security-grid">
-              <section class="account-security-block" aria-labelledby="account-passkeys-title">
-                <h3 id="account-passkeys-title">Passkeys</h3>
-                <p id="passkeys-note" class="hint">Passkey capability status is loading.</p>
-                <div id="passkeys-list" class="passkeys-list"></div>
-                <div class="actions">
-                  <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Passkeys</button>
+      <section id="view-settings" class="settings-shell hidden">
+        <div class="settings-layout">
+          <aside class="panel settings-nav">
+            <h2>Settings</h2>
+            <label class="settings-search">
+              <span class="hint">Search</span>
+              <input id="settings-search-input" type="text" placeholder="Find settings">
+            </label>
+            <div id="settings-search-results" class="settings-search-results hidden"></div>
+            <button id="settings-nav-signin" class="settings-nav-btn is-active" type="button">Sign-In</button>
+            <button id="settings-nav-devices" class="settings-nav-btn" type="button">Devices</button>
+            <button id="settings-nav-sessions" class="settings-nav-btn" type="button">Sessions</button>
+          </aside>
+
+          <div class="settings-main">
+            <section id="settings-section-signin" class="panel settings-section">
+              <header class="settings-page-head">
+                <h3>Sign-In</h3>
+                <p class="hint">Manage passkeys used for account sign-in and MFA.</p>
+              </header>
+              <section class="setting-section">
+                <header class="setting-section-head">
+                  <h4>Passkeys</h4>
+                  <p id="passkeys-note" class="hint">Passkey capability status is loading.</p>
+                </header>
+                <div id="passkeys-list" class="settings-list"></div>
+                <article id="settings-passkey-detail" class="settings-detail hidden"></article>
+                <div class="actions setting-actions">
                   <button id="btn-passkeys-add" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Add Passkey</button>
+                  <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh</button>
                 </div>
               </section>
+            </section>
 
-              <section class="account-security-block" aria-labelledby="account-trusted-title">
-                <h3 id="account-trusted-title">Trusted Devices</h3>
-                <p class="hint">Trusted devices skip MFA for 30 days on this account.</p>
-                <div id="trusted-devices-list" class="trusted-devices-list"></div>
-                <div class="actions">
-                  <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Devices</button>
+            <section id="settings-section-devices" class="panel settings-section hidden">
+              <header class="settings-page-head">
+                <h3>Devices</h3>
+                <p class="hint">Devices allowed to skip MFA for this account.</p>
+              </header>
+              <section class="setting-section">
+                <header class="setting-section-head">
+                  <h4>Trusted Devices</h4>
+                  <p class="hint">Review and remove trusted devices.</p>
+                </header>
+                <div id="trusted-devices-list" class="settings-list"></div>
+                <article id="settings-device-detail" class="settings-detail hidden"></article>
+                <div class="actions setting-actions">
+                  <button id="btn-trusted-devices-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh</button>
                 </div>
-                <div class="account-danger-block">
-                  <p class="hint">Revoking all trusted devices will require MFA on each device at next sign-in.</p>
+                <div class="settings-danger-zone">
+                  <p class="hint">Revoking all trusted devices will require MFA on next sign-in.</p>
                   <button id="btn-trusted-devices-revoke-all" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Revoke All Trusted Devices</button>
                 </div>
               </section>
+            </section>
 
-              <section class="account-security-block" aria-labelledby="account-sessions-title">
-                <h3 id="account-sessions-title">Sessions</h3>
+            <section id="settings-section-sessions" class="panel settings-section hidden">
+              <header class="settings-page-head">
+                <h3>Sessions</h3>
                 <p class="hint">Review active sessions and revoke stale access.</p>
-                <div id="sessions-list" class="sessions-list"></div>
-                <div class="actions">
-                  <button id="btn-sessions-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh Sessions</button>
+              </header>
+              <section class="setting-section">
+                <header class="setting-section-head">
+                  <h4>Active Sessions</h4>
+                  <p class="hint">Select a session to review details.</p>
+                </header>
+                <div id="sessions-list" class="settings-list"></div>
+                <article id="settings-session-detail" class="settings-detail hidden"></article>
+                <div class="actions setting-actions">
+                  <button id="btn-sessions-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh</button>
                 </div>
               </section>
-            </div>
+            </section>
           </div>
-        </article>
+        </div>
       </section>
 
       <section id="view-setup" class="setup-shell hidden page-oobe-assistant">
@@ -332,149 +365,167 @@
         <div class="admin-layout">
           <aside class="panel admin-nav">
             <h2>Admin</h2>
-            <button id="admin-nav-update" class="admin-nav-btn is-active" type="button">System</button>
-            <button id="admin-nav-registrations" class="admin-nav-btn" type="button">Registrations</button>
+            <label class="settings-search">
+              <span class="hint">Search</span>
+              <input id="admin-search-input" type="text" placeholder="Find admin settings">
+            </label>
+            <div id="admin-search-results" class="settings-search-results hidden"></div>
             <button id="admin-nav-users" class="admin-nav-btn" type="button">Users</button>
+            <button id="admin-nav-registrations" class="admin-nav-btn" type="button">Registrations</button>
+            <button id="admin-nav-system" class="admin-nav-btn is-active" type="button">System</button>
             <button id="admin-nav-audit" class="admin-nav-btn" type="button">Audit Log</button>
           </aside>
 
           <div class="admin-main">
-            <section id="admin-section-update" class="panel admin-section">
-              <h3>Software Update</h3>
-              <div class="machine-grid">
-                <div class="metric-label">Current Version</div><div id="update-current-version" class="metric-value">-</div>
-                <div class="metric-label">Current Commit</div><div id="update-current-commit" class="metric-value">-</div>
-                <div class="metric-label">Latest Release</div><div id="update-latest-version" class="metric-value">-</div>
-                <div class="metric-label">Available</div><div id="update-available" class="metric-value">-</div>
-                <div class="metric-label">Last Checked</div><div id="update-last-checked" class="metric-value">-</div>
-                <div class="metric-label">Apply State</div><div id="update-apply-state" class="metric-value">idle</div>
-              </div>
-              <p id="update-note" class="hint">Updates check GitHub Releases and require updater units on Ubuntu.</p>
-              <div class="actions">
-                <button id="btn-update-check" class="cmd-btn cmd-btn--dense" type="button">Check Now</button>
-                <button id="btn-update-apply" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Update</button>
-              </div>
+            <section id="admin-section-system" class="panel admin-section">
+              <header class="settings-page-head">
+                <h3>System</h3>
+                <p class="hint">System updates and operational feature flags.</p>
+              </header>
+              <section class="setting-section">
+                <h4>Software Update</h4>
+                <div class="settings-list system-metrics">
+                  <div class="setting-list-item"><span class="setting-list-main"><span class="setting-list-title">Current Version</span></span><span id="update-current-version" class="setting-list-action">-</span></div>
+                  <div class="setting-list-item"><span class="setting-list-main"><span class="setting-list-title">Current Commit</span></span><span id="update-current-commit" class="setting-list-action">-</span></div>
+                  <div class="setting-list-item"><span class="setting-list-main"><span class="setting-list-title">Latest Release</span></span><span id="update-latest-version" class="setting-list-action">-</span></div>
+                  <div class="setting-list-item"><span class="setting-list-main"><span class="setting-list-title">Available</span></span><span id="update-available" class="setting-list-action">-</span></div>
+                  <div class="setting-list-item"><span class="setting-list-main"><span class="setting-list-title">Last Checked</span></span><span id="update-last-checked" class="setting-list-action">-</span></div>
+                  <div class="setting-list-item"><span class="setting-list-main"><span class="setting-list-title">Apply State</span></span><span id="update-apply-state" class="setting-list-action">idle</span></div>
+                </div>
+                <p id="update-note" class="hint">Updates check GitHub Releases and require updater units on Ubuntu.</p>
+                <div class="actions setting-actions">
+                  <button id="btn-update-check" class="cmd-btn cmd-btn--dense" type="button">Check Now</button>
+                  <button id="btn-update-apply" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Update</button>
+                </div>
+              </section>
+              <section class="setting-section">
+                <h4>Feature Flags</h4>
+                <p class="hint">Runtime-safe flags apply immediately. Startup-managed flags are read-only.</p>
+                <div id="admin-feature-flags" class="settings-list"></div>
+                <article id="admin-feature-flags-detail" class="settings-detail hidden"></article>
+              </section>
             </section>
 
             <section id="admin-section-registrations" class="panel admin-section hidden">
-              <header class="section-head">
+              <header class="settings-page-head">
                 <h3>Registrations</h3>
-                <div class="section-tools">
-                  <input id="admin-reg-q" type="text" placeholder="Search email or reason">
-                  <select id="admin-reg-status">
-                    <option value="pending">Pending</option>
-                    <option value="approved">Approved</option>
-                    <option value="rejected">Rejected</option>
-                    <option value="all">All</option>
-                  </select>
-                  <select id="admin-reg-sort">
-                    <option value="created_at">Created</option>
-                    <option value="email">Email</option>
-                    <option value="status">Status</option>
-                    <option value="decided_at">Decided</option>
-                  </select>
-                  <select id="admin-reg-order">
-                    <option value="desc">Desc</option>
-                    <option value="asc">Asc</option>
-                  </select>
-                  <button id="btn-admin-reg-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
-                </div>
+                <p class="hint">Review and decide pending account requests.</p>
               </header>
+              <div class="section-tools">
+                <input id="admin-reg-q" type="text" placeholder="Search email or reason">
+                <select id="admin-reg-status">
+                  <option value="pending">Pending</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="all">All</option>
+                </select>
+                <select id="admin-reg-sort">
+                  <option value="created_at">Created</option>
+                  <option value="email">Email</option>
+                  <option value="status">Status</option>
+                  <option value="decided_at">Decided</option>
+                </select>
+                <select id="admin-reg-order">
+                  <option value="desc">Newest first</option>
+                  <option value="asc">Oldest first</option>
+                </select>
+                <button id="btn-admin-reg-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
+              </div>
               <div class="bulk-bar">
+                <label class="bulk-check"><input id="admin-reg-check-all" type="checkbox"> Select visible</label>
                 <button id="btn-reg-select-all" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Select all</button>
                 <button id="btn-reg-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear</button>
                 <button id="btn-reg-approve" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Approve selected</button>
                 <button id="btn-reg-reject" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Reject selected</button>
               </div>
-              <table class="table data-table">
-                <thead><tr><th class="num"><input id="admin-reg-check-all" type="checkbox" aria-label="Select all registrations"></th><th>Email</th><th>Status</th><th class="num">Created</th><th>Action</th></tr></thead>
-                <tbody id="admin-registrations"></tbody>
-              </table>
+              <div id="admin-registrations" class="settings-list"></div>
+              <article id="admin-registrations-detail" class="settings-detail hidden"></article>
             </section>
 
             <section id="admin-section-users" class="panel admin-section hidden">
-              <header class="section-head">
+              <header class="settings-page-head">
                 <h3>Users</h3>
-                <div class="section-tools">
-                  <input id="admin-user-q" type="text" placeholder="Search users">
-                  <select id="admin-user-status">
-                    <option value="all">All status</option>
-                    <option value="active">Active</option>
-                    <option value="pending">Pending</option>
-                    <option value="suspended">Suspended</option>
-                  </select>
-                  <select id="admin-user-role">
-                    <option value="all">All roles</option>
-                    <option value="user">User</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                  <select id="admin-user-provision">
-                    <option value="all">All provision</option>
-                    <option value="ok">Provisioned</option>
-                    <option value="pending">Pending</option>
-                    <option value="error">Error</option>
-                  </select>
-                  <select id="admin-user-sort">
-                    <option value="created_at">Created</option>
-                    <option value="email">Email</option>
-                    <option value="role">Role</option>
-                    <option value="status">Status</option>
-                    <option value="last_login_at">Last Login</option>
-                  </select>
-                  <select id="admin-user-order">
-                    <option value="desc">Desc</option>
-                    <option value="asc">Asc</option>
-                  </select>
-                  <button id="btn-admin-user-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
-                </div>
+                <p class="hint">Manage account status, role, and password actions.</p>
               </header>
+              <div class="section-tools">
+                <input id="admin-user-q" type="text" placeholder="Search users">
+                <select id="admin-user-status">
+                  <option value="all">All status</option>
+                  <option value="active">Active</option>
+                  <option value="pending">Pending</option>
+                  <option value="suspended">Suspended</option>
+                </select>
+                <select id="admin-user-role">
+                  <option value="all">All roles</option>
+                  <option value="user">User</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <select id="admin-user-provision">
+                  <option value="all">All provision</option>
+                  <option value="ok">Provisioned</option>
+                  <option value="pending">Pending</option>
+                  <option value="error">Error</option>
+                </select>
+                <select id="admin-user-sort">
+                  <option value="created_at">Created</option>
+                  <option value="email">Email</option>
+                  <option value="role">Role</option>
+                  <option value="status">Status</option>
+                  <option value="last_login_at">Last Login</option>
+                </select>
+                <select id="admin-user-order">
+                  <option value="desc">Newest first</option>
+                  <option value="asc">Oldest first</option>
+                </select>
+                <button id="btn-admin-user-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
+              </div>
               <div class="bulk-bar">
+                <label class="bulk-check"><input id="admin-user-check-all" type="checkbox"> Select visible</label>
                 <button id="btn-user-select-all" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Select all</button>
                 <button id="btn-user-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear</button>
                 <button id="btn-user-suspend" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Suspend selected</button>
                 <button id="btn-user-unsuspend" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Unsuspend selected</button>
               </div>
-              <table class="table data-table">
-                <thead><tr><th class="num"><input id="admin-user-check-all" type="checkbox" aria-label="Select all users"></th><th>Email</th><th>Role</th><th>Status</th><th>Provision</th><th>Action</th></tr></thead>
-                <tbody id="admin-users"></tbody>
-              </table>
+              <div id="admin-users" class="settings-list"></div>
+              <article id="admin-users-detail" class="settings-detail hidden"></article>
             </section>
 
             <section id="admin-section-audit" class="panel admin-section hidden">
-              <header class="section-head">
+              <header class="settings-page-head">
                 <h3>Audit Log</h3>
-                <div class="section-tools">
-                  <input id="admin-audit-q" type="text" placeholder="Search action, target, metadata">
-                  <select id="admin-audit-action">
-                    <option value="all">All actions</option>
-                    <option value="registration.approve">Registration approve</option>
-                    <option value="registration.reject">Registration reject</option>
-                    <option value="user.suspend">User suspend</option>
-                    <option value="user.unsuspend">User unsuspend</option>
-                    <option value="user.reset_password">User password reset</option>
-                    <option value="user.retry_provision">User provision retry</option>
-                  </select>
-                  <input id="admin-audit-actor" type="text" placeholder="Actor email">
-                  <input id="admin-audit-target" type="text" placeholder="Target">
-                  <input id="admin-audit-from" type="date">
-                  <input id="admin-audit-to" type="date">
-                  <select id="admin-audit-sort">
-                    <option value="created_at">Created</option>
-                    <option value="action">Action</option>
-                    <option value="actor">Actor</option>
-                    <option value="target">Target</option>
-                  </select>
-                  <select id="admin-audit-order">
-                    <option value="desc">Desc</option>
-                    <option value="asc">Asc</option>
-                  </select>
-                  <button id="btn-admin-audit-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
-                </div>
+                <p class="hint">Review administrative actions and security events.</p>
               </header>
-              <table class="table data-table">
-                <thead><tr><th class="num">When</th><th>Severity</th><th>Summary</th><th>Actor</th><th>Target</th></tr></thead>
-                <tbody id="admin-audit"></tbody>
-              </table>
+              <div class="section-tools">
+                <input id="admin-audit-q" type="text" placeholder="Search action or metadata">
+                <select id="admin-audit-action">
+                  <option value="all">All actions</option>
+                  <option value="registration.approve">Registration approve</option>
+                  <option value="registration.reject">Registration reject</option>
+                  <option value="user.suspend">User suspend</option>
+                  <option value="user.unsuspend">User unsuspend</option>
+                  <option value="user.reset_password">User password reset</option>
+                  <option value="user.retry_provision">User provision retry</option>
+                  <option value="feature_flag.update">Feature flag update</option>
+                  <option value="feature_flag.reset">Feature flag reset</option>
+                </select>
+                <input id="admin-audit-actor" type="text" placeholder="Actor email">
+                <input id="admin-audit-target" type="text" placeholder="Target">
+                <input id="admin-audit-from" type="date">
+                <input id="admin-audit-to" type="date">
+                <select id="admin-audit-sort">
+                  <option value="created_at">Created</option>
+                  <option value="action">Action</option>
+                  <option value="actor">Actor</option>
+                  <option value="target">Target</option>
+                </select>
+                <select id="admin-audit-order">
+                  <option value="desc">Newest first</option>
+                  <option value="asc">Oldest first</option>
+                </select>
+                <button id="btn-admin-audit-apply" class="cmd-btn cmd-btn--dense" type="button">Apply</button>
+              </div>
+              <div id="admin-audit" class="settings-list"></div>
+              <article id="admin-audit-detail" class="settings-detail hidden"></article>
             </section>
           </div>
         </div>

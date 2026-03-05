@@ -3,7 +3,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="/opt/mailclient/.env"
+ENV_FILE="/opt/despatch/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
   ENV_FILE="$ROOT_DIR/.env"
 fi
@@ -75,18 +75,18 @@ if [[ -z "$DEPLOY_MODE" ]]; then
 fi
 
 PROXY_SERVER=""
-if [[ -f /etc/nginx/sites-available/mailclient.conf || -L /etc/nginx/sites-enabled/mailclient.conf ]]; then
+if [[ -f /etc/nginx/sites-available/despatch.conf || -L /etc/nginx/sites-enabled/despatch.conf ]]; then
   PROXY_SERVER="nginx"
-elif [[ -f /etc/apache2/sites-available/mailclient.conf || -L /etc/apache2/sites-enabled/mailclient.conf ]]; then
+elif [[ -f /etc/apache2/sites-available/despatch.conf || -L /etc/apache2/sites-enabled/despatch.conf ]]; then
   PROXY_SERVER="apache2"
 fi
 if [[ -z "$PROXY_TLS" ]]; then
   if [[ "$PROXY_SERVER" == "nginx" ]]; then
-    if grep -Eq 'listen[[:space:]]+443' /etc/nginx/sites-available/mailclient.conf 2>/dev/null; then
+    if grep -Eq 'listen[[:space:]]+443' /etc/nginx/sites-available/despatch.conf 2>/dev/null; then
       PROXY_TLS="1"
     fi
   elif [[ "$PROXY_SERVER" == "apache2" ]]; then
-    if grep -Eq 'SSLEngine[[:space:]]+on|VirtualHost[[:space:]]+\*:443' /etc/apache2/sites-available/mailclient.conf 2>/dev/null; then
+    if grep -Eq 'SSLEngine[[:space:]]+on|VirtualHost[[:space:]]+\*:443' /etc/apache2/sites-available/despatch.conf 2>/dev/null; then
       PROXY_TLS="1"
     fi
   fi
@@ -110,10 +110,10 @@ fi
 printf '\n'
 
 if have_cmd systemctl; then
-  if systemctl is-active --quiet mailclient; then
-    record_ok "mailclient service is active"
+  if systemctl is-active --quiet despatch; then
+    record_ok "despatch service is active"
   else
-    record_fail 10 "APP_DOWN: mailclient service is inactive"
+    record_fail 10 "APP_DOWN: despatch service is inactive"
   fi
 else
   printf '[WARN] systemctl not found; service state cannot be verified.\n'
@@ -151,7 +151,7 @@ fi
 
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   if [[ -z "$PROXY_SERVER" ]]; then
-    record_fail 20 "PROXY_DOWN: mailclient proxy config not found for nginx/apache2"
+    record_fail 20 "PROXY_DOWN: despatch proxy config not found for nginx/apache2"
   fi
 
   if [[ "$PROXY_SERVER" == "nginx" ]]; then
@@ -213,8 +213,8 @@ printf '\n--- Cookie policy ---\n'
 if [[ "$DEPLOY_MODE" == "direct" ]]; then
   if [[ "$COOKIE_SECURE_MODE" == "always" ]]; then
     record_fail 50 "COOKIE_POLICY_MISMATCH: direct HTTP mode cannot use secure-only cookies"
-    printf '       Fix: set COOKIE_SECURE_MODE=never in %s and restart mailclient.\n' "$ENV_FILE"
-    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=never/\" %s && sudo systemctl restart mailclient\n' "$ENV_FILE"
+    printf '       Fix: set COOKIE_SECURE_MODE=never in %s and restart despatch.\n' "$ENV_FILE"
+    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=never/\" %s && sudo systemctl restart despatch\n' "$ENV_FILE"
   else
     record_ok "direct-mode cookie policy is compatible"
   fi
@@ -223,12 +223,12 @@ fi
 if [[ "$DEPLOY_MODE" == "proxy" ]]; then
   if [[ "$PROXY_TLS" != "1" && "$COOKIE_SECURE_MODE" == "always" ]]; then
     record_fail 50 "COOKIE_POLICY_MISMATCH: HTTP-only proxy mode cannot use secure-only cookies"
-    printf '       Fix: enable TLS proxy or set COOKIE_SECURE_MODE=never in %s, then restart mailclient.\n' "$ENV_FILE"
-    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=never/\" %s && sudo systemctl restart mailclient\n' "$ENV_FILE"
+    printf '       Fix: enable TLS proxy or set COOKIE_SECURE_MODE=never in %s, then restart despatch.\n' "$ENV_FILE"
+    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=never/\" %s && sudo systemctl restart despatch\n' "$ENV_FILE"
   elif [[ "$PROXY_TLS" == "1" && "$COOKIE_SECURE_MODE" != "always" ]]; then
     record_fail 50 "COOKIE_POLICY_MISMATCH: HTTPS proxy mode should use COOKIE_SECURE_MODE=always"
-    printf '       Fix: set COOKIE_SECURE_MODE=always in %s and restart mailclient.\n' "$ENV_FILE"
-    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=always/\" %s && sudo systemctl restart mailclient\n' "$ENV_FILE"
+    printf '       Fix: set COOKIE_SECURE_MODE=always in %s and restart despatch.\n' "$ENV_FILE"
+    printf '       Command: sudo sed -i \"s/^COOKIE_SECURE_MODE=.*/COOKIE_SECURE_MODE=always/\" %s && sudo systemctl restart despatch\n' "$ENV_FILE"
   else
     record_ok "proxy-mode cookie policy is compatible"
   fi
@@ -307,12 +307,12 @@ code="${first_error%%:*}"
 reason="${first_error#*:}"
 printf '[FAIL] first_error=%s (%s)\n' "$code" "$reason"
 case "$code" in
-  10) printf 'Next: check app logs -> journalctl -u mailclient -n 100 --no-pager\n' ;;
+  10) printf 'Next: check app logs -> journalctl -u despatch -n 100 --no-pager\n' ;;
   20) printf 'Next: check proxy service status/config test.\n' ;;
   21) printf 'Next: verify proxy server_name/vhost routes to 127.0.0.1:8080.\n' ;;
   22) printf 'Next: fix TLS vhost/certificate mapping for BASE_DOMAIN (redirect + SAN + 443 vhost).\n' ;;
   30) printf 'Next: open required firewall ports (ufw/security groups).\n' ;;
   40) printf 'Next: update DNS A record to this server public IP.\n' ;;
-  50) printf 'Next: align COOKIE_SECURE_MODE with deploy mode and restart mailclient.\n' ;;
+  50) printf 'Next: align COOKIE_SECURE_MODE with deploy mode and restart despatch.\n' ;;
 esac
 exit "$code"

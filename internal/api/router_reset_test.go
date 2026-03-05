@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/models"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/models"
+	"despatch/internal/service"
+	"despatch/internal/store"
 )
 
 func newResetRouter(t *testing.T, cfg config.Config) (http.Handler, *store.Store) {
@@ -46,7 +46,7 @@ func newResetRouter(t *testing.T, cfg config.Config) (http.Handler, *store.Store
 	if err := st.EnsureAdmin(context.Background(), "admin@example.com", pwHash); err != nil {
 		t.Fatalf("ensure admin: %v", err)
 	}
-	svc := service.New(cfg, st, &sendTestMailClient{}, mail.NoopProvisioner{}, nil)
+	svc := service.New(cfg, st, &sendTestDespatch{}, mail.NoopProvisioner{}, nil)
 	return NewRouter(cfg, svc), st
 }
 
@@ -54,8 +54,8 @@ func defaultResetTestConfig() config.Config {
 	return config.Config{
 		ListenAddr:                      ":8080",
 		BaseDomain:                      "example.com",
-		SessionCookieName:               "mailclient_session",
-		CSRFCookieName:                  "mailclient_csrf",
+		SessionCookieName:               "despatch_session",
+		CSRFCookieName:                  "despatch_csrf",
 		SessionIdleMinutes:              30,
 		SessionAbsoluteHour:             24,
 		SessionEncryptKey:               "this_is_a_valid_long_session_encrypt_key_123456",
@@ -202,10 +202,10 @@ func loginForResetTest(t *testing.T, router http.Handler, email, password string
 	var sessionCookie *http.Cookie
 	var csrfCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "mailclient_session" {
+		if c.Name == "despatch_session" {
 			sessionCookie = c
 		}
-		if c.Name == "mailclient_csrf" {
+		if c.Name == "despatch_csrf" {
 			csrfCookie = c
 		}
 	}

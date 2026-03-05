@@ -11,8 +11,39 @@ import (
 
 	"github.com/google/uuid"
 
-	"mailclient/internal/models"
+	"despatch/internal/mail"
+	"despatch/internal/models"
 )
+
+func indexedMessageIDCandidates(accountID, id string) []string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	scoped := mail.NormalizeIndexedMessageID(accountID, id)
+	if scoped == "" {
+		return nil
+	}
+	if scoped == id {
+		return []string{scoped}
+	}
+	return []string{scoped, id}
+}
+
+func indexedThreadIDCandidates(accountID, id string) []string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	scoped := mail.NormalizeIndexedThreadID(accountID, id)
+	if scoped == "" {
+		return nil
+	}
+	if scoped == id {
+		return []string{scoped}
+	}
+	return []string{scoped, id}
+}
 
 func (s *Store) ListMailAccounts(ctx context.Context, userID string) ([]models.MailAccount, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -893,9 +924,11 @@ func (s *Store) UpsertIndexedMessage(ctx context.Context, in models.IndexedMessa
 	if strings.TrimSpace(in.ID) == "" {
 		in.ID = uuid.NewString()
 	}
+	in.ID = mail.NormalizeIndexedMessageID(in.AccountID, in.ID)
 	if strings.TrimSpace(in.ThreadID) == "" {
 		in.ThreadID = in.ID
 	}
+	in.ThreadID = mail.NormalizeIndexedThreadID(in.AccountID, in.ThreadID)
 	if in.DateHeader.IsZero() {
 		in.DateHeader = now
 	}
@@ -978,6 +1011,10 @@ func (s *Store) UpsertIndexedMessage(ctx context.Context, in models.IndexedMessa
 }
 
 func (s *Store) ReplaceIndexedAttachments(ctx context.Context, accountID, messageID string, items []models.IndexedAttachment) error {
+	messageID = mail.NormalizeIndexedMessageID(accountID, messageID)
+	if strings.TrimSpace(messageID) == "" {
+		return fmt.Errorf("message id is required")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1056,11 +1093,13 @@ func (s *Store) RebuildThreadIndex(ctx context.Context, accountID string) error 
 		if err := rows.Scan(&id, &mailbox, &threadID, &subject, &fromValue, &seenInt, &attachInt, &flaggedInt, &importance, &internalDate); err != nil {
 			return err
 		}
-		key := mailbox + "\x00" + threadID
+		scopedMessageID := mail.NormalizeIndexedMessageID(accountID, id)
+		scopedThreadID := mail.NormalizeIndexedThreadID(accountID, threadID)
+		key := mailbox + "\x00" + scopedThreadID
 		agg := threads[key]
 		if agg == nil {
 			agg = &threadAgg{
-				ID:           threadID,
+				ID:           scopedThreadID,
 				AccountID:    accountID,
 				Mailbox:      mailbox,
 				SubjectNorm:  firstNonEmptyString(strings.TrimSpace(subject), "(no subject)"),
@@ -1086,7 +1125,7 @@ func (s *Store) RebuildThreadIndex(ctx context.Context, accountID string) error 
 		}
 		if agg.LatestAt.IsZero() || internalDate.After(agg.LatestAt) {
 			agg.LatestAt = internalDate
-			agg.LatestMessage = id
+			agg.LatestMessage = scopedMessageID
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1206,78 +1245,113 @@ func (s *Store) ListThreads(ctx context.Context, accountID, mailbox, sort string
 func (s *Store) ListMessagesByThread(ctx context.Context, accountID, threadID string, limit, offset int) ([]models.IndexedMessage, error) {
 	limit = clampLimit(limit)
 	offset = clampOffset(offset)
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,account_id,mailbox,uid,thread_id,from_value,to_value,cc_value,bcc_value,subject,snippet,body_text,body_html_sanitized,raw_source,seen,flagged,answered,draft,has_attachments,importance,dkim_status,spf_status,dmarc_status,phishing_score,remote_images_blocked,remote_images_allowed,date_header,internal_date
-		 FROM message_index
-		 WHERE account_id=? AND thread_id=?
-		 ORDER BY date_header DESC
-		 LIMIT ? OFFSET ?`,
-		accountID, threadID, limit, offset,
-	)
-	if err != nil {
-		return nil, err
+	candidates := indexedThreadIDCandidates(accountID, threadID)
+	if len(candidates) == 0 {
+		return nil, ErrNotFound
 	}
-	defer rows.Close()
-	out := make([]models.IndexedMessage, 0, limit)
-	for rows.Next() {
-		item, err := scanIndexedMessage(rows)
+	for i, candidate := range candidates {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id,account_id,mailbox,uid,thread_id,from_value,to_value,cc_value,bcc_value,subject,snippet,body_text,body_html_sanitized,raw_source,seen,flagged,answered,draft,has_attachments,importance,dkim_status,spf_status,dmarc_status,phishing_score,remote_images_blocked,remote_images_allowed,date_header,internal_date
+			 FROM message_index
+			 WHERE account_id=? AND thread_id=?
+			 ORDER BY date_header DESC
+			 LIMIT ? OFFSET ?`,
+			accountID, candidate, limit, offset,
+		)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, item)
+		out := make([]models.IndexedMessage, 0, limit)
+		for rows.Next() {
+			item, err := scanIndexedMessage(rows)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out = append(out, item)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+		if len(out) > 0 || i == len(candidates)-1 {
+			return out, nil
+		}
 	}
-	return out, rows.Err()
+	return nil, ErrNotFound
 }
 
 func (s *Store) GetIndexedMessageByID(ctx context.Context, accountID, id string) (models.IndexedMessage, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id,account_id,mailbox,uid,thread_id,from_value,to_value,cc_value,bcc_value,subject,snippet,body_text,body_html_sanitized,raw_source,seen,flagged,answered,draft,has_attachments,importance,dkim_status,spf_status,dmarc_status,phishing_score,remote_images_blocked,remote_images_allowed,date_header,internal_date
-		 FROM message_index
-		 WHERE account_id=? AND id=?`,
-		accountID, id,
-	)
-	item, err := scanIndexedMessage(row)
-	if err == sql.ErrNoRows {
+	candidates := indexedMessageIDCandidates(accountID, id)
+	if len(candidates) == 0 {
 		return models.IndexedMessage{}, ErrNotFound
 	}
-	if err != nil {
-		return models.IndexedMessage{}, err
+	for _, candidate := range candidates {
+		row := s.db.QueryRowContext(ctx,
+			`SELECT id,account_id,mailbox,uid,thread_id,from_value,to_value,cc_value,bcc_value,subject,snippet,body_text,body_html_sanitized,raw_source,seen,flagged,answered,draft,has_attachments,importance,dkim_status,spf_status,dmarc_status,phishing_score,remote_images_blocked,remote_images_allowed,date_header,internal_date
+			 FROM message_index
+			 WHERE account_id=? AND id=?`,
+			accountID, candidate,
+		)
+		item, err := scanIndexedMessage(row)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return models.IndexedMessage{}, err
+		}
+		return item, nil
 	}
-	return item, nil
+	return models.IndexedMessage{}, ErrNotFound
 }
 
-func (s *Store) GetIndexedMessageAttachments(ctx context.Context, messageID string) ([]models.IndexedAttachment, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,message_id,account_id,filename,content_type,size_bytes,inline_part,created_at
-		 FROM attachment_index
-		 WHERE message_id=?
-		 ORDER BY created_at ASC`,
-		messageID,
-	)
-	if err != nil {
-		return nil, err
+func (s *Store) GetIndexedMessageAttachments(ctx context.Context, accountID, messageID string) ([]models.IndexedAttachment, error) {
+	candidates := indexedMessageIDCandidates(accountID, messageID)
+	if len(candidates) == 0 {
+		return nil, ErrNotFound
 	}
-	defer rows.Close()
-	out := make([]models.IndexedAttachment, 0, 4)
-	for rows.Next() {
-		var item models.IndexedAttachment
-		var inlinePart int
-		if err := rows.Scan(
-			&item.ID,
-			&item.MessageID,
-			&item.AccountID,
-			&item.Filename,
-			&item.ContentType,
-			&item.SizeBytes,
-			&inlinePart,
-			&item.CreatedAt,
-		); err != nil {
+	for i, candidate := range candidates {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id,message_id,account_id,filename,content_type,size_bytes,inline_part,created_at
+			 FROM attachment_index
+			 WHERE account_id=? AND message_id=?
+			 ORDER BY created_at ASC`,
+			accountID, candidate,
+		)
+		if err != nil {
 			return nil, err
 		}
-		item.InlinePart = inlinePart == 1
-		out = append(out, item)
+		out := make([]models.IndexedAttachment, 0, 4)
+		for rows.Next() {
+			var item models.IndexedAttachment
+			var inlinePart int
+			if err := rows.Scan(
+				&item.ID,
+				&item.MessageID,
+				&item.AccountID,
+				&item.Filename,
+				&item.ContentType,
+				&item.SizeBytes,
+				&inlinePart,
+				&item.CreatedAt,
+			); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			item.InlinePart = inlinePart == 1
+			out = append(out, item)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+		if len(out) > 0 || i == len(candidates)-1 {
+			return out, nil
+		}
 	}
-	return out, rows.Err()
+	return nil, ErrNotFound
 }
 
 func (s *Store) SearchIndexedMessages(ctx context.Context, accountID, mailbox, query string, limit, offset int) ([]models.IndexedMessage, int, error) {
@@ -1342,47 +1416,65 @@ func (s *Store) SetIndexedMessageFlagged(ctx context.Context, accountID, id stri
 }
 
 func (s *Store) MoveIndexedMessageMailbox(ctx context.Context, accountID, id, mailbox string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE message_index SET mailbox=?, updated_at=? WHERE account_id=? AND id=?`,
-		mailbox, time.Now().UTC(), accountID, id,
-	)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	candidates := indexedMessageIDCandidates(accountID, id)
+	if len(candidates) == 0 {
 		return ErrNotFound
 	}
-	return nil
+	for _, candidate := range candidates {
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE message_index SET mailbox=?, updated_at=? WHERE account_id=? AND id=?`,
+			mailbox, time.Now().UTC(), accountID, candidate,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *Store) DeleteIndexedMessage(ctx context.Context, accountID, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM message_index WHERE account_id=? AND id=?`, accountID, id)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	candidates := indexedMessageIDCandidates(accountID, id)
+	if len(candidates) == 0 {
 		return ErrNotFound
 	}
-	return nil
+	for _, candidate := range candidates {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM message_index WHERE account_id=? AND id=?`, accountID, candidate)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *Store) SetIndexedMessageRemoteImagesAllowed(ctx context.Context, accountID, id string, allowed bool) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE message_index
-		 SET remote_images_allowed=?, remote_images_blocked=?, updated_at=?
-		 WHERE account_id=? AND id=?`,
-		boolToInt(allowed), boolToInt(!allowed), time.Now().UTC(), accountID, id,
-	)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	candidates := indexedMessageIDCandidates(accountID, id)
+	if len(candidates) == 0 {
 		return ErrNotFound
 	}
-	return nil
+	for _, candidate := range candidates {
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE message_index
+			 SET remote_images_allowed=?, remote_images_blocked=?, updated_at=?
+			 WHERE account_id=? AND id=?`,
+			boolToInt(allowed), boolToInt(!allowed), time.Now().UTC(), accountID, candidate,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *Store) ListSieveScripts(ctx context.Context, accountID string) ([]models.SieveScript, error) {
@@ -2255,16 +2347,22 @@ func (s *Store) updateIndexedMessageBool(ctx context.Context, accountID, id, col
 	if column != "seen" && column != "flagged" {
 		return fmt.Errorf("unsupported message boolean column")
 	}
-	query := fmt.Sprintf(`UPDATE message_index SET %s=?, updated_at=? WHERE account_id=? AND id=?`, column)
-	res, err := s.db.ExecContext(ctx, query, boolToInt(value), time.Now().UTC(), accountID, id)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	candidates := indexedMessageIDCandidates(accountID, id)
+	if len(candidates) == 0 {
 		return ErrNotFound
 	}
-	return nil
+	query := fmt.Sprintf(`UPDATE message_index SET %s=?, updated_at=? WHERE account_id=? AND id=?`, column)
+	for _, candidate := range candidates {
+		res, err := s.db.ExecContext(ctx, query, boolToInt(value), time.Now().UTC(), accountID, candidate)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func scanMailAccount(scanner interface{ Scan(dest ...any) error }) (models.MailAccount, error) {

@@ -75,7 +75,7 @@ impl Config {
     fn from_env() -> Result<Self, HelperError> {
         let socket_path_raw = env_var(
             "PAM_RESET_HELPER_SOCKET",
-            "/run/mailclient/pam-reset-helper.sock",
+            "/run/despatch/pam-reset-helper.sock",
         );
         let socket_path = PathBuf::from(socket_path_raw.trim());
         if socket_path.as_os_str().is_empty() {

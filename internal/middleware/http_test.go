@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/service"
+	"despatch/internal/store"
 )
 
 func TestClientIPTrustProxy(t *testing.T) {
@@ -31,7 +31,7 @@ func TestAuthnMissingCookieReturnsSessionMissing(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := Authn(nil, "mailclient_session", false)(next)
+	handler := Authn(nil, "despatch_session", false)(next)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
 	rec := httptest.NewRecorder()
 
@@ -67,9 +67,9 @@ func TestAuthnInvalidCookieReturnsSessionInvalid(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := Authn(svc, "mailclient_session", false)(next)
+	handler := Authn(svc, "despatch_session", false)(next)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
-	req.AddCookie(&http.Cookie{Name: "mailclient_session", Value: "invalid-token"})
+	req.AddCookie(&http.Cookie{Name: "despatch_session", Value: "invalid-token"})
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)

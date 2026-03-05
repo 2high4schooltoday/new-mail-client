@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 type githubClient struct {
@@ -133,7 +133,7 @@ func (c *githubClient) requestJSON(ctx context.Context, path, etag string, out a
 		return "", false, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "mailclient-updater/1")
+	req.Header.Set("User-Agent", "despatch-updater/1")
 	if trimmed := strings.TrimSpace(c.cfg.UpdateGitHubToken); trimmed != "" {
 		req.Header.Set("Authorization", "Bearer "+trimmed)
 	}

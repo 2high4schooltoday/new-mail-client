@@ -51,3 +51,71 @@ func DecodeAttachmentID(attachmentID string) (messageID string, part int, err er
 	}
 	return parts[0], n, nil
 }
+
+const (
+	scopedIndexedMessageIDPrefix = "v2m_"
+	scopedIndexedThreadIDPrefix  = "v2t_"
+)
+
+func ScopeIndexedMessageID(accountID, legacyMessageID string) string {
+	return scopeIndexedID(scopedIndexedMessageIDPrefix, accountID, legacyMessageID)
+}
+
+func IsScopedIndexedMessageID(id string) bool {
+	return isScopedIndexedID(scopedIndexedMessageIDPrefix, id)
+}
+
+func NormalizeIndexedMessageID(accountID, id string) string {
+	if IsScopedIndexedMessageID(id) {
+		return strings.TrimSpace(id)
+	}
+	return ScopeIndexedMessageID(accountID, id)
+}
+
+func ScopeIndexedThreadID(accountID, legacyThreadID string) string {
+	return scopeIndexedID(scopedIndexedThreadIDPrefix, accountID, legacyThreadID)
+}
+
+func IsScopedIndexedThreadID(id string) bool {
+	return isScopedIndexedID(scopedIndexedThreadIDPrefix, id)
+}
+
+func NormalizeIndexedThreadID(accountID, id string) string {
+	if IsScopedIndexedThreadID(id) {
+		return strings.TrimSpace(id)
+	}
+	return ScopeIndexedThreadID(accountID, id)
+}
+
+func scopeIndexedID(prefix, accountID, legacyID string) string {
+	legacyID = strings.TrimSpace(legacyID)
+	if legacyID == "" {
+		return ""
+	}
+	if isScopedIndexedID(prefix, legacyID) {
+		return legacyID
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return legacyID
+	}
+	raw := accountID + "\x00" + legacyID
+	return prefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func isScopedIndexedID(prefix, id string) bool {
+	id = strings.TrimSpace(id)
+	if !strings.HasPrefix(id, prefix) {
+		return false
+	}
+	raw := strings.TrimPrefix(id, prefix)
+	if raw == "" {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return false
+	}
+	parts := strings.SplitN(string(decoded), "\x00", 2)
+	return len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != ""
+}

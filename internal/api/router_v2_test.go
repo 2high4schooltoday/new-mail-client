@@ -20,14 +20,14 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/mail"
-	"mailclient/internal/mailsec"
-	"mailclient/internal/models"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/mail"
+	"despatch/internal/mailsec"
+	"despatch/internal/models"
+	"despatch/internal/service"
+	"despatch/internal/store"
 )
 
 func newV2Router(t *testing.T) http.Handler {
@@ -72,6 +72,7 @@ func newV2RouterWithConfigAndStoreDB(t *testing.T, mutate func(*config.Config)) 
 		filepath.Join("..", "..", "migrations", "017_mfa_onboarding_flags.sql"),
 		filepath.Join("..", "..", "migrations", "018_mfa_usability_trusted_devices.sql"),
 		filepath.Join("..", "..", "migrations", "019_users_mail_secret.sql"),
+		filepath.Join("..", "..", "migrations", "020_mail_index_scoped_ids.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -90,8 +91,8 @@ func newV2RouterWithConfigAndStoreDB(t *testing.T, mutate func(*config.Config)) 
 	cfg := config.Config{
 		ListenAddr:          ":8080",
 		BaseDomain:          "example.com",
-		SessionCookieName:   "mailclient_session",
-		CSRFCookieName:      "mailclient_csrf",
+		SessionCookieName:   "despatch_session",
+		CSRFCookieName:      "despatch_csrf",
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",
@@ -110,8 +111,8 @@ func newV2RouterWithConfigAndStoreDB(t *testing.T, mutate func(*config.Config)) 
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	mailClient := mail.NoopClient{}
-	svc := service.New(cfg, st, mailClient, mail.NoopProvisioner{}, nil)
+	despatch := mail.NoopClient{}
+	svc := service.New(cfg, st, despatch, mail.NoopProvisioner{}, nil)
 	return NewRouter(cfg, svc), st, sqdb
 }
 
@@ -292,10 +293,10 @@ func loginV2WithResponse(t *testing.T, router http.Handler) (*http.Cookie, *http
 	var sessionCookie *http.Cookie
 	var csrfCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "mailclient_session" {
+		if c.Name == "despatch_session" {
 			sessionCookie = c
 		}
-		if c.Name == "mailclient_csrf" {
+		if c.Name == "despatch_csrf" {
 			csrfCookie = c
 		}
 	}
@@ -332,10 +333,10 @@ func loginV1WithResponse(t *testing.T, router http.Handler, email, password stri
 	var sessionCookie *http.Cookie
 	var csrfCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "mailclient_session" {
+		if c.Name == "despatch_session" {
 			sessionCookie = c
 		}
-		if c.Name == "mailclient_csrf" {
+		if c.Name == "despatch_csrf" {
 			csrfCookie = c
 		}
 	}
@@ -564,7 +565,7 @@ func TestV2TrustedDeviceRememberAndRevokeFlow(t *testing.T) {
 	}
 	var trustedCookie *http.Cookie
 	for _, c := range verify.Result().Cookies() {
-		if c.Name == "mailclient_mfa_trusted" {
+		if c.Name == "despatch_mfa_trusted" {
 			trustedCookie = c
 			break
 		}
@@ -599,11 +600,11 @@ func TestV2TrustedDeviceRememberAndRevokeFlow(t *testing.T) {
 	var sess3, csrf3, rotatedTrusted *http.Cookie
 	for _, c := range loginRec.Result().Cookies() {
 		switch c.Name {
-		case "mailclient_session":
+		case "despatch_session":
 			sess3 = c
-		case "mailclient_csrf":
+		case "despatch_csrf":
 			csrf3 = c
-		case "mailclient_mfa_trusted":
+		case "despatch_mfa_trusted":
 			rotatedTrusted = c
 		}
 	}
@@ -844,7 +845,7 @@ func TestV2PasskeyLoginAndMailSecretUnlockFlow(t *testing.T) {
 	}
 	var challengeCookie *http.Cookie
 	for _, c := range beginRec.Result().Cookies() {
-		if c.Name == "mailclient_passkey_challenge" {
+		if c.Name == "despatch_passkey_challenge" {
 			challengeCookie = c
 			break
 		}
@@ -904,9 +905,9 @@ func TestV2PasskeyLoginAndMailSecretUnlockFlow(t *testing.T) {
 	var sess, csrf *http.Cookie
 	for _, c := range finishRec.Result().Cookies() {
 		switch c.Name {
-		case "mailclient_session":
+		case "despatch_session":
 			sess = c
-		case "mailclient_csrf":
+		case "despatch_csrf":
 			csrf = c
 		}
 	}
@@ -985,7 +986,7 @@ func TestV2PasskeyLoginAcceptsLegacyHexCredentialIDs(t *testing.T) {
 	}
 	var challengeCookie *http.Cookie
 	for _, c := range beginRec.Result().Cookies() {
-		if c.Name == "mailclient_passkey_challenge" {
+		if c.Name == "despatch_passkey_challenge" {
 			challengeCookie = c
 			break
 		}
@@ -1572,11 +1573,13 @@ func TestV2DecryptAndVerifyIndexedMessageWithSMIME(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
+	scopedMessageID := mail.ScopeIndexedMessageID(account.ID, "msg-crypto-1")
+	scopedThreadID := mail.ScopeIndexedThreadID(account.ID, "thread-1")
 	if _, err := sqdb.ExecContext(context.Background(),
 		`INSERT INTO thread_index(
 		  id,account_id,mailbox,subject_norm,participants_json,message_count,unread_count,has_attachments,has_flagged,importance,latest_message_id,latest_at,updated_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"thread-1",
+		scopedThreadID,
 		account.ID,
 		"Inbox",
 		"encrypted",
@@ -1586,7 +1589,7 @@ func TestV2DecryptAndVerifyIndexedMessageWithSMIME(t *testing.T) {
 		0,
 		0,
 		0,
-		"msg-crypto-1",
+		scopedMessageID,
 		now,
 		now,
 	); err != nil {
@@ -1594,11 +1597,11 @@ func TestV2DecryptAndVerifyIndexedMessageWithSMIME(t *testing.T) {
 	}
 
 	msg, err := st.UpsertIndexedMessage(context.Background(), models.IndexedMessage{
-		ID:         "msg-crypto-1",
+		ID:         scopedMessageID,
 		AccountID:  account.ID,
 		Mailbox:    "Inbox",
 		UID:        1,
-		ThreadID:   "thread-1",
+		ThreadID:   scopedThreadID,
 		FromValue:  "sender@example.com",
 		ToValue:    "admin@example.com",
 		Subject:    "Encrypted",

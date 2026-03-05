@@ -38,7 +38,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
-const DEFAULT_SOCKET: &str = "/run/mailclient/mailsec.sock";
+const DEFAULT_SOCKET: &str = "/run/despatch/mailsec.sock";
 const FLAG_USER_PRESENT: u8 = 0x01;
 const FLAG_USER_VERIFIED: u8 = 0x04;
 const FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;

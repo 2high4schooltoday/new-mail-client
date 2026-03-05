@@ -429,29 +429,29 @@ class OperationRunner:
         errors: list[RunnerError] = []
 
         unit_listing = command_output(
-            ["systemctl", "list-unit-files", "--type=service", "--no-pager", "mailclient.service"],
+            ["systemctl", "list-unit-files", "--type=service", "--no-pager", "despatch.service"],
             timeout=5.0,
         )
         checks["systemctl_list_unit_files"] = unit_listing
-        if "mailclient.service" not in unit_listing:
+        if "despatch.service" not in unit_listing:
             errors.append(
                 RunnerError(
                     code="UNIT_MISSING",
-                    message="mailclient.service unit file was not found after install.",
+                    message="despatch.service unit file was not found after install.",
                     stage_id="post_checks",
-                    suggested_fix="Run: systemctl list-unit-files | grep mailclient",
+                    suggested_fix="Run: systemctl list-unit-files | grep despatch",
                 )
             )
 
-        is_active = command_output(["systemctl", "is-active", "mailclient"], timeout=5.0).strip()
+        is_active = command_output(["systemctl", "is-active", "despatch"], timeout=5.0).strip()
         checks["systemctl_is_active"] = is_active
         if is_active != "active":
             errors.append(
                 RunnerError(
                     code="SERVICE_INACTIVE",
-                    message=f"mailclient service is not active (is-active={is_active or 'unknown'}).",
+                    message=f"despatch service is not active (is-active={is_active or 'unknown'}).",
                     stage_id="post_checks",
-                    suggested_fix="Run: systemctl status mailclient --no-pager",
+                    suggested_fix="Run: systemctl status despatch --no-pager",
                 )
             )
 
@@ -494,8 +494,8 @@ class OperationRunner:
             ],
             "artifacts": artifacts,
             "next_actions": [
-                "Run: systemctl status mailclient --no-pager",
-                "Run: journalctl -u mailclient -n 100 --no-pager",
+                "Run: systemctl status despatch --no-pager",
+                "Run: journalctl -u despatch -n 100 --no-pager",
                 "Run diagnose from the tool catalog.",
             ],
         }

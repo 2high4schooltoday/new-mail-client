@@ -56,7 +56,7 @@ class LogStoreTests(unittest.TestCase):
                 new=fake_mkdir,
             ):
                 store = LogStore(max_entries=32, log_dir=Path("/var/log/despatch"))
-                expected_root = home / ".cache" / "mailclient-tui" / "logs"
+                expected_root = home / ".cache" / "despatch-tui" / "logs"
                 self.assertTrue(str(store.log_dir).startswith(str(expected_root)))
                 self.assertTrue(store.log_path.exists())
 

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,13 +23,13 @@ import (
 	"github.com/pquerna/otp/totp"
 	"github.com/skip2/go-qrcode"
 
-	"mailclient/internal/mail"
-	mailsecclient "mailclient/internal/mailsec"
-	"mailclient/internal/middleware"
-	"mailclient/internal/models"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/mail"
+	mailsecclient "despatch/internal/mailsec"
+	"despatch/internal/middleware"
+	"despatch/internal/models"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
 func (h *Handlers) V2Login(w http.ResponseWriter, r *http.Request) {
@@ -41,8 +40,8 @@ func (h *Handlers) V2Login(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	token, user, err := h.svc.Login(r.Context(), req.Email, req.Password, r.RemoteAddr, r.UserAgent())
@@ -61,7 +60,11 @@ func (h *Handlers) V2Login(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, status, code, err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	csrfToken := randomToken()
+	csrfToken, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", "failed to generate token", middleware.RequestID(r.Context()))
+		return
+	}
 	sess, stage, err := h.resolveLoginStage(r.Context(), w, r, token, user)
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
@@ -114,12 +117,16 @@ func (h *Handlers) passkeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		util.WriteError(w, http.StatusBadRequest, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, true); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	if !h.cfg.PasskeyUsernamelessEnabled && email == "" {
+	usernamelessEnabled := h.cfg.PasskeyUsernamelessEnabled
+	if enabled, err := h.svc.PasskeyAccountDiscoveryEnabled(r.Context()); err == nil {
+		usernamelessEnabled = enabled
+	}
+	if !usernamelessEnabled && email == "" {
 		util.WriteError(w, http.StatusBadRequest, "bad_request", "email is required when username-less passkey login is disabled", middleware.RequestID(r.Context()))
 		return
 	}
@@ -152,8 +159,16 @@ func (h *Handlers) passkeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	challengeID := uuid.NewString()
-	cookieNonce := randomToken()
-	challenge := randomToken()
+	cookieNonce, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_begin_failed", "cannot generate challenge", middleware.RequestID(r.Context()))
+		return
+	}
+	challenge, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_begin_failed", "cannot generate challenge", middleware.RequestID(r.Context()))
+		return
+	}
 	state := passkeyLoginChallengeState{
 		Challenge:            challenge,
 		RPID:                 webAuthnContext.RPID,
@@ -264,8 +279,8 @@ func (h *Handlers) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if payloadChallengeID := strings.TrimSpace(getStringValue(req, "challenge_id")); payloadChallengeID != "" && subtleConstantCompare(payloadChallengeID, challengeID) != 1 {
@@ -286,7 +301,11 @@ func (h *Handlers) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 400, "bad_request", "credential and response fields are required", middleware.RequestID(r.Context()))
 		return
 	}
-	if !h.cfg.PasskeyUsernamelessEnabled && strings.TrimSpace(state.UserID) == "" {
+	usernamelessEnabled := h.cfg.PasskeyUsernamelessEnabled
+	if enabled, err := h.svc.PasskeyAccountDiscoveryEnabled(r.Context()); err == nil {
+		usernamelessEnabled = enabled
+	}
+	if !usernamelessEnabled && strings.TrimSpace(state.UserID) == "" {
 		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
 		return
 	}
@@ -364,7 +383,11 @@ func (h *Handlers) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials", middleware.RequestID(r.Context()))
 		return
 	}
-	csrfToken := randomToken()
+	csrfToken, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "internal_error", "failed to generate token", middleware.RequestID(r.Context()))
+		return
+	}
 	sess, stage, err := h.resolveLoginStage(r.Context(), w, r, sessionToken, user)
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", "cannot finalize login session", middleware.RequestID(r.Context()))
@@ -414,8 +437,8 @@ func (h *Handlers) sessionMailSecretUnlock(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, http.StatusBadRequest, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if err := h.svc.UnlockSessionMailSecret(r.Context(), u.ID, sess.ID, req.Password); err != nil {
@@ -446,8 +469,8 @@ func (h *Handlers) V2MFATOTPVerify(w http.ResponseWriter, r *http.Request) {
 		Code           string `json:"code"`
 		RememberDevice bool   `json:"remember_device"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	rec, err := h.svc.Store().GetMFATOTP(r.Context(), u.ID)
@@ -520,7 +543,11 @@ func (h *Handlers) V2MFAWebAuthnBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rpID, origins := webAuthnContext.RPID, webAuthnContext.Origins
-	challenge := randomToken()
+	challenge, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_begin_failed", "cannot generate challenge", middleware.RequestID(r.Context()))
+		return
+	}
 	state := webAuthnChallengeState{
 		UserID:    u.ID,
 		Mode:      "login",
@@ -578,8 +605,8 @@ func (h *Handlers) V2MFAWebAuthnFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	rememberDevice, _ := getBoolValue(req, "remember_device")
@@ -664,8 +691,8 @@ func (h *Handlers) V2MFARecoveryCodeVerify(w http.ResponseWriter, r *http.Reques
 		Code           string `json:"code"`
 		RememberDevice bool   `json:"remember_device"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	code := strings.TrimSpace(req.Code)
@@ -725,8 +752,8 @@ func (h *Handlers) V2CreateAccount(w http.ResponseWriter, r *http.Request) {
 		SMTPStartTLS *bool  `json:"smtp_starttls"`
 		IsDefault    bool   `json:"is_default"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	login := strings.TrimSpace(req.Login)
@@ -812,8 +839,8 @@ func (h *Handlers) V2UpdateAccount(w http.ResponseWriter, r *http.Request) {
 		IsDefault    *bool   `json:"is_default"`
 		Status       *string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if req.DisplayName != nil {
@@ -928,8 +955,8 @@ func (h *Handlers) V2CreateIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req models.MailIdentity
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = uuid.NewString()
@@ -959,8 +986,8 @@ func (h *Handlers) V2UpdateIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req models.MailIdentity
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = id
@@ -1034,8 +1061,8 @@ func (h *Handlers) V2ListMailboxMappings(w http.ResponseWriter, r *http.Request)
 func (h *Handlers) V2UpsertMailboxMapping(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	var req models.MailboxMapping
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if _, err := h.svc.Store().GetMailAccountByID(r.Context(), u.ID, req.AccountID); err != nil {
@@ -1150,7 +1177,7 @@ func (h *Handlers) V2GetIndexedMessage(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 500, "message_get_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	attachments, _ := h.svc.Store().GetIndexedMessageAttachments(r.Context(), id)
+	attachments, _ := h.svc.Store().GetIndexedMessageAttachments(r.Context(), accountID, id)
 	util.WriteJSON(w, 200, map[string]any{"message": msg, "attachments": attachments})
 }
 
@@ -1188,8 +1215,8 @@ func (h *Handlers) V2BulkMessages(w http.ResponseWriter, r *http.Request) {
 		Action    string   `json:"action"`
 		Mailbox   string   `json:"mailbox"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(req.Action))
@@ -1295,8 +1322,8 @@ func (h *Handlers) V2DecryptIndexedMessage(w http.ResponseWriter, r *http.Reques
 		KeyringID  string `json:"keyring_id"`
 		Passphrase string `json:"passphrase"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	keyringID := strings.TrimSpace(req.KeyringID)
@@ -1394,8 +1421,8 @@ func (h *Handlers) V2VerifyIndexedMessage(w http.ResponseWriter, r *http.Request
 		Provider      string `json:"provider"`
 		PublicKeyring string `json:"public_keyring_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	publicKeyringID := strings.TrimSpace(req.PublicKeyring)
@@ -1493,8 +1520,8 @@ func (h *Handlers) V2ListSavedSearches(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) V2CreateSavedSearch(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	var req models.SavedSearch
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = uuid.NewString()
@@ -1510,8 +1537,8 @@ func (h *Handlers) V2CreateSavedSearch(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) V2UpdateSavedSearch(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	var req models.SavedSearch
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = chi.URLParam(r, "id")
@@ -1562,8 +1589,8 @@ func (h *Handlers) V2ListDrafts(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) V2CreateDraft(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	var req models.Draft
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = uuid.NewString()
@@ -1595,8 +1622,8 @@ func (h *Handlers) V2UpdateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	mergeDraftPatch(&current, req)
@@ -1631,8 +1658,8 @@ func (h *Handlers) V2SendDraft(w http.ResponseWriter, r *http.Request) {
 		CryptoPassphrase string         `json:"crypto_passphrase"`
 		CryptoOptions    map[string]any `json:"crypto_options"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&sendReqPayload); err != nil && !errors.Is(err, io.EOF) {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &sendReqPayload, jsonLimitLarge, true); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	draft, err := h.svc.Store().GetDraftByID(r.Context(), u.ID, id)
@@ -1699,8 +1726,8 @@ func (h *Handlers) V2SendMessage(w http.ResponseWriter, r *http.Request) {
 		CryptoOptions    map[string]any `json:"crypto_options"`
 		CryptoPassphrase string         `json:"crypto_passphrase"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	recipients := append([]string{}, req.To...)
@@ -1798,8 +1825,8 @@ func (h *Handlers) V2PutRuleScript(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Body string `json:"body"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(req.Body) == "" {
@@ -1872,8 +1899,8 @@ func (h *Handlers) V2ValidateRuleScript(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Body string `json:"body"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if err := validateSieveScript(req.Body); err != nil {
@@ -1897,8 +1924,8 @@ func (h *Handlers) V2UpdatePreferences(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	current, _ := h.svc.Store().GetUserPreferences(r.Context(), u.ID)
 	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	applyPreferencesPatch(&current, req)
@@ -1941,7 +1968,10 @@ func (h *Handlers) V2MFAEnrollTOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Issuer string `json:"issuer"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, true); err != nil {
+		writeJSONDecodeError(w, r, err)
+		return
+	}
 	issuer := strings.TrimSpace(req.Issuer)
 	if issuer == "" {
 		issuer = "Despatch"
@@ -1976,7 +2006,11 @@ func (h *Handlers) V2MFAEnrollTOTP(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, 500, "totp_enroll_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	recoveryCodes := generateRecoveryCodes(10)
+	recoveryCodes, err := generateRecoveryCodes(10)
+	if err != nil {
+		util.WriteError(w, 500, "totp_enroll_failed", "cannot generate recovery codes", middleware.RequestID(r.Context()))
+		return
+	}
 	hashes := make([]string, 0, len(recoveryCodes))
 	for _, code := range recoveryCodes {
 		sum := sha256.Sum256([]byte(code))
@@ -2023,8 +2057,8 @@ func (h *Handlers) V2MFAConfirmTOTP(w http.ResponseWriter, r *http.Request) {
 		RecoveryCodesAck bool   `json:"recovery_codes_ack"`
 		RememberDevice   bool   `json:"remember_device"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if !req.RecoveryCodesAck {
@@ -2101,7 +2135,11 @@ func (h *Handlers) V2MFAWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Req
 		return
 	}
 	rpID, origins := webAuthnContext.RPID, webAuthnContext.Origins
-	challenge := randomToken()
+	challenge, err := randomToken()
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_register_begin_failed", "cannot generate challenge", middleware.RequestID(r.Context()))
+		return
+	}
 	state := webAuthnChallengeState{
 		UserID:    u.ID,
 		Mode:      "register",
@@ -2169,8 +2207,8 @@ func (h *Handlers) V2MFAWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	rememberDevice, _ := getBoolValue(req, "remember_device")
@@ -2259,7 +2297,11 @@ func (h *Handlers) V2MFAWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	recoveryCodes := generateRecoveryCodes(10)
+	recoveryCodes, err := generateRecoveryCodes(10)
+	if err != nil {
+		util.WriteError(w, 500, "webauthn_register_finish_failed", "cannot generate recovery codes", middleware.RequestID(r.Context()))
+		return
+	}
 	hashes := make([]string, 0, len(recoveryCodes))
 	for _, code := range recoveryCodes {
 		sum := sha256.Sum256([]byte(code))
@@ -2315,8 +2357,8 @@ func (h *Handlers) V2MFARecoveryCodesAck(w http.ResponseWriter, r *http.Request)
 		RecoveryCodesAck bool `json:"recovery_codes_ack"`
 		RememberDevice   bool `json:"remember_device"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if !req.RecoveryCodesAck {
@@ -2390,8 +2432,8 @@ func (h *Handlers) V2MFAUpdatePreference(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		Preference string `json:"preference"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	target := service.NormalizeMFAPreference(req.Preference)
@@ -2488,8 +2530,8 @@ func (h *Handlers) V2MFAWebAuthnRename(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitAuthControl, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {
@@ -2630,7 +2672,10 @@ func (h *Handlers) V2RevokeSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, true); err != nil {
+		writeJSONDecodeError(w, r, err)
+		return
+	}
 	if err := h.svc.Store().RevokeSessionWithReason(r.Context(), u.ID, id, strings.TrimSpace(req.Reason)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			util.WriteError(w, 404, "session_not_found", "session not found", middleware.RequestID(r.Context()))
@@ -2670,8 +2715,8 @@ func (h *Handlers) V2CreateCryptoKeyring(w http.ResponseWriter, r *http.Request)
 		TrustLevel     string   `json:"trust_level"`
 		ExpiresAt      string   `json:"expires_at"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	item, err := h.buildCryptoKeyringFromRequest(
@@ -2725,8 +2770,8 @@ func (h *Handlers) V2UpdateCryptoKeyring(w http.ResponseWriter, r *http.Request)
 		TrustLevel     *string   `json:"trust_level"`
 		ExpiresAt      *string   `json:"expires_at"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 
@@ -2836,8 +2881,8 @@ func (h *Handlers) V2ListCryptoTrustPolicies(w http.ResponseWriter, r *http.Requ
 func (h *Handlers) V2CreateCryptoTrustPolicy(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	var req models.CryptoTrustPolicy
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = uuid.NewString()
@@ -2854,8 +2899,8 @@ func (h *Handlers) V2UpdateCryptoTrustPolicy(w http.ResponseWriter, r *http.Requ
 	u, _ := middleware.User(r.Context())
 	id := strings.TrimSpace(chi.URLParam(r, "id"))
 	var req models.CryptoTrustPolicy
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		util.WriteError(w, 400, "bad_request", "invalid json", middleware.RequestID(r.Context()))
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
 		return
 	}
 	req.ID = id
@@ -3377,19 +3422,22 @@ func validateSieveScript(body string) error {
 	return nil
 }
 
-func generateRecoveryCodes(n int) []string {
+func generateRecoveryCodes(n int) ([]string, error) {
 	if n <= 0 {
 		n = 10
 	}
 	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		raw := randomToken()
+		raw, err := randomToken()
+		if err != nil {
+			return nil, err
+		}
 		if len(raw) > 12 {
 			raw = raw[:12]
 		}
 		out = append(out, strings.ToUpper(raw))
 	}
-	return out
+	return out, nil
 }
 
 type webAuthnChallengeState struct {
@@ -3571,20 +3619,28 @@ func (h *Handlers) authCapabilities(r *http.Request) map[string]any {
 	mailsecAvailable := h.mailSecRuntimeEnabled()
 	context := h.resolveWebAuthnContext(r)
 	mfaAvailable := mailsecAvailable && context.Reason == ""
-	passwordlessAvailable := mfaAvailable && h.cfg.PasskeyPasswordlessEnabled
+	passkeySignInEnabled := h.cfg.PasskeyPasswordlessEnabled
+	if enabled, err := h.svc.PasskeySignInEnabled(r.Context()); err == nil {
+		passkeySignInEnabled = enabled
+	}
+	passkeyDiscoveryEnabled := h.cfg.PasskeyUsernamelessEnabled
+	if enabled, err := h.svc.PasskeyAccountDiscoveryEnabled(r.Context()); err == nil {
+		passkeyDiscoveryEnabled = enabled
+	}
+	passwordlessAvailable := mfaAvailable && passkeySignInEnabled
 	reason := ""
 	switch {
 	case !mailsecAvailable:
 		reason = "mailsec_unavailable"
 	case context.Reason != "":
 		reason = context.Reason
-	case !h.cfg.PasskeyPasswordlessEnabled:
+	case !passkeySignInEnabled:
 		reason = "passwordless_disabled"
 	}
 	return map[string]any{
 		"passkey_mfa_available":          mfaAvailable,
 		"passkey_passwordless_available": passwordlessAvailable,
-		"passkey_usernameless_enabled":   h.cfg.PasskeyUsernamelessEnabled,
+		"passkey_usernameless_enabled":   passkeyDiscoveryEnabled,
 		"rp_id":                          context.RPID,
 		"allowed_origins":                context.Origins,
 		"reason":                         reason,
@@ -3803,7 +3859,7 @@ func hostMatchesRPID(host, rpID string) bool {
 }
 
 func passkeyLoginChallengeCookieName() string {
-	return "mailclient_passkey_challenge"
+	return "despatch_passkey_challenge"
 }
 
 func (h *Handlers) setPasskeyLoginChallengeCookie(w http.ResponseWriter, r *http.Request, challengeID, nonce string, expiresAt time.Time) {

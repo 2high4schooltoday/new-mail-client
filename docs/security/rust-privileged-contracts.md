@@ -6,7 +6,7 @@ This document freezes the compatibility contracts for privileged components migr
 
 Transport:
 - UNIX domain socket only
-- Socket perms/ownership: `root:mailclient`, mode `0660`
+- Socket perms/ownership: `root:despatch`, mode `0660`
 
 Frame format:
 - `4-byte` big-endian payload length
@@ -66,8 +66,31 @@ Operational rules:
 - Request/status files remain JSON and pretty-printed
 - Lock file remains exclusive-create guarded
 - Worker maintains staged swap + rollback semantics
+- Worker rejects symlinked request/status paths before reads/writes
 
-## 3. Golden Fixtures
+Ownership/mode contract:
+- `/opt/despatch` runtime payload is `root:root`
+- `/opt/despatch/.env` is `root:despatch` `0640`
+- `request/` and `status/` are `root:despatch` `0770` with files `0660`
+- `lock/`, `work/`, and `backups/` are `root:root` `0750`
+
+## 3. Updater Authenticity Contract
+
+Required config when updates are enabled:
+- `UPDATE_REQUIRE_SIGNATURE=true` (default)
+- `UPDATE_SIGNATURE_ASSET=checksums.txt.sig` (default)
+- `UPDATE_SIGNING_PUBLIC_KEYS` as comma-separated base64 Ed25519 public keys
+
+Verification order (fail-closed):
+1. Download archive, `checksums.txt`, and detached signature asset
+2. Verify detached Ed25519 signature over raw `checksums.txt` bytes using pinned key set
+3. Parse checksums and verify archive hash
+
+Failure policy:
+- Missing signature asset, invalid signature, invalid key material, or checksum mismatch aborts update
+- No privileged artifact ownership is handed to `despatch` during/after apply
+
+## 4. Golden Fixtures
 
 Frozen fixture files are in:
 - `rust/contracts/tests/fixtures/pam/`

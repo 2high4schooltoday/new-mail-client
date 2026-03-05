@@ -3,7 +3,7 @@ package update
 import (
 	"path/filepath"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 func requestDir(cfg config.Config) string {
@@ -39,5 +39,5 @@ func lockPath(cfg config.Config) string {
 }
 
 func updaterPathUnitPath(cfg config.Config) string {
-	return filepath.Join(cfg.UpdateSystemdUnitDir, "mailclient-updater.path")
+	return filepath.Join(cfg.UpdateSystemdUnitDir, "despatch-updater.path")
 }

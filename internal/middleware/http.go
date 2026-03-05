@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"mailclient/internal/rate"
-	"mailclient/internal/service"
-	"mailclient/internal/util"
+	"despatch/internal/rate"
+	"despatch/internal/service"
+	"despatch/internal/util"
 )
 
 func RequestIDMiddleware(next http.Handler) http.Handler {

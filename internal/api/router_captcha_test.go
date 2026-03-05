@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"mailclient/internal/auth"
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/service"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/auth"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/service"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
 func newCaptchaRouter(t *testing.T, cfg config.Config) http.Handler {
@@ -55,8 +55,8 @@ func baseCaptchaConfig() config.Config {
 	return config.Config{
 		ListenAddr:          ":8080",
 		BaseDomain:          "example.com",
-		SessionCookieName:   "mailclient_session",
-		CSRFCookieName:      "mailclient_csrf",
+		SessionCookieName:   "despatch_session",
+		CSRFCookieName:      "despatch_csrf",
 		SessionIdleMinutes:  30,
 		SessionAbsoluteHour: 24,
 		SessionEncryptKey:   "this_is_a_valid_long_session_encrypt_key_123456",

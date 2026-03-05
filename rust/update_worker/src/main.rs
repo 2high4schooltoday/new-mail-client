@@ -1,9 +1,11 @@
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{SecondsFormat, Utc};
 use contracts::updater::{
     sanitize_path_token, ApplyRequest, ApplyStatus, APPLY_STATE_COMPLETED, APPLY_STATE_FAILED,
     APPLY_STATE_IN_PROGRESS, APPLY_STATE_ROLLED_BACK,
 };
-use nix::unistd::{chown, Gid, Uid, User};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use nix::unistd::{chown, Gid, User};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use regex::Regex;
 use reqwest::blocking::Client;
@@ -12,6 +14,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -38,6 +41,9 @@ struct Config {
     update_install_dir: PathBuf,
     update_service_name: String,
     update_systemd_unit_dir: PathBuf,
+    update_require_signature: bool,
+    update_signature_asset: String,
+    update_signing_public_keys: Vec<String>,
     listen_addr: String,
     mailsec_enabled: bool,
     mailsec_socket: PathBuf,
@@ -223,30 +229,44 @@ fn run() -> Result<(), WorkerError> {
 
 impl Config {
     fn from_env() -> Result<Self, WorkerError> {
-        Ok(Self {
+        let mut cfg = Self {
             update_enabled: env_bool("UPDATE_ENABLED", true),
             update_repo_owner: env_var("UPDATE_REPO_OWNER", "2high4schooltoday"),
-            update_repo_name: env_var("UPDATE_REPO_NAME", "new-mail-client"),
+            update_repo_name: env_var("UPDATE_REPO_NAME", "despatch"),
             update_http_timeout_sec: env_u64("UPDATE_HTTP_TIMEOUT_SEC", 10)?,
             update_github_token: env::var("UPDATE_GITHUB_TOKEN").unwrap_or_default(),
             update_backup_keep: env_u64("UPDATE_BACKUP_KEEP", 3)? as usize,
-            update_base_dir: PathBuf::from(env_var(
-                "UPDATE_BASE_DIR",
-                "/var/lib/mailclient/update",
-            )),
-            update_install_dir: PathBuf::from(env_var("UPDATE_INSTALL_DIR", "/opt/mailclient")),
-            update_service_name: env_var("UPDATE_SERVICE_NAME", "mailclient"),
+            update_base_dir: PathBuf::from(env_var("UPDATE_BASE_DIR", "/var/lib/despatch/update")),
+            update_install_dir: PathBuf::from(env_var("UPDATE_INSTALL_DIR", "/opt/despatch")),
+            update_service_name: env_var("UPDATE_SERVICE_NAME", "despatch"),
             update_systemd_unit_dir: PathBuf::from(env_var(
                 "UPDATE_SYSTEMD_UNIT_DIR",
                 "/etc/systemd/system",
             )),
+            update_require_signature: env_bool("UPDATE_REQUIRE_SIGNATURE", true),
+            update_signature_asset: env_var("UPDATE_SIGNATURE_ASSET", "checksums.txt.sig"),
+            update_signing_public_keys: env_csv("UPDATE_SIGNING_PUBLIC_KEYS"),
             listen_addr: env_var("LISTEN_ADDR", ":8080"),
             mailsec_enabled: env_bool("MAILSEC_ENABLED", false),
-            mailsec_socket: PathBuf::from(env_var(
-                "MAILSEC_SOCKET",
-                "/run/mailclient/mailsec.sock",
-            )),
-        })
+            mailsec_socket: PathBuf::from(env_var("MAILSEC_SOCKET", "/run/despatch/mailsec.sock")),
+        };
+        cfg.update_signing_public_keys =
+            parse_signing_public_keys(&cfg.update_signing_public_keys)?;
+        if cfg.update_require_signature && cfg.update_signature_asset.trim().is_empty() {
+            return Err(WorkerError::Message(
+                "UPDATE_SIGNATURE_ASSET is required when UPDATE_REQUIRE_SIGNATURE=true".to_string(),
+            ));
+        }
+        if cfg.update_enabled
+            && cfg.update_require_signature
+            && cfg.update_signing_public_keys.is_empty()
+        {
+            return Err(WorkerError::Message(
+                "UPDATE_SIGNING_PUBLIC_KEYS is required when update signatures are enforced"
+                    .to_string(),
+            ));
+        }
+        Ok(cfg)
     }
 }
 
@@ -283,12 +303,51 @@ fn env_u64(key: &str, default: u64) -> Result<u64, WorkerError> {
     }
 }
 
+fn env_csv(key: &str) -> Vec<String> {
+    match env::var(key) {
+        Ok(raw) => raw
+            .split(',')
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_signing_public_keys(keys: &[String]) -> Result<Vec<String>, WorkerError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(keys.len());
+    let mut seen = HashSet::with_capacity(keys.len());
+    for raw in keys {
+        let key = raw.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let decoded = general_purpose::STANDARD
+            .decode(key.as_bytes())
+            .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(key.as_bytes()))
+            .map_err(|_| WorkerError::Message(format!("invalid update signing key: {key}")))?;
+        if decoded.len() != 32 {
+            return Err(WorkerError::Message(format!(
+                "invalid update signing key length: {key}"
+            )));
+        }
+        let normalized = general_purpose::STANDARD.encode(decoded);
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    Ok(out)
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn current_version() -> String {
-    option_env!("MAILCLIENT_BUILD_VERSION")
+    option_env!("DESPATCH_BUILD_VERSION")
         .unwrap_or("dev")
         .trim()
         .to_string()
@@ -335,11 +394,13 @@ fn ensure_dirs(paths: &[PathBuf], mode: u32) -> Result<(), WorkerError> {
 }
 
 fn read_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, io::Error> {
+    reject_symlink(path)?;
     let raw = fs::read(path)?;
     serde_json::from_slice(&raw).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 fn write_json_atomic(path: &Path, payload: &Value, mode: u32) -> Result<(), WorkerError> {
+    reject_symlink(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -362,6 +423,22 @@ fn write_json_atomic(path: &Path, payload: &Value, mode: u32) -> Result<(), Work
     Ok(())
 }
 
+fn reject_symlink(path: &Path) -> Result<(), io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("refusing symlink path: {}", path.display()),
+                ));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 fn write_status(cfg: &Config, status: &ApplyStatus) -> Result<(), WorkerError> {
     let mut status = status.clone();
     if status.state.trim().is_empty() {
@@ -369,17 +446,13 @@ fn write_status(cfg: &Config, status: &ApplyStatus) -> Result<(), WorkerError> {
     }
     let payload = serde_json::to_value(&status)?;
     write_json_atomic(&status_path(cfg), &payload, 0o640)?;
-    ensure_mailclient_readable(&status_path(cfg))?;
+    ensure_despatch_readable(&status_path(cfg))?;
     Ok(())
 }
 
-fn ensure_mailclient_readable(path: &Path) -> Result<(), WorkerError> {
-    let user = lookup_mailclient_user()?;
-    chown(
-        path,
-        Some(Uid::from_raw(user.uid.as_raw())),
-        Some(Gid::from_raw(user.gid.as_raw())),
-    )?;
+fn ensure_despatch_readable(path: &Path) -> Result<(), WorkerError> {
+    let user = lookup_despatch_user()?;
+    chown(path, None, Some(Gid::from_raw(user.gid.as_raw())))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o640))?;
     Ok(())
 }
@@ -414,6 +487,24 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         .find(|a| a.name.trim().eq_ignore_ascii_case("checksums.txt"))
         .map(|a| a.browser_download_url.trim().to_string())
         .ok_or_else(|| WorkerError::Message("release asset checksums.txt not found".to_string()))?;
+    let signature_name = cfg.update_signature_asset.trim().to_string();
+    let signature_url = if cfg.update_require_signature {
+        Some(
+            release
+                .assets
+                .iter()
+                .find(|a| a.name.trim().eq_ignore_ascii_case(signature_name.trim()))
+                .map(|a| a.browser_download_url.trim().to_string())
+                .ok_or_else(|| {
+                    WorkerError::Message(format!(
+                        "release asset {} not found",
+                        signature_name.trim()
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
 
     let run_id = if req.request_id.trim().is_empty() {
         format!("run-{}", Utc::now().timestamp())
@@ -429,6 +520,15 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     let checksum_path = run_work.join("checksums.txt");
     download_asset(cfg, &archive_url, &archive_path)?;
     download_asset(cfg, &checksum_url, &checksum_path)?;
+    if let Some(signature_url) = signature_url {
+        let signature_path = run_work.join(signature_name.trim());
+        download_asset(cfg, &signature_url, &signature_path)?;
+        verify_checksum_signature(
+            &checksum_path,
+            &signature_path,
+            &cfg.update_signing_public_keys,
+        )?;
+    }
     verify_checksum_file(&checksum_path, &archive_path, &archive_name)?;
 
     let extracted = run_work.join("extract");
@@ -442,18 +542,18 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     fs::create_dir_all(&stage_dir)?;
 
     copy_file(
-        &payload_root.join("mailclient"),
-        &stage_dir.join("mailclient"),
+        &payload_root.join("despatch"),
+        &stage_dir.join("despatch"),
         0o755,
     )?;
     copy_file(
-        &payload_root.join("mailclient-pam-reset-helper"),
-        &stage_dir.join("mailclient-pam-reset-helper"),
+        &payload_root.join("despatch-pam-reset-helper"),
+        &stage_dir.join("despatch-pam-reset-helper"),
         0o755,
     )?;
     copy_file(
-        &payload_root.join("mailclient-update-worker"),
-        &stage_dir.join("mailclient-update-worker"),
+        &payload_root.join("despatch-update-worker"),
+        &stage_dir.join("despatch-update-worker"),
         0o755,
     )?;
     copy_dir(&payload_root.join("web"), &stage_dir.join("web"))?;
@@ -461,35 +561,31 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         &payload_root.join("migrations"),
         &stage_dir.join("migrations"),
     )?;
-    let mailsec_payload = payload_root.join("mailclient-mailsec-service");
+    let mailsec_payload = payload_root.join("despatch-mailsec-service");
     let mailsec_payload_present = mailsec_payload.exists();
     if mailsec_payload_present {
         copy_file(
             &mailsec_payload,
-            &stage_dir.join("mailclient-mailsec-service"),
+            &stage_dir.join("despatch-mailsec-service"),
             0o755,
         )?;
     }
-    let mailsec_unit_path = payload_root
-        .join("deploy")
-        .join("mailclient-mailsec.service");
+    let mailsec_unit_path = payload_root.join("deploy").join("despatch-mailsec.service");
     let mailsec_unit_present = mailsec_unit_path.exists();
-    let current_mailsec = cfg.update_install_dir.join("mailclient-mailsec-service");
+    let current_mailsec = cfg.update_install_dir.join("despatch-mailsec-service");
     let current_mailsec_present = current_mailsec.exists();
-    let installed_mailsec_unit = cfg
-        .update_systemd_unit_dir
-        .join("mailclient-mailsec.service");
+    let installed_mailsec_unit = cfg.update_systemd_unit_dir.join("despatch-mailsec.service");
     let installed_mailsec_unit_present = installed_mailsec_unit.exists();
     let install_deploy_mailsec_unit = cfg
         .update_install_dir
         .join("deploy")
-        .join("mailclient-mailsec.service");
+        .join("despatch-mailsec.service");
     let install_deploy_mailsec_unit_present = install_deploy_mailsec_unit.exists();
-    let mailsec_unit_known_to_systemd = systemd_unit_known("mailclient-mailsec.service");
+    let mailsec_unit_known_to_systemd = systemd_unit_known("despatch-mailsec.service");
 
     if cfg.mailsec_enabled && !mailsec_payload_present && !current_mailsec_present {
         return Err(WorkerError::Message(
-            "mailsec is enabled but mailclient-mailsec-service is missing in both current install and release payload".to_string(),
+            "mailsec is enabled but despatch-mailsec-service is missing in both current install and release payload".to_string(),
         ));
     }
     if cfg.mailsec_enabled
@@ -499,13 +595,13 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         && !mailsec_unit_known_to_systemd
     {
         return Err(WorkerError::Message(
-            "mailsec is enabled but mailclient-mailsec.service is missing in payload, install deploy/, and systemd unit directory".to_string(),
+            "mailsec is enabled but despatch-mailsec.service is missing in payload, install deploy/, and systemd unit directory".to_string(),
         ));
     }
 
     let prev_bin = cfg
         .update_install_dir
-        .join(format!(".prev-mailclient-{}", sanitize_path_token(&run_id)));
+        .join(format!(".prev-despatch-{}", sanitize_path_token(&run_id)));
     let prev_pam = cfg.update_install_dir.join(format!(
         ".prev-pam-reset-helper-{}",
         sanitize_path_token(&run_id)
@@ -524,18 +620,18 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         .update_install_dir
         .join(format!(".prev-mailsec-{}", sanitize_path_token(&run_id)));
 
-    let current_bin = cfg.update_install_dir.join("mailclient");
-    let current_pam = cfg.update_install_dir.join("mailclient-pam-reset-helper");
-    let current_worker = cfg.update_install_dir.join("mailclient-update-worker");
+    let current_bin = cfg.update_install_dir.join("despatch");
+    let current_pam = cfg.update_install_dir.join("despatch-pam-reset-helper");
+    let current_worker = cfg.update_install_dir.join("despatch-update-worker");
     let current_web = cfg.update_install_dir.join("web");
     let current_mig = cfg.update_install_dir.join("migrations");
 
-    let stage_bin = stage_dir.join("mailclient");
-    let stage_pam = stage_dir.join("mailclient-pam-reset-helper");
-    let stage_worker = stage_dir.join("mailclient-update-worker");
+    let stage_bin = stage_dir.join("despatch");
+    let stage_pam = stage_dir.join("despatch-pam-reset-helper");
+    let stage_worker = stage_dir.join("despatch-update-worker");
     let stage_web = stage_dir.join("web");
     let stage_mig = stage_dir.join("migrations");
-    let stage_mailsec = stage_dir.join("mailclient-mailsec-service");
+    let stage_mailsec = stage_dir.join("despatch-mailsec-service");
 
     let _ = fs::remove_file(&prev_bin);
     let _ = fs::remove_file(&prev_pam);
@@ -568,19 +664,13 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         swapped.push((current_mailsec.clone(), prev_mailsec.clone()));
     }
 
-    if let Err(err) = chown_runtime_artifacts(&cfg.update_install_dir) {
-        rollback_paths(&swapped)?;
-        return Err(WorkerError::Message(format!("chown failed: {err}")));
-    }
     let mut mailsec_unit_source: Option<PathBuf> = None;
     if mailsec_unit_present {
         mailsec_unit_source = Some(mailsec_unit_path.clone());
     } else if install_deploy_mailsec_unit_present {
         mailsec_unit_source = Some(install_deploy_mailsec_unit.clone());
     }
-    let mailsec_unit_dst = cfg
-        .update_systemd_unit_dir
-        .join("mailclient-mailsec.service");
+    let mailsec_unit_dst = cfg.update_systemd_unit_dir.join("despatch-mailsec.service");
     if let Some(src) = mailsec_unit_source {
         if let Err(err) = copy_file(&src, &mailsec_unit_dst, 0o644) {
             if is_read_only_or_permission_error(&err)
@@ -601,11 +691,11 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         }
     }
     let mailsec_unit_now_present =
-        mailsec_unit_dst.exists() || systemd_unit_known("mailclient-mailsec.service");
+        mailsec_unit_dst.exists() || systemd_unit_known("despatch-mailsec.service");
     if cfg.mailsec_enabled && !mailsec_unit_now_present {
         rollback_paths(&swapped)?;
         return Err(WorkerError::Message(
-            "mailsec is enabled but systemd unit mailclient-mailsec.service is still missing after update".to_string(),
+            "mailsec is enabled but systemd unit despatch-mailsec.service is still missing after update".to_string(),
         ));
     }
     if cfg.mailsec_enabled
@@ -615,7 +705,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     {
         if let Err(err) = run_cmd(
             "systemctl",
-            &["enable", "--now", "mailclient-mailsec"],
+            &["enable", "--now", "despatch-mailsec"],
             Duration::from_secs(60),
         ) {
             rollback_paths(&swapped)?;
@@ -664,15 +754,12 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         sanitize_path_token(&run_id)
     ));
     fs::create_dir_all(&backup_dest)?;
-    move_if_exists(&prev_bin, &backup_dest.join("mailclient"))?;
-    move_if_exists(&prev_pam, &backup_dest.join("mailclient-pam-reset-helper"))?;
-    move_if_exists(&prev_worker, &backup_dest.join("mailclient-update-worker"))?;
+    move_if_exists(&prev_bin, &backup_dest.join("despatch"))?;
+    move_if_exists(&prev_pam, &backup_dest.join("despatch-pam-reset-helper"))?;
+    move_if_exists(&prev_worker, &backup_dest.join("despatch-update-worker"))?;
     move_if_exists(&prev_web, &backup_dest.join("web"))?;
     move_if_exists(&prev_mig, &backup_dest.join("migrations"))?;
-    move_if_exists(
-        &prev_mailsec,
-        &backup_dest.join("mailclient-mailsec-service"),
-    )?;
+    move_if_exists(&prev_mailsec, &backup_dest.join("despatch-mailsec-service"))?;
 
     trim_backups(&backups_dir(cfg), cfg.update_backup_keep)?;
 
@@ -753,7 +840,7 @@ fn request_json<T: DeserializeOwned>(
     let mut req = client
         .get(url)
         .header(ACCEPT, "application/vnd.github+json")
-        .header(USER_AGENT, "mailclient-updater/1");
+        .header(USER_AGENT, "despatch-updater/1");
 
     if let Some(etag) = etag {
         if !etag.trim().is_empty() {
@@ -794,10 +881,10 @@ fn archive_asset_candidates(arch: &str) -> Vec<String> {
 
     let mut out = Vec::new();
     for alias in aliases {
-        out.push(format!("mailclient-linux-{alias}.tar.gz"));
-        out.push(format!("mailclient-linux-{alias}.tgz"));
-        out.push(format!("mailclient_{alias}_linux.tar.gz"));
-        out.push(format!("mailclient_{alias}_linux.tgz"));
+        out.push(format!("despatch-linux-{alias}.tar.gz"));
+        out.push(format!("despatch-linux-{alias}.tgz"));
+        out.push(format!("despatch_{alias}_linux.tar.gz"));
+        out.push(format!("despatch_{alias}_linux.tgz"));
     }
     out
 }
@@ -829,9 +916,7 @@ fn download_asset(cfg: &Config, raw_url: &str, dest: &Path) -> Result<(), Worker
         .timeout(Duration::from_secs(cfg.update_http_timeout_sec))
         .build()?;
 
-    let mut req = client
-        .get(parsed)
-        .header(USER_AGENT, "mailclient-updater/1");
+    let mut req = client.get(parsed).header(USER_AGENT, "despatch-updater/1");
 
     if !cfg.update_github_token.trim().is_empty() {
         req = req.header(
@@ -899,6 +984,73 @@ fn verify_checksum_file(
     Ok(())
 }
 
+fn verify_checksum_signature(
+    checksum_path: &Path,
+    signature_path: &Path,
+    public_keys: &[String],
+) -> Result<(), WorkerError> {
+    if public_keys.is_empty() {
+        return Err(WorkerError::Message(
+            "no update signing keys configured".to_string(),
+        ));
+    }
+    let checksum = fs::read(checksum_path)?;
+    let signature_raw = fs::read(signature_path)?;
+    let signature = decode_detached_signature(&signature_raw)?;
+
+    for key in public_keys {
+        let verifying_key = decode_verifying_key(key)?;
+        if verifying_key.verify(&checksum, &signature).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(WorkerError::Message(
+        "signature verification failed for checksums file".to_string(),
+    ))
+}
+
+fn decode_verifying_key(raw: &str) -> Result<VerifyingKey, WorkerError> {
+    let key = raw.trim();
+    if key.is_empty() {
+        return Err(WorkerError::Message("empty update signing key".to_string()));
+    }
+    let decoded = general_purpose::STANDARD
+        .decode(key)
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(key))
+        .map_err(|_| WorkerError::Message("invalid update signing key encoding".to_string()))?;
+    let arr: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| WorkerError::Message("invalid update signing key size".to_string()))?;
+    VerifyingKey::from_bytes(&arr)
+        .map_err(|_| WorkerError::Message("invalid update signing key bytes".to_string()))
+}
+
+fn decode_detached_signature(raw: &[u8]) -> Result<Signature, WorkerError> {
+    let text = String::from_utf8_lossy(raw).trim().to_string();
+    if text.is_empty() {
+        return Err(WorkerError::Message("empty update signature".to_string()));
+    }
+    let decoded = general_purpose::STANDARD
+        .decode(text.as_bytes())
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(text.as_bytes()))
+        .map_err(|_| WorkerError::Message("invalid update signature encoding".to_string()));
+    if let Ok(decoded) = decoded {
+        let arr: [u8; 64] = decoded
+            .try_into()
+            .map_err(|_| WorkerError::Message("invalid update signature size".to_string()))?;
+        return Ok(Signature::from_bytes(&arr));
+    }
+    if raw.len() == 64 {
+        let arr: [u8; 64] = raw
+            .try_into()
+            .map_err(|_| WorkerError::Message("invalid update signature size".to_string()))?;
+        return Ok(Signature::from_bytes(&arr));
+    }
+    Err(WorkerError::Message(
+        "invalid update signature encoding".to_string(),
+    ))
+}
+
 fn extract_tar_gz(src: &Path, dest: &Path) -> Result<(), WorkerError> {
     fs::create_dir_all(dest)?;
 
@@ -962,9 +1114,9 @@ fn sanitize_archive_relative(path: &Path) -> Result<PathBuf, WorkerError> {
 
 fn find_payload_root(extract_dir: &Path) -> Result<PathBuf, WorkerError> {
     let required = [
-        "mailclient",
-        "mailclient-pam-reset-helper",
-        "mailclient-update-worker",
+        "despatch",
+        "despatch-pam-reset-helper",
+        "despatch-update-worker",
         "web",
         "migrations",
     ];
@@ -982,7 +1134,7 @@ fn find_payload_root(extract_dir: &Path) -> Result<PathBuf, WorkerError> {
     }
 
     Err(WorkerError::Message(
-        "release payload missing required files (mailclient, mailclient-pam-reset-helper, mailclient-update-worker, web, migrations)".to_string(),
+        "release payload missing required files (despatch, despatch-pam-reset-helper, despatch-update-worker, web, migrations)".to_string(),
     ))
 }
 
@@ -1124,55 +1276,14 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     false
 }
 
-fn chown_runtime_artifacts(install_dir: &Path) -> Result<(), WorkerError> {
-    let user = lookup_mailclient_user()?;
-    let uid = Uid::from_raw(user.uid.as_raw());
-    let gid = Gid::from_raw(user.gid.as_raw());
-
-    let paths = [
-        install_dir.join("mailclient"),
-        install_dir.join("mailclient-pam-reset-helper"),
-        install_dir.join("mailclient-update-worker"),
-        install_dir.join("web"),
-        install_dir.join("migrations"),
-    ];
-
-    for path in paths {
-        chown_recursive(&path, uid, gid)?;
-    }
-    let mailsec = install_dir.join("mailclient-mailsec-service");
-    if mailsec.exists() {
-        chown_recursive(&mailsec, uid, gid)?;
-    }
-
-    Ok(())
-}
-
-fn lookup_mailclient_user() -> Result<User, WorkerError> {
-    match User::from_name("mailclient") {
+fn lookup_despatch_user() -> Result<User, WorkerError> {
+    match User::from_name("despatch") {
         Ok(Some(user)) => Ok(user),
-        Ok(None) => Err(WorkerError::Message(
-            "mailclient user not found".to_string(),
-        )),
+        Ok(None) => Err(WorkerError::Message("despatch user not found".to_string())),
         Err(err) => Err(WorkerError::Message(format!(
-            "failed to lookup mailclient user: {err}"
+            "failed to lookup despatch user: {err}"
         ))),
     }
-}
-
-fn chown_recursive(path: &Path, uid: Uid, gid: Gid) -> Result<(), WorkerError> {
-    let meta = fs::metadata(path)?;
-    if !meta.is_dir() {
-        chown(path, Some(uid), Some(gid))?;
-        return Ok(());
-    }
-
-    for entry in WalkDir::new(path).into_iter() {
-        let entry = entry.map_err(|e| WorkerError::Message(e.to_string()))?;
-        chown(entry.path(), Some(uid), Some(gid))?;
-    }
-
-    Ok(())
 }
 
 fn is_read_only_or_permission_error(err: &WorkerError) -> bool {
@@ -1320,8 +1431,8 @@ mod tests {
     #[test]
     fn archive_candidates_include_aliases() {
         let out = archive_asset_candidates("aarch64");
-        assert!(out.iter().any(|v| v == "mailclient-linux-arm64.tar.gz"));
-        assert!(out.iter().any(|v| v == "mailclient-linux-aarch64.tar.gz"));
+        assert!(out.iter().any(|v| v == "despatch-linux-arm64.tar.gz"));
+        assert!(out.iter().any(|v| v == "despatch-linux-aarch64.tar.gz"));
     }
 
     #[test]

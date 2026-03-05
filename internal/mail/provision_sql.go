@@ -11,7 +11,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"mailclient/internal/config"
+	"despatch/internal/config"
 )
 
 var identRx = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

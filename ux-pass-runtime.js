@@ -40,9 +40,31 @@ async function runDesktop() {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(250);
 
+  await page.click('#tab-settings');
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: '/tmp/ux-desktop-settings-signin.png', fullPage: true });
+  await page.click('#settings-nav-devices');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: '/tmp/ux-desktop-settings-devices.png', fullPage: true });
+  await page.click('#settings-nav-sessions');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: '/tmp/ux-desktop-settings-sessions.png', fullPage: true });
+  await page.fill('#settings-search-input', 'passkey');
+  await page.waitForTimeout(220);
+  if ((await page.locator('#settings-search-results .settings-search-result').count()) > 0) {
+    await page.locator('#settings-search-results .settings-search-result').first().click();
+    await page.waitForTimeout(240);
+  }
+
   await page.click('#tab-admin');
   await page.waitForTimeout(700);
-  await page.screenshot({ path: '/tmp/ux-desktop-admin-update.png', fullPage: true });
+  await page.screenshot({ path: '/tmp/ux-desktop-admin-system.png', fullPage: true });
+  await page.fill('#admin-search-input', 'feature flags');
+  await page.waitForTimeout(220);
+  if ((await page.locator('#admin-search-results .settings-search-result').count()) > 0) {
+    await page.locator('#admin-search-results .settings-search-result').first().click();
+    await page.waitForTimeout(240);
+  }
 
   await page.click('#admin-nav-registrations');
   await page.waitForTimeout(400);
@@ -66,10 +88,11 @@ async function runDesktop() {
 
   const statusText = (await page.textContent('#status-line')) || '';
   const mailVisible = await page.locator('.mail-layout').count();
+  const settingsVisible = await page.locator('.settings-layout').count();
   const adminVisible = await page.locator('.admin-layout').count();
 
   await browser.close();
-  return { consoleErrors, dialogs, composeVisible, statusText, mailVisible, adminVisible, initialTheme };
+  return { consoleErrors, dialogs, composeVisible, statusText, mailVisible, settingsVisible, adminVisible, initialTheme };
 }
 
 async function runMobile() {
@@ -99,7 +122,13 @@ async function runMobile() {
   const mobilePane = await page.locator('#view-mail').getAttribute('data-mobile-pane');
   await page.screenshot({ path: '/tmp/ux-mobile-mail.png', fullPage: true });
 
+  await page.click('#tab-settings');
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: '/tmp/ux-mobile-settings.png', fullPage: true });
+
   if ((await page.locator('.mailbox-list button').count()) > 0) {
+    await page.click('#tab-mail');
+    await page.waitForTimeout(240);
     await page.locator('.mailbox-list button').first().click();
     await page.waitForTimeout(400);
     await page.screenshot({ path: '/tmp/ux-mobile-messages.png', fullPage: true });

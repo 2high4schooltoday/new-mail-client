@@ -51,14 +51,14 @@ INSTALL_FIELDS: tuple[FieldDef, ...] = (
 )
 
 UNINSTALL_FIELDS: tuple[FieldDef, ...] = (
-    FieldDef("backup_env", "Backup /opt/mailclient/.env", "bool"),
-    FieldDef("backup_data", "Backup /var/lib/mailclient", "bool"),
-    FieldDef("remove_app_files", "Remove /opt/mailclient", "bool"),
-    FieldDef("remove_app_data", "Remove /var/lib/mailclient", "bool"),
+    FieldDef("backup_env", "Backup /opt/despatch/.env", "bool"),
+    FieldDef("backup_data", "Backup /var/lib/despatch", "bool"),
+    FieldDef("remove_app_files", "Remove /opt/despatch", "bool"),
+    FieldDef("remove_app_data", "Remove /var/lib/despatch", "bool"),
     FieldDef("remove_system_user", "Remove System User", "bool"),
     FieldDef("remove_nginx_site", "Remove Nginx Site", "bool"),
     FieldDef("remove_apache_site", "Remove Apache2 Site", "bool"),
-    FieldDef("remove_checkout", "Remove /opt/mailclient-installer", "bool"),
+    FieldDef("remove_checkout", "Remove /opt/despatch-installer", "bool"),
 )
 
 INSTALL_STEPS: tuple[WizardStep, ...] = (

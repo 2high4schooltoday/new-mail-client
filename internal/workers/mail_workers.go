@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"mailclient/internal/config"
-	"mailclient/internal/mail"
-	mailsecclient "mailclient/internal/mailsec"
-	"mailclient/internal/models"
-	"mailclient/internal/store"
-	"mailclient/internal/util"
+	"despatch/internal/config"
+	"despatch/internal/mail"
+	mailsecclient "despatch/internal/mailsec"
+	"despatch/internal/models"
+	"despatch/internal/store"
+	"despatch/internal/util"
 )
 
 type MailWorkers struct {
@@ -98,6 +98,7 @@ func (w *MailWorkers) syncAccount(ctx context.Context, account models.MailAccoun
 				log.Printf("mail_sync account=%s message=%s get_failed error=%v", account.ID, summary.ID, err)
 				continue
 			}
+			scopedMessageID := mail.NormalizeIndexedMessageID(account.ID, summary.ID)
 			threadID := deriveThreadID(name, msg.Subject, msg.From)
 			now := time.Now().UTC()
 			bodyText := strings.TrimSpace(msg.Body)
@@ -112,7 +113,7 @@ func (w *MailWorkers) syncAccount(ctx context.Context, account models.MailAccoun
 			dmarcStatus := "unknown"
 			phishingScore := 0.0
 			remoteImagesBlocked := true
-			indexedAttachments := convertMessageAttachments(account.ID, summary.ID, msg.Attachments, now)
+			indexedAttachments := convertMessageAttachments(account.ID, scopedMessageID, msg.Attachments, now)
 			hasAttachments := len(indexedAttachments) > 0
 
 			if w.cfg.MailSecEnabled {
@@ -120,7 +121,7 @@ func (w *MailWorkers) syncAccount(ctx context.Context, account models.MailAccoun
 				if rawErr != nil {
 					log.Printf("mail_sync account=%s message=%s mailsec_raw_failed error=%v", account.ID, summary.ID, rawErr)
 				} else {
-					analysis, analysisErr := w.parseAndClassifyWithMailSec(ctx, account.ID, summary.ID, rawMessage, now)
+					analysis, analysisErr := w.parseAndClassifyWithMailSec(ctx, account.ID, scopedMessageID, rawMessage, now)
 					if analysisErr != nil {
 						log.Printf("mail_sync account=%s message=%s mailsec_parse_failed error=%v", account.ID, summary.ID, analysisErr)
 					} else {
@@ -156,13 +157,14 @@ func (w *MailWorkers) syncAccount(ctx context.Context, account models.MailAccoun
 					}
 				}
 			}
+			scopedThreadID := mail.NormalizeIndexedThreadID(account.ID, threadID)
 
 			indexed := models.IndexedMessage{
-				ID:                  summary.ID,
+				ID:                  scopedMessageID,
 				AccountID:           account.ID,
 				Mailbox:             firstNonEmptyString(msg.Mailbox, name),
 				UID:                 msg.UID,
-				ThreadID:            threadID,
+				ThreadID:            scopedThreadID,
 				FromValue:           fromValue,
 				ToValue:             toValue,
 				Subject:             subject,
@@ -189,7 +191,7 @@ func (w *MailWorkers) syncAccount(ctx context.Context, account models.MailAccoun
 				log.Printf("mail_sync account=%s message=%s index_upsert_failed error=%v", account.ID, summary.ID, err)
 				continue
 			}
-			if err := w.st.ReplaceIndexedAttachments(ctx, account.ID, summary.ID, indexedAttachments); err != nil {
+			if err := w.st.ReplaceIndexedAttachments(ctx, account.ID, scopedMessageID, indexedAttachments); err != nil {
 				log.Printf("mail_sync account=%s message=%s attachments_upsert_failed error=%v", account.ID, summary.ID, err)
 			}
 		}

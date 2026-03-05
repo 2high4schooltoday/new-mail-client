@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	"mailclient/internal/models"
+	"despatch/internal/models"
 )
 
 // MailIndexer provides indexed-thread/query primitives over synchronized mailbox state.

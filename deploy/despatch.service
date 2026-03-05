@@ -4,13 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/mailclient
-ExecStart=/opt/mailclient/mailclient
+WorkingDirectory=/opt/despatch
+ExecStart=/opt/despatch/despatch
 Restart=always
 RestartSec=2
-EnvironmentFile=/opt/mailclient/.env
-User=mailclient
-Group=mailclient
+EnvironmentFile=/opt/despatch/.env
+User=despatch
+Group=despatch
 LimitNOFILE=32768
 NoNewPrivileges=true
 PrivateTmp=true

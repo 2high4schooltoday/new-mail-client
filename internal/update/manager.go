@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"mailclient/internal/config"
-	"mailclient/internal/store"
-	"mailclient/internal/version"
+	"despatch/internal/config"
+	"despatch/internal/store"
+	"despatch/internal/version"
 )
 
 const (

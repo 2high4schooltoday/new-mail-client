@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-REMOTE_BASE = "https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts/tui"
+REMOTE_BASE = "https://raw.githubusercontent.com/2high4schooltoday/despatch/main/scripts/tui"
 
 
 def _bootstrap_tui_modules() -> None:
@@ -28,7 +28,7 @@ def _bootstrap_tui_modules() -> None:
     except Exception:
         pass
 
-    cache_root = Path.home() / ".cache" / "mailclient-tui" / "modules"
+    cache_root = Path.home() / ".cache" / "despatch-tui" / "modules"
     module_dir = cache_root / "tui"
     module_dir.mkdir(parents=True, exist_ok=True)
     files = [
@@ -592,7 +592,7 @@ class DespatchTUI:
     def _draw_status(self, y: int, h: int, w: int) -> None:
         draw_box(self.stdscr, y, 0, h, w, " STATUS ", self.theme.attrs.panel)
         service = detect_service_state()
-        safe_addstr(self.stdscr, y + 2, 2, f"mailclient service: {service}", self.theme.attrs.heading)
+        safe_addstr(self.stdscr, y + 2, 2, f"despatch service: {service}", self.theme.attrs.heading)
         safe_addstr(self.stdscr, y + 4, 2, f"Host: {detect_host()}", self.theme.attrs.panel)
         safe_addstr(self.stdscr, y + 5, 2, f"Arch: {detect_arch()}", self.theme.attrs.panel)
         safe_addstr(self.stdscr, y + 7, 2, f"Runner logs: {self.logstore.log_path}", self.theme.attrs.muted)
@@ -1497,14 +1497,14 @@ def run_plain_console_legacy() -> int:
         return _run_with_event_stream(runner, "install", spec, logstore)
     if choice == "2":
         spec = UninstallSpec(
-            backup_env=_prompt_bool("Backup /opt/mailclient/.env", True),
-            backup_data=_prompt_bool("Backup /var/lib/mailclient", True),
-            remove_app_files=_prompt_bool("Remove /opt/mailclient", True),
-            remove_app_data=_prompt_bool("Remove /var/lib/mailclient", True),
-            remove_system_user=_prompt_bool("Remove mailclient system user", True),
+            backup_env=_prompt_bool("Backup /opt/despatch/.env", True),
+            backup_data=_prompt_bool("Backup /var/lib/despatch", True),
+            remove_app_files=_prompt_bool("Remove /opt/despatch", True),
+            remove_app_data=_prompt_bool("Remove /var/lib/despatch", True),
+            remove_system_user=_prompt_bool("Remove despatch system user", True),
             remove_nginx_site=_prompt_bool("Remove nginx site", True),
             remove_apache_site=_prompt_bool("Remove apache2 site", True),
-            remove_checkout=_prompt_bool("Remove /opt/mailclient-installer", False),
+            remove_checkout=_prompt_bool("Remove /opt/despatch-installer", False),
         )
         return _run_with_event_stream(runner, "uninstall", spec, logstore)
     if choice == "3":

@@ -1,4 +1,4 @@
-module mailclient
+module despatch
 
 go 1.22
 

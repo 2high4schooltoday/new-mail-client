@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"mailclient/internal/models"
+	"despatch/internal/models"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -1020,10 +1020,26 @@ func (s *Store) CreatePasswordResetToken(ctx context.Context, userID, tokenHash 
 }
 
 func (s *Store) ConsumePasswordResetToken(ctx context.Context, tokenHash string) (models.PasswordResetToken, error) {
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE password_reset_tokens
+		 SET used_at=?
+		 WHERE token_hash=? AND used_at IS NULL AND expires_at>?`,
+		now, tokenHash, now,
+	)
+	if err != nil {
+		return models.PasswordResetToken{}, err
+	}
+	affected, _ := res.RowsAffected()
+	if affected != 1 {
+		return models.PasswordResetToken{}, ErrNotFound
+	}
+
 	var t models.PasswordResetToken
 	var used sql.NullTime
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id,user_id,token_hash,expires_at,used_at,created_at FROM password_reset_tokens WHERE token_hash=?`, tokenHash,
+	err = s.db.QueryRowContext(ctx,
+		`SELECT id,user_id,token_hash,expires_at,used_at,created_at FROM password_reset_tokens WHERE token_hash=?`,
+		tokenHash,
 	).Scan(&t.ID, &t.UserID, &t.TokenHash, &t.ExpiresAt, &used, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return models.PasswordResetToken{}, ErrNotFound
@@ -1034,13 +1050,6 @@ func (s *Store) ConsumePasswordResetToken(ctx context.Context, tokenHash string)
 	if used.Valid {
 		tm := used.Time
 		t.UsedAt = &tm
-	}
-	if t.UsedAt != nil || time.Now().UTC().After(t.ExpiresAt) {
-		return models.PasswordResetToken{}, ErrNotFound
-	}
-	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE password_reset_tokens SET used_at=? WHERE id=? AND used_at IS NULL`, now, t.ID); err != nil {
-		return models.PasswordResetToken{}, err
 	}
 	return t, nil
 }

@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,10 +25,10 @@ import (
 	"syscall"
 	"time"
 
-	"mailclient/internal/config"
-	"mailclient/internal/db"
-	"mailclient/internal/store"
-	"mailclient/internal/version"
+	"despatch/internal/config"
+	"despatch/internal/db"
+	"despatch/internal/store"
+	"despatch/internal/version"
 )
 
 func RunWorker(ctx context.Context, cfg config.Config) error {
@@ -81,7 +83,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 		TargetVersion: strings.TrimSpace(req.TargetVersion),
 		FromVersion:   version.Current().Version,
 	}, 0o640)
-	_ = ensureMailclientReadable(statusPath(m.cfg))
+	_ = ensureDespatchReadable(statusPath(m.cfg))
 
 	finalStatus := ApplyStatus{
 		State:         ApplyStateFailed,
@@ -95,7 +97,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 	defer func() {
 		finalStatus.FinishedAt = m.now()
 		_ = writeJSONAtomic(statusPath(m.cfg), finalStatus, 0o640)
-		_ = ensureMailclientReadable(statusPath(m.cfg))
+		_ = ensureDespatchReadable(statusPath(m.cfg))
 		_ = os.Remove(requestPath(m.cfg))
 	}()
 
@@ -146,6 +148,18 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if !ok {
 		return "", false, fmt.Errorf("release asset %s not found", checksumName)
 	}
+	signatureName := strings.TrimSpace(m.cfg.UpdateSignatureAsset)
+	signatureURL := ""
+	if m.cfg.UpdateRequireSignature {
+		if signatureName == "" {
+			return "", false, fmt.Errorf("UPDATE_SIGNATURE_ASSET is required when UPDATE_REQUIRE_SIGNATURE=true")
+		}
+		var found bool
+		signatureURL, found = findAssetURL(release, signatureName)
+		if !found {
+			return "", false, fmt.Errorf("release asset %s not found", signatureName)
+		}
+	}
 
 	runID := req.RequestID
 	if strings.TrimSpace(runID) == "" {
@@ -165,6 +179,15 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	}
 	if err := m.downloadAsset(ctx, checksumURL, checksumPath); err != nil {
 		return "", false, err
+	}
+	if m.cfg.UpdateRequireSignature {
+		signaturePath := filepath.Join(runWork, signatureName)
+		if err := m.downloadAsset(ctx, signatureURL, signaturePath); err != nil {
+			return "", false, err
+		}
+		if err := verifyChecksumSignature(checksumPath, signaturePath, m.cfg.UpdateSigningPublicKeys); err != nil {
+			return "", false, err
+		}
 	}
 	if err := verifyChecksumFile(checksumPath, archivePath, archiveName); err != nil {
 		return "", false, err
@@ -188,7 +211,7 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	}
 	defer os.RemoveAll(stageDir)
 
-	if err := copyFile(filepath.Join(payloadRoot, "mailclient"), filepath.Join(stageDir, "mailclient"), 0o755); err != nil {
+	if err := copyFile(filepath.Join(payloadRoot, "despatch"), filepath.Join(stageDir, "despatch"), 0o755); err != nil {
 		return "", false, err
 	}
 	if err := copyDir(filepath.Join(payloadRoot, "web"), filepath.Join(stageDir, "web")); err != nil {
@@ -197,65 +220,65 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if err := copyDir(filepath.Join(payloadRoot, "migrations"), filepath.Join(stageDir, "migrations")); err != nil {
 		return "", false, err
 	}
-	mailSecPayloadPath := filepath.Join(payloadRoot, "mailclient-mailsec-service")
+	mailSecPayloadPath := filepath.Join(payloadRoot, "despatch-mailsec-service")
 	mailSecPayloadPresent := false
 	if _, err := os.Stat(mailSecPayloadPath); err == nil {
-		if err := copyFile(mailSecPayloadPath, filepath.Join(stageDir, "mailclient-mailsec-service"), 0o755); err != nil {
+		if err := copyFile(mailSecPayloadPath, filepath.Join(stageDir, "despatch-mailsec-service"), 0o755); err != nil {
 			return "", false, err
 		}
 		mailSecPayloadPresent = true
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	mailSecUnitPath := filepath.Join(payloadRoot, "deploy", "mailclient-mailsec.service")
+	mailSecUnitPath := filepath.Join(payloadRoot, "deploy", "despatch-mailsec.service")
 	mailSecUnitPresent := false
 	if _, err := os.Stat(mailSecUnitPath); err == nil {
 		mailSecUnitPresent = true
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	currentMailSec := filepath.Join(m.cfg.UpdateInstallDir, "mailclient-mailsec-service")
+	currentMailSec := filepath.Join(m.cfg.UpdateInstallDir, "despatch-mailsec-service")
 	currentMailSecPresent := false
 	if _, err := os.Stat(currentMailSec); err == nil {
 		currentMailSecPresent = true
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	systemMailSecUnit := filepath.Join(m.cfg.UpdateSystemdUnitDir, "mailclient-mailsec.service")
+	systemMailSecUnit := filepath.Join(m.cfg.UpdateSystemdUnitDir, "despatch-mailsec.service")
 	systemMailSecUnitPresent := false
 	if _, err := os.Stat(systemMailSecUnit); err == nil {
 		systemMailSecUnitPresent = true
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	installDeployMailSecUnit := filepath.Join(m.cfg.UpdateInstallDir, "deploy", "mailclient-mailsec.service")
+	installDeployMailSecUnit := filepath.Join(m.cfg.UpdateInstallDir, "deploy", "despatch-mailsec.service")
 	installDeployMailSecUnitPresent := false
 	if _, err := os.Stat(installDeployMailSecUnit); err == nil {
 		installDeployMailSecUnitPresent = true
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	mailSecUnitKnownToSystemd := systemdUnitKnown(ctx, "mailclient-mailsec.service")
+	mailSecUnitKnownToSystemd := systemdUnitKnown(ctx, "despatch-mailsec.service")
 	if m.cfg.MailSecEnabled && !mailSecPayloadPresent && !currentMailSecPresent {
-		return "", false, fmt.Errorf("mailsec is enabled but mailclient-mailsec-service is missing in both current install and release payload")
+		return "", false, fmt.Errorf("mailsec is enabled but despatch-mailsec-service is missing in both current install and release payload")
 	}
 	if m.cfg.MailSecEnabled && !mailSecUnitPresent && !systemMailSecUnitPresent && !installDeployMailSecUnitPresent && !mailSecUnitKnownToSystemd {
-		return "", false, fmt.Errorf("mailsec is enabled but mailclient-mailsec.service is missing in payload, install deploy/, and systemd unit directory")
+		return "", false, fmt.Errorf("mailsec is enabled but despatch-mailsec.service is missing in payload, install deploy/, and systemd unit directory")
 	}
 
-	prevBin := filepath.Join(m.cfg.UpdateInstallDir, ".prev-mailclient-"+sanitizePathToken(runID))
+	prevBin := filepath.Join(m.cfg.UpdateInstallDir, ".prev-despatch-"+sanitizePathToken(runID))
 	prevWeb := filepath.Join(m.cfg.UpdateInstallDir, ".prev-web-"+sanitizePathToken(runID))
 	prevMig := filepath.Join(m.cfg.UpdateInstallDir, ".prev-migrations-"+sanitizePathToken(runID))
 	prevMailSec := filepath.Join(m.cfg.UpdateInstallDir, ".prev-mailsec-"+sanitizePathToken(runID))
 
-	currentBin := filepath.Join(m.cfg.UpdateInstallDir, "mailclient")
+	currentBin := filepath.Join(m.cfg.UpdateInstallDir, "despatch")
 	currentWeb := filepath.Join(m.cfg.UpdateInstallDir, "web")
 	currentMig := filepath.Join(m.cfg.UpdateInstallDir, "migrations")
-	currentMailSec = filepath.Join(m.cfg.UpdateInstallDir, "mailclient-mailsec-service")
-	stageBin := filepath.Join(stageDir, "mailclient")
+	currentMailSec = filepath.Join(m.cfg.UpdateInstallDir, "despatch-mailsec-service")
+	stageBin := filepath.Join(stageDir, "despatch")
 	stageWeb := filepath.Join(stageDir, "web")
 	stageMig := filepath.Join(stageDir, "migrations")
-	stageMailSec := filepath.Join(stageDir, "mailclient-mailsec-service")
+	stageMailSec := filepath.Join(stageDir, "despatch-mailsec-service")
 
 	for _, p := range []string{prevBin, prevWeb, prevMig, prevMailSec} {
 		_ = os.RemoveAll(p)
@@ -315,12 +338,6 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	}
 	swapped = true
 
-	if err := chownRuntimeArtifacts(m.cfg.UpdateInstallDir); err != nil {
-		if rbErr := rollback(); rbErr != nil {
-			return "", false, fmt.Errorf("chown failed: %v; rollback failed: %v", err, rbErr)
-		}
-		return "", true, err
-	}
 	mailSecUnitSource := ""
 	switch {
 	case mailSecUnitPresent:
@@ -328,7 +345,7 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	case installDeployMailSecUnitPresent:
 		mailSecUnitSource = installDeployMailSecUnit
 	}
-	mailSecUnitDst := filepath.Join(m.cfg.UpdateSystemdUnitDir, "mailclient-mailsec.service")
+	mailSecUnitDst := filepath.Join(m.cfg.UpdateSystemdUnitDir, "despatch-mailsec.service")
 	if mailSecUnitSource != "" {
 		if err := copyFile(mailSecUnitSource, mailSecUnitDst, 0o644); err != nil {
 			if isReadOnlyOrPermissionError(err) && (systemMailSecUnitPresent || mailSecUnitKnownToSystemd) {
@@ -358,16 +375,16 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		return "", true, err
 	}
 	if !mailSecUnitNowPresent {
-		mailSecUnitNowPresent = systemdUnitKnown(ctx, "mailclient-mailsec.service")
+		mailSecUnitNowPresent = systemdUnitKnown(ctx, "despatch-mailsec.service")
 	}
 	if m.cfg.MailSecEnabled && !mailSecUnitNowPresent {
 		if rbErr := rollback(); rbErr != nil {
 			return "", false, fmt.Errorf("mailsec unit missing after update; rollback failed: %v", rbErr)
 		}
-		return "", true, fmt.Errorf("mailsec is enabled but systemd unit mailclient-mailsec.service is still missing after update")
+		return "", true, fmt.Errorf("mailsec is enabled but systemd unit despatch-mailsec.service is still missing after update")
 	}
 	if m.cfg.MailSecEnabled || mailSecPayloadPresent || mailSecUnitPresent || mailSecUnitNowPresent {
-		if err := runCmd(ctx, "systemctl", "enable", "--now", "mailclient-mailsec"); err != nil {
+		if err := runCmd(ctx, "systemctl", "enable", "--now", "despatch-mailsec"); err != nil {
 			if rbErr := rollback(); rbErr != nil {
 				return "", false, fmt.Errorf("mailsec enable failed: %v; rollback failed: %v", err, rbErr)
 			}
@@ -404,8 +421,8 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if err := os.MkdirAll(backupDest, 0o750); err != nil {
 		return release.TagName, false, err
 	}
-	_ = os.Rename(prevBin, filepath.Join(backupDest, "mailclient"))
-	_ = os.Rename(prevMailSec, filepath.Join(backupDest, "mailclient-mailsec-service"))
+	_ = os.Rename(prevBin, filepath.Join(backupDest, "despatch"))
+	_ = os.Rename(prevMailSec, filepath.Join(backupDest, "despatch-mailsec-service"))
 	_ = os.Rename(prevWeb, filepath.Join(backupDest, "web"))
 	_ = os.Rename(prevMig, filepath.Join(backupDest, "migrations"))
 	trimBackups(backupsDir(m.cfg), m.cfg.UpdateBackupKeep)
@@ -455,10 +472,10 @@ func archiveAssetCandidates(arch string) []string {
 		if a == "" {
 			continue
 		}
-		add(fmt.Sprintf("mailclient-linux-%s.tar.gz", a))
-		add(fmt.Sprintf("mailclient-linux-%s.tgz", a))
-		add(fmt.Sprintf("mailclient_%s_linux.tar.gz", a))
-		add(fmt.Sprintf("mailclient_%s_linux.tgz", a))
+		add(fmt.Sprintf("despatch-linux-%s.tar.gz", a))
+		add(fmt.Sprintf("despatch-linux-%s.tgz", a))
+		add(fmt.Sprintf("despatch_%s_linux.tar.gz", a))
+		add(fmt.Sprintf("despatch_%s_linux.tgz", a))
 	}
 	return out
 }
@@ -498,7 +515,7 @@ func (m *Manager) downloadAsset(ctx context.Context, rawURL, destPath string) er
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "mailclient-updater/1")
+	req.Header.Set("User-Agent", "despatch-updater/1")
 	if token := strings.TrimSpace(m.cfg.UpdateGitHubToken); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -558,6 +575,73 @@ func verifyChecksumFile(checksumPath, archivePath, archiveName string) error {
 	return nil
 }
 
+func verifyChecksumSignature(checksumPath, signaturePath string, publicKeys []string) error {
+	if len(publicKeys) == 0 {
+		return fmt.Errorf("no update signing keys configured")
+	}
+	checksumBytes, err := os.ReadFile(checksumPath)
+	if err != nil {
+		return err
+	}
+	signatureRaw, err := os.ReadFile(signaturePath)
+	if err != nil {
+		return err
+	}
+	signature, err := decodeSignaturePayload(signatureRaw)
+	if err != nil {
+		return err
+	}
+	for _, key := range publicKeys {
+		pub, err := decodePublicKey(key)
+		if err != nil {
+			return err
+		}
+		if ed25519.Verify(pub, checksumBytes, signature) {
+			return nil
+		}
+	}
+	return fmt.Errorf("signature verification failed for checksums file")
+}
+
+func decodePublicKey(raw string) (ed25519.PublicKey, error) {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return nil, fmt.Errorf("empty update signing key")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(key)
+		if err != nil {
+			return nil, fmt.Errorf("invalid update signing key encoding")
+		}
+	}
+	if len(decoded) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid update signing key size")
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+func decodeSignaturePayload(raw []byte) ([]byte, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty update signature")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(trimmed)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(trimmed)
+	}
+	if err == nil {
+		if len(decoded) != ed25519.SignatureSize {
+			return nil, fmt.Errorf("invalid update signature size")
+		}
+		return decoded, nil
+	}
+	if len(raw) == ed25519.SignatureSize {
+		return raw, nil
+	}
+	return nil, fmt.Errorf("invalid update signature encoding")
+}
+
 func extractTarGz(src, dest string) error {
 	if err := os.MkdirAll(dest, 0o750); err != nil {
 		return err
@@ -613,7 +697,7 @@ func extractTarGz(src, dest string) error {
 }
 
 func findPayloadRoot(extractDir string) (string, error) {
-	required := []string{"mailclient", "web", "migrations"}
+	required := []string{"despatch", "web", "migrations"}
 	if hasRequiredPaths(extractDir, required) {
 		return extractDir, nil
 	}
@@ -627,7 +711,7 @@ func findPayloadRoot(extractDir string) (string, error) {
 			return root, nil
 		}
 	}
-	return "", fmt.Errorf("release payload missing required files (mailclient, web, migrations)")
+	return "", fmt.Errorf("release payload missing required files (despatch, web, migrations)")
 }
 
 func hasRequiredPaths(root string, required []string) bool {
@@ -817,54 +901,6 @@ func localBaseURL(listenAddr string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
-func chownRuntimeArtifacts(installDir string) error {
-	u, err := user.Lookup("mailclient")
-	if err != nil {
-		return err
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return err
-	}
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		return err
-	}
-	paths := []string{
-		filepath.Join(installDir, "mailclient"),
-		filepath.Join(installDir, "web"),
-		filepath.Join(installDir, "migrations"),
-	}
-	mailSecPath := filepath.Join(installDir, "mailclient-mailsec-service")
-	if _, err := os.Stat(mailSecPath); err == nil {
-		paths = append(paths, mailSecPath)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	for _, p := range paths {
-		if err := chownRecursive(p, uid, gid); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func chownRecursive(path string, uid, gid int) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return os.Chown(path, uid, gid)
-	}
-	return filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Chown(p, uid, gid)
-	})
-}
-
 func trimBackups(base string, keep int) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
@@ -911,12 +947,8 @@ func sanitizePathToken(v string) string {
 	return out
 }
 
-func ensureMailclientReadable(path string) error {
-	u, err := user.Lookup("mailclient")
-	if err != nil {
-		return err
-	}
-	uid, err := strconv.Atoi(u.Uid)
+func ensureDespatchReadable(path string) error {
+	u, err := user.Lookup("despatch")
 	if err != nil {
 		return err
 	}
@@ -924,9 +956,9 @@ func ensureMailclientReadable(path string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Chown(path, uid, gid); err != nil {
+	if err := os.Chown(path, -1, gid); err != nil {
 		return err
 	}
-	// Keep file private to service user/group while allowing web process reads.
+	// Keep file private to root/despatch while allowing app user reads.
 	return os.Chmod(path, 0o640)
 }

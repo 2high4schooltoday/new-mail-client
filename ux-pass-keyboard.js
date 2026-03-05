@@ -33,8 +33,8 @@ const { chromium } = require('playwright');
   await page.click('#admin-nav-users');
   await page.waitForTimeout(250);
   const usersHidden = await page.locator('#admin-section-users').evaluate((n) => n.classList.contains('hidden'));
-  const updateHidden = await page.locator('#admin-section-update').evaluate((n) => n.classList.contains('hidden'));
+  const systemHidden = await page.locator('#admin-section-system').evaluate((n) => n.classList.contains('hidden'));
 
-  console.log(JSON.stringify({ theme, paneAfterEsc, composeOpen, usersHidden, updateHidden, mailboxActiveDesc, messageActiveDesc }, null, 2));
+  console.log(JSON.stringify({ theme, paneAfterEsc, composeOpen, usersHidden, systemHidden, mailboxActiveDesc, messageActiveDesc }, null, 2));
   await browser.close();
 })();

@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"mailclient/internal/models"
+	"despatch/internal/models"
 )
 
 type ctxKey string

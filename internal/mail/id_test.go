@@ -23,3 +23,39 @@ func TestAttachmentIDRoundTrip(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: got %s %d", msgID, part)
 	}
 }
+
+func TestScopeIndexedMessageID(t *testing.T) {
+	accountID := "acct-123"
+	legacyID := "legacy-message-id"
+	scoped := ScopeIndexedMessageID(accountID, legacyID)
+	if scoped == legacyID {
+		t.Fatalf("expected scoped message id to differ from legacy id")
+	}
+	if !IsScopedIndexedMessageID(scoped) {
+		t.Fatalf("expected scoped message id to be recognized")
+	}
+	if got := NormalizeIndexedMessageID(accountID, legacyID); got != scoped {
+		t.Fatalf("normalize mismatch: got %q want %q", got, scoped)
+	}
+	if got := NormalizeIndexedMessageID(accountID, scoped); got != scoped {
+		t.Fatalf("normalize should keep scoped id unchanged")
+	}
+}
+
+func TestScopeIndexedThreadID(t *testing.T) {
+	accountID := "acct-123"
+	legacyID := "thread-legacy"
+	scoped := ScopeIndexedThreadID(accountID, legacyID)
+	if scoped == legacyID {
+		t.Fatalf("expected scoped thread id to differ from legacy id")
+	}
+	if !IsScopedIndexedThreadID(scoped) {
+		t.Fatalf("expected scoped thread id to be recognized")
+	}
+	if got := NormalizeIndexedThreadID(accountID, legacyID); got != scoped {
+		t.Fatalf("normalize mismatch: got %q want %q", got, scoped)
+	}
+	if got := NormalizeIndexedThreadID(accountID, scoped); got != scoped {
+		t.Fatalf("normalize should keep scoped id unchanged")
+	}
+}

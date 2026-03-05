@@ -5,8 +5,8 @@ IFS=$'\n\t'
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 OUT_ENV="$ROOT_DIR/.env"
-DEFAULT_REPO_URL="${MAILCLIENT_REPO_URL:-https://github.com/2high4schooltoday/new-mail-client.git}"
-DEFAULT_REPO_REF="${MAILCLIENT_REPO_REF:-main}"
+DEFAULT_REPO_URL="${DESPATCH_REPO_URL:-https://github.com/2high4schooltoday/despatch.git}"
+DEFAULT_REPO_REF="${DESPATCH_REPO_REF:-main}"
 DEFAULT_CAP_IMAGE="${DESPATCH_CAPTCHA_CAP_IMAGE_DEFAULT:-tiagozip/cap:latest}"
 DEFAULT_CAP_WIDGET_VERSION="${DESPATCH_CAPTCHA_DEFAULT_WIDGET_VERSION:-0.0.6}"
 DEFAULT_CAP_WASM_VERSION="${DESPATCH_CAPTCHA_DEFAULT_WASM_VERSION:-0.0.6}"
@@ -462,7 +462,7 @@ ensure_repo_checkout_or_bootstrap() {
 
   repo_url="$(prompt_input "GitHub repository URL" "$DEFAULT_REPO_URL")"
   repo_ref="$(prompt_input "Git ref (branch/tag/commit)" "$DEFAULT_REPO_REF")"
-  checkout_base="$(prompt_input "Installer workspace directory" "/opt/mailclient-installer")"
+  checkout_base="$(prompt_input "Installer workspace directory" "/opt/despatch-installer")"
   checkout_dir="${checkout_base%/}/src"
 
   if ! have_cmd git; then
@@ -499,8 +499,8 @@ ensure_repo_checkout_or_bootstrap() {
     relaunch_env+=("${env_key}=${env_val}")
   done < <(env | grep -E '^DESPATCH_[A-Za-z0-9_]*=' || true)
   relaunch_env+=("DESPATCH_BOOTSTRAPPED=1")
-  relaunch_env+=("MAILCLIENT_REPO_URL=${repo_url}")
-  relaunch_env+=("MAILCLIENT_REPO_REF=${repo_ref}")
+  relaunch_env+=("DESPATCH_REPO_URL=${repo_url}")
+  relaunch_env+=("DESPATCH_REPO_REF=${repo_ref}")
   run_as_root env "${relaunch_env[@]}" bash "$target"
   exit 0
 }
@@ -1300,9 +1300,9 @@ fallback_to_direct_mode() {
   set_env_var "$OUT_ENV" "PROXY_SERVER_NAME" ""
   set_env_var "$OUT_ENV" "PROXY_TLS" "0"
 
-  "${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/mailclient/.env || return 1
-  "${PREFIX[@]}" chown mailclient:mailclient /opt/mailclient/.env || return 1
-  "${PREFIX[@]}" systemctl restart mailclient || return 1
+  "${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/despatch/.env || return 1
+  "${PREFIX[@]}" chown root:despatch /opt/despatch/.env || return 1
+  "${PREFIX[@]}" systemctl restart despatch || return 1
 
   run_nonfatal_step "firewall reconfiguration (direct mode)" apply_ufw_rules "direct"
   return 0
@@ -1514,8 +1514,8 @@ EOF
 
 setup_nginx_proxy() {
   local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5" cap_upstream="${6:-}"
-  local conf="/etc/nginx/sites-available/mailclient.conf"
-  local enabled="/etc/nginx/sites-enabled/mailclient.conf"
+  local conf="/etc/nginx/sites-available/despatch.conf"
+  local enabled="/etc/nginx/sites-enabled/despatch.conf"
   local tmp
   if ! have_cmd nginx; then
     err "nginx command not found but nginx proxy setup was requested."
@@ -1566,7 +1566,7 @@ setup_nginx_proxy() {
 
 setup_apache_proxy() {
   local server_name="$1" upstream="$2" tls_enabled="$3" cert_file="$4" key_file="$5" cap_upstream="${6:-}"
-  local conf="/etc/apache2/sites-available/mailclient.conf"
+  local conf="/etc/apache2/sites-available/despatch.conf"
   local tmp
   if ! have_cmd apache2ctl || ! have_cmd a2enmod || ! have_cmd a2ensite; then
     err "apache2 tooling missing (apache2ctl/a2enmod/a2ensite) but apache2 proxy setup was requested."
@@ -1595,12 +1595,12 @@ setup_apache_proxy() {
       return 1
     fi
   fi
-  if ! "${PREFIX[@]}" a2ensite mailclient.conf >/dev/null; then
-    err "Failed enabling apache2 site: mailclient.conf"
+  if ! "${PREFIX[@]}" a2ensite despatch.conf >/dev/null; then
+    err "Failed enabling apache2 site: despatch.conf"
     return 1
   fi
-  if [[ ! -L /etc/apache2/sites-enabled/mailclient.conf && ! -f /etc/apache2/sites-enabled/mailclient.conf ]]; then
-    err "Apache2 site enablement failed: /etc/apache2/sites-enabled/mailclient.conf missing"
+  if [[ ! -L /etc/apache2/sites-enabled/despatch.conf && ! -f /etc/apache2/sites-enabled/despatch.conf ]]; then
+    err "Apache2 site enablement failed: /etc/apache2/sites-enabled/despatch.conf missing"
     return 1
   fi
   if ! "${PREFIX[@]}" apache2ctl configtest; then
@@ -1936,22 +1936,12 @@ if [[ "$SMTP_PORT" == "25" ]]; then
 fi
 SMTP_INSECURE_SKIP_VERIFY="false"
 
-# Loopback TLS commonly presents certificates for FQDN, not 127.0.0.1.
-# To avoid false verification failures for local Dovecot/Postfix, default to
-# skipping TLS hostname verification on loopback mail connections.
-if [[ "$IMAP_TLS" == "true" || "$IMAP_STARTTLS" == "true" ]]; then
-  IMAP_INSECURE_SKIP_VERIFY="true"
-fi
-if [[ "$SMTP_TLS" == "true" || "$SMTP_STARTTLS" == "true" ]]; then
-  SMTP_INSECURE_SKIP_VERIFY="true"
-fi
-
 finish_stage_ok
 begin_stage "env_generation" "Environment Generation" "10"
 SESSION_KEY="$(generate_secret)"
 APP_DB_PATH="./data/app.db"
 if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
-  APP_DB_PATH="/var/lib/mailclient/app.db"
+  APP_DB_PATH="/var/lib/despatch/app.db"
 fi
 
 cp "$ENV_EXAMPLE" "$OUT_ENV"
@@ -1977,6 +1967,7 @@ set_env_var "$OUT_ENV" "IMAP_PORT" "$IMAP_PORT"
 set_env_var "$OUT_ENV" "IMAP_TLS" "$IMAP_TLS"
 set_env_var "$OUT_ENV" "IMAP_STARTTLS" "$IMAP_STARTTLS"
 set_env_var "$OUT_ENV" "IMAP_INSECURE_SKIP_VERIFY" "$IMAP_INSECURE_SKIP_VERIFY"
+set_env_var "$OUT_ENV" "MAIL_ALLOW_INSECURE_SKIP_VERIFY_NON_LOOPBACK" "false"
 set_env_var "$OUT_ENV" "SMTP_HOST" "127.0.0.1"
 set_env_var "$OUT_ENV" "SMTP_PORT" "$SMTP_PORT"
 set_env_var "$OUT_ENV" "SMTP_TLS" "$SMTP_TLS"
@@ -1987,15 +1978,18 @@ set_env_var "$OUT_ENV" "BOOTSTRAP_ADMIN_EMAIL" ""
 set_env_var "$OUT_ENV" "BOOTSTRAP_ADMIN_PASSWORD" ""
 set_env_var "$OUT_ENV" "UPDATE_ENABLED" "true"
 set_env_var "$OUT_ENV" "UPDATE_REPO_OWNER" "2high4schooltoday"
-set_env_var "$OUT_ENV" "UPDATE_REPO_NAME" "new-mail-client"
+set_env_var "$OUT_ENV" "UPDATE_REPO_NAME" "despatch"
 set_env_var "$OUT_ENV" "UPDATE_CHECK_INTERVAL_MIN" "60"
 set_env_var "$OUT_ENV" "UPDATE_HTTP_TIMEOUT_SEC" "10"
 set_env_var "$OUT_ENV" "UPDATE_GITHUB_TOKEN" ""
 set_env_var "$OUT_ENV" "UPDATE_BACKUP_KEEP" "3"
-set_env_var "$OUT_ENV" "UPDATE_BASE_DIR" "/var/lib/mailclient/update"
-set_env_var "$OUT_ENV" "UPDATE_INSTALL_DIR" "/opt/mailclient"
-set_env_var "$OUT_ENV" "UPDATE_SERVICE_NAME" "mailclient"
+set_env_var "$OUT_ENV" "UPDATE_BASE_DIR" "/var/lib/despatch/update"
+set_env_var "$OUT_ENV" "UPDATE_INSTALL_DIR" "/opt/despatch"
+set_env_var "$OUT_ENV" "UPDATE_SERVICE_NAME" "despatch"
 set_env_var "$OUT_ENV" "UPDATE_SYSTEMD_UNIT_DIR" "/etc/systemd/system"
+set_env_var "$OUT_ENV" "UPDATE_REQUIRE_SIGNATURE" "true"
+set_env_var "$OUT_ENV" "UPDATE_SIGNATURE_ASSET" "checksums.txt.sig"
+set_env_var "$OUT_ENV" "UPDATE_SIGNING_PUBLIC_KEYS" "1Wq0kJvc+ePQsDTvz+Z/HpMYgISIfEt0eqfJMcLaoyk="
 set_env_var "$OUT_ENV" "CAPTCHA_ENABLED" "$CAPTCHA_ENABLED"
 set_env_var "$OUT_ENV" "CAPTCHA_PROVIDER" "$CAPTCHA_PROVIDER"
 set_env_var "$OUT_ENV" "CAPTCHA_SITE_KEY" "$CAPTCHA_SITE_KEY"
@@ -2024,19 +2018,17 @@ if [[ "$DOVECOT_AUTH_MODE" == "pam" && "$INSTALL_SERVICE" -eq 1 ]]; then
 else
  set_env_var "$OUT_ENV" "PAM_RESET_HELPER_ENABLED" "false"
 fi
-set_env_var "$OUT_ENV" "PAM_RESET_HELPER_SOCKET" "/run/mailclient/pam-reset-helper.sock"
+set_env_var "$OUT_ENV" "PAM_RESET_HELPER_SOCKET" "/run/despatch/pam-reset-helper.sock"
 set_env_var "$OUT_ENV" "PAM_RESET_HELPER_TIMEOUT_SEC" "5"
 set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_UID" "-1"
 set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "-1"
 set_env_var "$OUT_ENV" "MAILSEC_ENABLED" "true"
-set_env_var "$OUT_ENV" "MAILSEC_SOCKET" "/run/mailclient/mailsec.sock"
+set_env_var "$OUT_ENV" "MAILSEC_SOCKET" "/run/despatch/mailsec.sock"
 set_env_var "$OUT_ENV" "MAILSEC_TIMEOUT_MS" "5000"
 
 log "Generated $OUT_ENV"
 log "Detected IMAP 127.0.0.1:$IMAP_PORT and SMTP 127.0.0.1:$SMTP_PORT"
-if [[ "$IMAP_INSECURE_SKIP_VERIFY" == "true" || "$SMTP_INSECURE_SKIP_VERIFY" == "true" ]]; then
-  warn "Loopback TLS verification bypass enabled for IMAP/SMTP to avoid certificate hostname mismatch (127.0.0.1)."
-fi
+log "TLS certificate verification for IMAP/SMTP is enabled by default."
 log "Deployment mode: $DEPLOY_MODE"
 log "Cookie secure mode: $COOKIE_SECURE_MODE"
 if [[ "$DEPLOY_MODE" == "proxy" && "$PROXY_TLS" != "1" ]]; then
@@ -2109,15 +2101,15 @@ if [[ "${EUID:-1}" -ne 0 ]]; then
 fi
 
 begin_stage "build" "Build Binary" "15"
-log "Building mailclient binary for linux/${GOARCH}"
+log "Building despatch binary for linux/${GOARCH}"
 BUILD_VERSION="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || echo dev)"
 BUILD_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-BUILD_REPO="${MAILCLIENT_REPO_URL:-https://github.com/2high4schooltoday/new-mail-client}"
-BUILD_LDFLAGS="-X 'mailclient/internal/version.Version=${BUILD_VERSION}' -X 'mailclient/internal/version.Commit=${BUILD_COMMIT}' -X 'mailclient/internal/version.BuildTime=${BUILD_TIME}' -X 'mailclient/internal/version.SourceRepo=${BUILD_REPO}'"
+BUILD_REPO="${DESPATCH_REPO_URL:-https://github.com/2high4schooltoday/despatch}"
+BUILD_LDFLAGS="-X 'despatch/internal/version.Version=${BUILD_VERSION}' -X 'despatch/internal/version.Commit=${BUILD_COMMIT}' -X 'despatch/internal/version.BuildTime=${BUILD_TIME}' -X 'despatch/internal/version.SourceRepo=${BUILD_REPO}'"
 (
   cd "$ROOT_DIR"
-  GOOS=linux GOARCH="$GOARCH" go build -ldflags "$BUILD_LDFLAGS" -o "$ROOT_DIR/mailclient" ./cmd/server
+  GOOS=linux GOARCH="$GOARCH" go build -ldflags "$BUILD_LDFLAGS" -o "$ROOT_DIR/despatch" ./cmd/server
 )
 case "$GOARCH" in
   amd64|x86_64)
@@ -2135,15 +2127,15 @@ log "Building privileged Rust binaries for ${RUST_TARGET}"
 ensure_rust_toolchain "$RUST_TARGET"
 (
   cd "$ROOT_DIR/rust"
-  MAILCLIENT_BUILD_VERSION="$BUILD_VERSION" \
-  MAILCLIENT_BUILD_COMMIT="$BUILD_COMMIT" \
+  DESPATCH_BUILD_VERSION="$BUILD_VERSION" \
+  DESPATCH_BUILD_COMMIT="$BUILD_COMMIT" \
   cargo build --release --locked --target "$RUST_TARGET" -p pam_reset_helper -p update_worker -p mailsec_service
 ) || (
   warn "Initial Rust privileged binary build failed; refreshing stable toolchain and retrying once."
   ensure_rust_toolchain "$RUST_TARGET"
   cd "$ROOT_DIR/rust"
-  MAILCLIENT_BUILD_VERSION="$BUILD_VERSION" \
-  MAILCLIENT_BUILD_COMMIT="$BUILD_COMMIT" \
+  DESPATCH_BUILD_VERSION="$BUILD_VERSION" \
+  DESPATCH_BUILD_COMMIT="$BUILD_COMMIT" \
   cargo build --release --locked --target "$RUST_TARGET" -p pam_reset_helper -p update_worker -p mailsec_service
 )
 RUST_BIN_DIR="$ROOT_DIR/rust/target/$RUST_TARGET/release"
@@ -2154,51 +2146,59 @@ fi
 finish_stage_ok
 
 begin_stage "filesystem_and_user" "Filesystem and User Setup" "10"
-"${PREFIX[@]}" mkdir -p /opt/mailclient /var/lib/mailclient
-if ! id -u mailclient >/dev/null 2>&1; then
-  "${PREFIX[@]}" useradd --system --home /var/lib/mailclient --shell /usr/sbin/nologin mailclient
+"${PREFIX[@]}" mkdir -p /opt/despatch /var/lib/despatch
+if ! id -u despatch >/dev/null 2>&1; then
+  "${PREFIX[@]}" useradd --system --home /var/lib/despatch --shell /usr/sbin/nologin despatch
 fi
-MAILCLIENT_UID="$(id -u mailclient)"
-MAILCLIENT_GID="$(id -g mailclient)"
-set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_UID" "$MAILCLIENT_UID"
-set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "$MAILCLIENT_GID"
-"${PREFIX[@]}" mkdir -p /var/lib/mailclient/update/request /var/lib/mailclient/update/status /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
+DESPATCH_UID="$(id -u despatch)"
+DESPATCH_GID="$(id -g despatch)"
+set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_UID" "$DESPATCH_UID"
+set_env_var "$OUT_ENV" "PAM_RESET_ALLOWED_GID" "$DESPATCH_GID"
+"${PREFIX[@]}" mkdir -p /var/lib/despatch/update/request /var/lib/despatch/update/status /var/lib/despatch/update/lock /var/lib/despatch/update/backups /var/lib/despatch/update/work
 
-"${PREFIX[@]}" install -m 0755 "$ROOT_DIR/mailclient" /opt/mailclient/mailclient
-"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/pam_reset_helper" /opt/mailclient/mailclient-pam-reset-helper
-"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/update_worker" /opt/mailclient/mailclient-update-worker
-"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/mailsec_service" /opt/mailclient/mailclient-mailsec-service
-"${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/mailclient/.env
-"${PREFIX[@]}" rm -rf /opt/mailclient/web /opt/mailclient/migrations
-"${PREFIX[@]}" cp -R "$ROOT_DIR/web" /opt/mailclient/web
-"${PREFIX[@]}" cp -R "$ROOT_DIR/migrations" /opt/mailclient/migrations
-"${PREFIX[@]}" mkdir -p /opt/mailclient/deploy/fallback
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/fallback/mailclient-pam-reset-helper-go.override.conf" /opt/mailclient/deploy/fallback/mailclient-pam-reset-helper-go.override.conf
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/fallback/mailclient-updater-go.override.conf" /opt/mailclient/deploy/fallback/mailclient-updater-go.override.conf
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient.service" /etc/systemd/system/mailclient.service
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.service" /etc/systemd/system/mailclient-updater.service
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-updater.path" /etc/systemd/system/mailclient-updater.path
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-pam-reset-helper.service" /etc/systemd/system/mailclient-pam-reset-helper.service
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-pam-reset-helper.socket" /etc/systemd/system/mailclient-pam-reset-helper.socket
-"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/mailclient-mailsec.service" /etc/systemd/system/mailclient-mailsec.service
-"${PREFIX[@]}" chown -R mailclient:mailclient /opt/mailclient /var/lib/mailclient
-"${PREFIX[@]}" chown root:root /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker /opt/mailclient/mailclient-mailsec-service
-"${PREFIX[@]}" chmod 0755 /opt/mailclient/mailclient /opt/mailclient/mailclient-pam-reset-helper /opt/mailclient/mailclient-update-worker /opt/mailclient/mailclient-mailsec-service
-"${PREFIX[@]}" chown root:root /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
-"${PREFIX[@]}" chmod 0750 /var/lib/mailclient/update/lock /var/lib/mailclient/update/backups /var/lib/mailclient/update/work
-"${PREFIX[@]}" chmod 0770 /var/lib/mailclient/update/request /var/lib/mailclient/update/status
-"${PREFIX[@]}" chown -R mailclient:mailclient /var/lib/mailclient/update/request /var/lib/mailclient/update/status
-"${PREFIX[@]}" find /var/lib/mailclient/update/request /var/lib/mailclient/update/status -type f -exec chmod 0660 {} \; || true
+"${PREFIX[@]}" install -m 0755 "$ROOT_DIR/despatch" /opt/despatch/despatch
+"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/pam_reset_helper" /opt/despatch/despatch-pam-reset-helper
+"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/update_worker" /opt/despatch/despatch-update-worker
+"${PREFIX[@]}" install -m 0755 "$RUST_BIN_DIR/mailsec_service" /opt/despatch/despatch-mailsec-service
+"${PREFIX[@]}" install -m 0640 "$OUT_ENV" /opt/despatch/.env
+"${PREFIX[@]}" rm -rf /opt/despatch/web /opt/despatch/migrations
+"${PREFIX[@]}" cp -R "$ROOT_DIR/web" /opt/despatch/web
+"${PREFIX[@]}" cp -R "$ROOT_DIR/migrations" /opt/despatch/migrations
+"${PREFIX[@]}" mkdir -p /opt/despatch/deploy/fallback
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/fallback/despatch-pam-reset-helper-go.override.conf" /opt/despatch/deploy/fallback/despatch-pam-reset-helper-go.override.conf
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/fallback/despatch-updater-go.override.conf" /opt/despatch/deploy/fallback/despatch-updater-go.override.conf
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/despatch.service" /etc/systemd/system/despatch.service
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/despatch-updater.service" /etc/systemd/system/despatch-updater.service
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/despatch-updater.path" /etc/systemd/system/despatch-updater.path
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/despatch-pam-reset-helper.service" /etc/systemd/system/despatch-pam-reset-helper.service
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/despatch-pam-reset-helper.socket" /etc/systemd/system/despatch-pam-reset-helper.socket
+"${PREFIX[@]}" install -m 0644 "$ROOT_DIR/deploy/despatch-mailsec.service" /etc/systemd/system/despatch-mailsec.service
+"${PREFIX[@]}" chown root:root /opt/despatch
+"${PREFIX[@]}" chmod 0755 /opt/despatch
+"${PREFIX[@]}" chown root:root /opt/despatch/despatch /opt/despatch/despatch-pam-reset-helper /opt/despatch/despatch-update-worker /opt/despatch/despatch-mailsec-service /opt/despatch/web /opt/despatch/migrations /opt/despatch/deploy
+"${PREFIX[@]}" chmod 0755 /opt/despatch/despatch /opt/despatch/despatch-pam-reset-helper /opt/despatch/despatch-update-worker /opt/despatch/despatch-mailsec-service
+"${PREFIX[@]}" chmod -R go-w /opt/despatch/web /opt/despatch/migrations /opt/despatch/deploy
+"${PREFIX[@]}" chown root:despatch /opt/despatch/.env
+"${PREFIX[@]}" chmod 0640 /opt/despatch/.env
+"${PREFIX[@]}" chown despatch:despatch /var/lib/despatch
+"${PREFIX[@]}" chmod 0750 /var/lib/despatch
+"${PREFIX[@]}" chown root:root /var/lib/despatch/update
+"${PREFIX[@]}" chmod 0750 /var/lib/despatch/update
+"${PREFIX[@]}" chown root:root /var/lib/despatch/update/lock /var/lib/despatch/update/backups /var/lib/despatch/update/work
+"${PREFIX[@]}" chmod 0750 /var/lib/despatch/update/lock /var/lib/despatch/update/backups /var/lib/despatch/update/work
+"${PREFIX[@]}" chown root:despatch /var/lib/despatch/update/request /var/lib/despatch/update/status
+"${PREFIX[@]}" chmod 0770 /var/lib/despatch/update/request /var/lib/despatch/update/status
+"${PREFIX[@]}" find /var/lib/despatch/update/request /var/lib/despatch/update/status -type f -exec chown root:despatch {} \; -exec chmod 0660 {} \; || true
 finish_stage_ok
 
 begin_stage "service_install_start" "Service Install and Start" "10"
 "${PREFIX[@]}" systemctl daemon-reload
-"${PREFIX[@]}" systemctl enable --now mailclient
-"${PREFIX[@]}" systemctl enable --now mailclient-mailsec
-"${PREFIX[@]}" systemctl enable --now mailclient-updater.path
-"${PREFIX[@]}" systemctl enable --now mailclient-pam-reset-helper.socket
+"${PREFIX[@]}" systemctl enable --now despatch
+"${PREFIX[@]}" systemctl enable --now despatch-mailsec
+"${PREFIX[@]}" systemctl enable --now despatch-updater.path
+"${PREFIX[@]}" systemctl enable --now despatch-pam-reset-helper.socket
 
-log "Service installed and started: mailclient"
+log "Service installed and started: despatch"
 finish_stage_ok
 
 begin_stage "firewall" "Firewall Configuration" "5"
@@ -2217,15 +2217,15 @@ if [[ "$PROXY_SETUP" -eq 1 ]]; then
     if configure_selected_proxy "$PROXY_SERVER" "$PROXY_SERVER_NAME" "$APP_UPSTREAM" "$PROXY_TLS" "$PROXY_CERT" "$PROXY_KEY" "$CAPTCHA_CAP_PROXY_UPSTREAM"; then
       log "Reverse proxy configured: ${PROXY_SERVER} (${PROXY_SERVER_NAME})"
       if [[ "$PROXY_SERVER" == "nginx" ]]; then
-        log "Reverse proxy config path: /etc/nginx/sites-available/mailclient.conf"
+        log "Reverse proxy config path: /etc/nginx/sites-available/despatch.conf"
       else
-        log "Reverse proxy config path: /etc/apache2/sites-available/mailclient.conf"
+        log "Reverse proxy config path: /etc/apache2/sites-available/despatch.conf"
       fi
     else
       warn "Reverse proxy configuration failed."
       if ! fallback_to_direct_mode; then
         err "Automatic fallback to direct mode failed."
-        err "Run: systemctl status mailclient --no-pager"
+        err "Run: systemctl status despatch --no-pager"
         exit 1
       fi
     fi
@@ -2239,25 +2239,25 @@ begin_stage "post_checks" "Post-install Checks" "5"
 step "Deployment and cookie policy consistency"
 if ! validate_cookie_policy_tuple "$DEPLOY_MODE" "$PROXY_TLS" "$COOKIE_SECURE_MODE" "$LISTEN_ADDR"; then
   err "Generated deployment tuple is inconsistent."
-  err "Run: grep -E '^(DEPLOY_MODE|LISTEN_ADDR|COOKIE_SECURE_MODE|COOKIE_SECURE)=' /opt/mailclient/.env"
+  err "Run: grep -E '^(DEPLOY_MODE|LISTEN_ADDR|COOKIE_SECURE_MODE|COOKIE_SECURE)=' /opt/despatch/.env"
   exit 1
 fi
-if ! wait_for_condition "mailclient service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient; then
-  err "mailclient service is not active after install."
-  err "Run: systemctl status mailclient --no-pager"
+if ! wait_for_condition "despatch service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet despatch; then
+  err "despatch service is not active after install."
+  err "Run: systemctl status despatch --no-pager"
   exit 1
 fi
-if ! wait_for_condition "mailclient mailsec service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet mailclient-mailsec; then
-  err "mailclient-mailsec service is not active after install."
-  err "Run: systemctl status mailclient-mailsec --no-pager"
+if ! wait_for_condition "despatch mailsec service state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet despatch-mailsec; then
+  err "despatch-mailsec service is not active after install."
+  err "Run: systemctl status despatch-mailsec --no-pager"
   exit 1
 fi
 
 step "Local service health verification"
 if ! wait_for_condition "local app health endpoint" 20 1 verify_direct_access "$LISTEN_ADDR"; then
   err "Local app health check failed on ${LISTEN_ADDR}."
-  err "Run: /opt/mailclient/mailclient (or check /opt/mailclient/.env and service logs)"
-  err "Run: journalctl -u mailclient -n 100 --no-pager"
+  err "Run: /opt/despatch/despatch (or check /opt/despatch/.env and service logs)"
+  err "Run: journalctl -u despatch -n 100 --no-pager"
   exit 1
 fi
 
@@ -2265,7 +2265,7 @@ step "Auth path sanity verification"
 LOCAL_BASE_URL="$(local_base_url_from_listen "$LISTEN_ADDR")"
 if ! curl -fsS --max-time 8 "${LOCAL_BASE_URL}/api/v1/setup/status" >/dev/null; then
   err "Auth/setup API sanity check failed on local endpoint."
-  err "Run: journalctl -u mailclient -n 100 --no-pager"
+  err "Run: journalctl -u despatch -n 100 --no-pager"
   exit 1
 fi
 
@@ -2296,7 +2296,7 @@ if [[ "$CAPTCHA_ENABLED" == "true" && "$CAPTCHA_PROVIDER" == "cap" ]]; then
   if ! wait_for_condition "CAP public config endpoint" 20 1 verify_cap_public_config "$LOCAL_BASE_URL" "$CAPTCHA_SITE_KEY"; then
     err "Public captcha config endpoint does not report expected CAP settings."
     err "Run: curl -s ${LOCAL_BASE_URL}/api/v1/public/captcha/config"
-    err "Check /opt/mailclient/.env CAPTCHA_* values and restart mailclient."
+    err "Check /opt/despatch/.env CAPTCHA_* values and restart despatch."
     exit 1
   fi
 
@@ -2319,7 +2319,7 @@ if [[ "$DEPLOY_MODE" == "proxy" ]]; then
     if fallback_to_direct_mode; then
       if ! wait_for_condition "local app health endpoint after fallback" 20 1 verify_direct_access "$LISTEN_ADDR"; then
         err "Fallback succeeded but app health still failing."
-        err "Run: journalctl -u mailclient -n 100 --no-pager"
+        err "Run: journalctl -u despatch -n 100 --no-pager"
         exit 1
       fi
       warn "Proxy path failed; installer completed in direct mode."
@@ -2330,8 +2330,8 @@ if [[ "$DEPLOY_MODE" == "proxy" ]]; then
       else
         err "Run: apache2ctl configtest && systemctl status apache2 --no-pager"
       fi
-      err "Run: systemctl status mailclient --no-pager"
-      err "Run: journalctl -u mailclient -n 100 --no-pager"
+      err "Run: systemctl status despatch --no-pager"
+      err "Run: journalctl -u despatch -n 100 --no-pager"
       err "Run: bash $ROOT_DIR/scripts/diagnose_access.sh"
       exit 1
     fi

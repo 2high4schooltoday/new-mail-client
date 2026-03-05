@@ -5,7 +5,14 @@ import (
 	"testing"
 )
 
+func setValidEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("UPDATE_SIGNING_PUBLIC_KEYS", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+}
+
 func TestLoadRejectsDefaultSessionKey(t *testing.T) {
+	t.Setenv("UPDATE_SIGNING_PUBLIC_KEYS", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	t.Setenv("SESSION_ENCRYPT_KEY", "CHANGE_ME_PRODUCTION_SESSION_KEY")
 	_, err := Load()
 	if err == nil {
@@ -14,7 +21,7 @@ func TestLoadRejectsDefaultSessionKey(t *testing.T) {
 }
 
 func TestLoadPasswordBounds(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("PASSWORD_MIN_LENGTH", "16")
 	t.Setenv("PASSWORD_MAX_LENGTH", "12")
 	_, err := Load()
@@ -24,7 +31,7 @@ func TestLoadPasswordBounds(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidDovecotAuthMode(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("DOVECOT_AUTH_MODE", "ldap")
 	_, err := Load()
 	if err == nil {
@@ -33,7 +40,7 @@ func TestLoadRejectsInvalidDovecotAuthMode(t *testing.T) {
 }
 
 func TestLoadCookieSecureModeLegacyFallback(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("COOKIE_SECURE_MODE", "")
 	t.Setenv("COOKIE_SECURE", "true")
 	cfg, err := Load()
@@ -55,7 +62,7 @@ func TestLoadCookieSecureModeLegacyFallback(t *testing.T) {
 }
 
 func TestResolveCookieSecureAuto(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("COOKIE_SECURE_MODE", "auto")
 	t.Setenv("TRUST_PROXY", "true")
 	cfg, err := Load()
@@ -80,7 +87,7 @@ func TestResolveCookieSecureAuto(t *testing.T) {
 }
 
 func TestLoadUpdateDefaults(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -97,15 +104,34 @@ func TestLoadUpdateDefaults(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidUpdateConfig(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("UPDATE_CHECK_INTERVAL_MIN", "0")
 	if _, err := Load(); err == nil {
 		t.Fatalf("expected load failure for UPDATE_CHECK_INTERVAL_MIN=0")
 	}
 }
 
-func TestLoadCaptchaCapDerivesVerifyURLFromAbsoluteWidgetURL(t *testing.T) {
+func TestLoadRequiresSigningKeysWhenUpdateSignatureEnforced(t *testing.T) {
 	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	t.Setenv("UPDATE_REQUIRE_SIGNATURE", "true")
+	t.Setenv("UPDATE_SIGNING_PUBLIC_KEYS", "")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected load failure when update signature keys are missing")
+	}
+}
+
+func TestLoadRejectsRemoteInsecureSkipVerifyWithoutOverride(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("IMAP_HOST", "mail.example.com")
+	t.Setenv("IMAP_INSECURE_SKIP_VERIFY", "true")
+	t.Setenv("MAIL_ALLOW_INSECURE_SKIP_VERIFY_NON_LOOPBACK", "false")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected load failure for non-loopback insecure skip verify")
+	}
+}
+
+func TestLoadCaptchaCapDerivesVerifyURLFromAbsoluteWidgetURL(t *testing.T) {
+	setValidEnv(t)
 	t.Setenv("CAPTCHA_ENABLED", "true")
 	t.Setenv("CAPTCHA_PROVIDER", "cap")
 	t.Setenv("CAPTCHA_SITE_KEY", "cap-site-key-123")
@@ -126,7 +152,7 @@ func TestLoadCaptchaCapDerivesVerifyURLFromAbsoluteWidgetURL(t *testing.T) {
 }
 
 func TestLoadCaptchaCapRequiresSiteKey(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("CAPTCHA_ENABLED", "true")
 	t.Setenv("CAPTCHA_PROVIDER", "cap")
 	t.Setenv("CAPTCHA_SITE_KEY", "")
@@ -138,7 +164,7 @@ func TestLoadCaptchaCapRequiresSiteKey(t *testing.T) {
 }
 
 func TestLoadCaptchaCapRequiresVerifyURLWhenWidgetURLIsRelative(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("CAPTCHA_ENABLED", "true")
 	t.Setenv("CAPTCHA_PROVIDER", "cap")
 	t.Setenv("CAPTCHA_SITE_KEY", "cap-site-key-123")
@@ -152,7 +178,7 @@ func TestLoadCaptchaCapRequiresVerifyURLWhenWidgetURLIsRelative(t *testing.T) {
 }
 
 func TestLoadCaptchaCapAcceptsExplicitVerifyURLForRelativeWidgetURL(t *testing.T) {
-	t.Setenv("SESSION_ENCRYPT_KEY", "this_is_a_valid_long_session_encrypt_key_123456")
+	setValidEnv(t)
 	t.Setenv("CAPTCHA_ENABLED", "true")
 	t.Setenv("CAPTCHA_PROVIDER", "cap")
 	t.Setenv("CAPTCHA_SITE_KEY", "cap-site-key-123")

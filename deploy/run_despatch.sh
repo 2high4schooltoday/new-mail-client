@@ -11,4 +11,4 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-exec "$DIR/mailclient"
+exec "$DIR/despatch"

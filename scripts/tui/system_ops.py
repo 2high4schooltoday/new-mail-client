@@ -12,7 +12,7 @@ from typing import Callable
 
 from .models import AppPaths
 
-REMOTE_SCRIPT_BASE = "https://raw.githubusercontent.com/2high4schooltoday/new-mail-client/main/scripts"
+REMOTE_SCRIPT_BASE = "https://raw.githubusercontent.com/2high4schooltoday/despatch/main/scripts"
 
 
 class CancelToken:
@@ -51,7 +51,7 @@ def detect_paths() -> AppPaths:
         )
 
     # 3) Standalone mode: cache scripts from GitHub raw.
-    cache_scripts = Path.home() / ".cache" / "mailclient-tui" / "scripts"
+    cache_scripts = Path.home() / ".cache" / "despatch-tui" / "scripts"
     cache_scripts.mkdir(parents=True, exist_ok=True)
     for filename in ("auto_install.sh", "uninstall.sh", "diagnose_access.sh"):
         target = cache_scripts / filename
@@ -78,7 +78,7 @@ def detect_service_state() -> str:
         return "n/a"
     try:
         proc = subprocess.run(
-            ["systemctl", "is-active", "mailclient"],
+            ["systemctl", "is-active", "despatch"],
             capture_output=True,
             text=True,
             timeout=1.5,
