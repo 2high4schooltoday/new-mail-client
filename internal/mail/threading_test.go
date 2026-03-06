@@ -1,6 +1,9 @@
 package mail
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeThreadSubject(t *testing.T) {
 	got := NormalizeThreadSubject("  Re: FWD: fw:  Status Update  ")
@@ -10,7 +13,7 @@ func TestNormalizeThreadSubject(t *testing.T) {
 	}
 }
 
-func TestDeriveThreadIDStableAndMailboxScoped(t *testing.T) {
+func TestDeriveThreadIDStableAndConversationScoped(t *testing.T) {
 	a := DeriveThreadID("INBOX", "Re: Weekly Sync", "alice@example.com")
 	b := DeriveThreadID("INBOX", "weekly sync", "alice@example.com")
 	if a != b {
@@ -18,8 +21,8 @@ func TestDeriveThreadIDStableAndMailboxScoped(t *testing.T) {
 	}
 
 	otherMailbox := DeriveThreadID("Archive", "weekly sync", "alice@example.com")
-	if otherMailbox == a {
-		t.Fatalf("expected different thread id across mailboxes, got same %q", a)
+	if otherMailbox != a {
+		t.Fatalf("expected same thread id across mailboxes, got %q and %q", a, otherMailbox)
 	}
 }
 
@@ -28,5 +31,63 @@ func TestBuildPreviewFromBodySample(t *testing.T) {
 	got := BuildPreviewFromBodySample(sample, 20)
 	if got != "Hello team This is a" {
 		t.Fatalf("unexpected preview: %q", got)
+	}
+}
+
+func TestBuildPreviewFromMIMERawSamplePrefersPlainPart(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"From: Alice <alice@example.com>",
+		"To: Bob <bob@example.com>",
+		"Subject: Preview Test",
+		"MIME-Version: 1.0",
+		"Content-Type: multipart/alternative; boundary=\"alt\"",
+		"",
+		"--alt",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"Plain text preview wins.",
+		"--alt",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<p>HTML fallback</p>",
+		"--alt--",
+	}, "\r\n"))
+
+	got := BuildPreviewFromMIMERawSample(raw, 120)
+	if got != "Plain text preview wins." {
+		t.Fatalf("unexpected mime preview: %q", got)
+	}
+}
+
+func TestBuildPreviewFromMIMERawSampleFallsBackToHTML(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"From: Alice <alice@example.com>",
+		"To: Bob <bob@example.com>",
+		"Subject: HTML only",
+		"MIME-Version: 1.0",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<p><strong>Hello</strong> from HTML.</p>",
+	}, "\r\n"))
+
+	got := BuildPreviewFromMIMERawSample(raw, 120)
+	if got != "Hello from HTML." {
+		t.Fatalf("unexpected html fallback preview: %q", got)
+	}
+}
+
+func TestBuildPreviewFromMIMERawSampleFallbackOnLongHeaders(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"X-Noise: " + strings.Repeat("abcdef", 80),
+		"From: Alice <alice@example.com>",
+		"To: Bob <bob@example.com>",
+		"Subject: Header heavy",
+		"",
+		"Body still has useful preview text after long headers.",
+	}, "\r\n"))
+
+	got := BuildPreviewFromMIMERawSample(raw, 120)
+	if got == "" || strings.Contains(strings.ToLower(got), "x-noise") {
+		t.Fatalf("expected body-focused preview, got %q", got)
 	}
 }

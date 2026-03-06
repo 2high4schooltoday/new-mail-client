@@ -4891,8 +4891,8 @@ async function loadMailboxes() {
     }
   };
 
-  appendSection("SYSTEM", system);
-  appendSection("FOLDERS", folders);
+  appendSection("System", system);
+  appendSection("Folders", folders);
   if (system.length === 0 && folders.length === 0) {
     const empty = document.createElement("li");
     empty.className = "message-empty";
@@ -4927,11 +4927,14 @@ function renderMessages(items) {
     btn.setAttribute("role", "option");
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
     btn.tabIndex = -1;
-    const previewText = String(m.preview || "").trim() || "(no preview)";
+    const sender = formatSenderDisplayName(m.from);
+    const previewText = String(m.preview || "").trim();
+    const previewMarkup = previewText ? escapeHtml(previewText) : "&nbsp;";
+    const previewClass = previewText ? "message-preview" : "message-preview message-preview--empty";
     btn.innerHTML = `<span class="message-mark" aria-hidden="true"></span>
-      <span class="message-from">${escapeHtml(m.from || "(unknown sender)")}</span>
+      <span class="message-from">${escapeHtml(sender)}</span>
       <span class="message-subject">${escapeHtml(m.subject || "(no subject)")}</span>
-      <span class="message-preview">${escapeHtml(previewText)}</span>
+      <span class="${previewClass}">${previewMarkup}</span>
       <span class="message-date">${escapeHtml(formatListDate(m.date))}</span>`;
     btn.onclick = () => openMessage(m.id, m);
     li.appendChild(btn);
@@ -4975,6 +4978,11 @@ function messageHasHTML(message) {
 
 function buildReaderHTMLSrcdoc(rawHTML) {
   const bodyHTML = String(rawHTML || "");
+  const rootStyles = getComputedStyle(document.documentElement);
+  const fg = rootStyles.getPropertyValue("--fg-0").trim() || "#e8eef8";
+  const bg = rootStyles.getPropertyValue("--bg-0").trim() || "#111827";
+  const link = rootStyles.getPropertyValue("--line-0").trim() || fg;
+  const quote = rootStyles.getPropertyValue("--line-2").trim() || "#606878";
   const csp = [
     "default-src 'none'",
     "img-src 'self' data: blob:",
@@ -4989,12 +4997,12 @@ function buildReaderHTMLSrcdoc(rawHTML) {
     "form-action 'none'",
   ].join("; ");
   const baseStyle = [
-    "html,body{margin:0;padding:0;background:transparent;color:inherit;}",
+    `html,body{margin:0;padding:0;background:${bg};color:${fg};}`,
     "body{font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:12px;word-break:break-word;}",
     "img{max-width:100%;height:auto;}",
-    "blockquote{margin:0 0 0 8px;padding-left:10px;border-left:1px solid rgba(128,128,128,.5);}",
+    `blockquote{margin:0 0 0 8px;padding-left:10px;border-left:1px solid ${quote};}`,
     "pre{white-space:pre-wrap;word-break:break-word;}",
-    "a{color:inherit;text-decoration:underline;}",
+    `a{color:${link};text-decoration:underline;}`,
   ].join("");
   return `<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"${csp}\"><style>${baseStyle}</style></head><body>${bodyHTML}</body></html>`;
 }
@@ -5039,7 +5047,7 @@ function renderReaderBody(message = state.selectedMessage) {
   if (el.bodyHTMLFrame) el.bodyHTMLFrame.srcdoc = "";
   if (el.bodyPlain) {
     el.bodyPlain.classList.remove("hidden");
-    el.bodyPlain.textContent = String(message.body || "(empty)");
+    el.bodyPlain.textContent = formatReaderPlainBody(String(message.body || "(empty)"));
   }
 }
 
@@ -5067,8 +5075,15 @@ function renderThreadContext() {
   if (!el.threadPosition || !el.btnThreadPrev || !el.btnThreadNext) return;
   const thread = state.thread || { id: "", items: [], index: -1, truncated: false };
   const hasThread = !!thread.id && Array.isArray(thread.items) && thread.items.length > 0 && thread.index >= 0;
+  const hasSelection = !!state.selectedMessage;
   if (!hasThread) {
-    el.threadPosition.textContent = "No thread context.";
+    el.threadPosition.textContent = hasSelection ? "Conversation: 1 message" : "Conversation: -";
+    el.btnThreadPrev.disabled = true;
+    el.btnThreadNext.disabled = true;
+    return;
+  }
+  if (thread.items.length <= 1) {
+    el.threadPosition.textContent = "Conversation: 1 message";
     el.btnThreadPrev.disabled = true;
     el.btnThreadNext.disabled = true;
     return;
@@ -5079,15 +5094,16 @@ function renderThreadContext() {
   el.btnThreadNext.disabled = thread.index >= thread.items.length - 1;
 }
 
-async function loadThreadContext(summary, messageID) {
+async function loadThreadContext(summary, messageID, mailboxHint = "") {
   const threadID = String(summary?.thread_id || "").trim();
   if (!threadID) {
     state.thread = { id: "", items: [], index: -1, truncated: false };
     renderThreadContext();
     return;
   }
+  const baseMailbox = String(mailboxHint || summary?.mailbox || state.mailbox || "INBOX").trim() || "INBOX";
   try {
-    const payload = await api(`/api/v1/threads/${encodeURIComponent(threadID)}/messages?mailbox=${encodeURIComponent(state.mailbox)}&page=1&page_size=100`, { logErrors: false });
+    const payload = await api(`/api/v1/threads/${encodeURIComponent(threadID)}/messages?mailbox=${encodeURIComponent(baseMailbox)}&scope=conversation&page=1&page_size=100`, { logErrors: false });
     const items = Array.isArray(payload?.items) ? [...payload.items] : [];
     if (!items.some((it) => String(it?.id || "") === String(messageID || "")) && summary?.id && String(summary.id) === String(messageID || "")) {
       items.push(summary);
@@ -5136,6 +5152,58 @@ function extractPrimaryEmailAddress(raw) {
     return direct[0].trim().toLowerCase();
   }
   return "";
+}
+
+function formatSenderDisplayName(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "(unknown sender)";
+  const named = value.match(/^"?([^"<]+?)"?\s*<[^>]+>$/);
+  if (named && named[1] && named[1].trim() !== "") {
+    return named[1].trim();
+  }
+  const addr = value.match(/<([^>]+)>/);
+  if (addr && validEmail(addr[1])) {
+    return sanitizeSenderFallback(addr[1]);
+  }
+  if (validEmail(value)) {
+    return sanitizeSenderFallback(value);
+  }
+  return value;
+}
+
+function sanitizeSenderFallback(emailLike) {
+  const cleaned = String(emailLike || "").trim().toLowerCase();
+  if (!validEmail(cleaned)) return cleaned || "(unknown sender)";
+  const [local] = cleaned.split("@");
+  if (!local) return cleaned;
+  return local.replace(/[._-]+/g, " ").trim() || cleaned;
+}
+
+function formatReaderPlainBody(raw) {
+  const text = String(raw || "");
+  if (text === "") return "";
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  let inForwardHeader = false;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (/^>\s*(begin\s+forwarded\s+message:?|forwarded message:?)$/i.test(trimmed)) {
+      out.push("──────── Forwarded message ────────");
+      inForwardHeader = true;
+      continue;
+    }
+    if (inForwardHeader) {
+      if (trimmed === "") {
+        out.push("");
+        inForwardHeader = false;
+        continue;
+      }
+      out.push(line.replace(/^\s*>\s?/, ""));
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
 }
 
 function withPrefixSubject(prefix, value) {
@@ -5246,7 +5314,8 @@ async function openMessage(id, summary = null) {
     link.target = "_blank";
     el.attachments.appendChild(link);
   }
-  await loadThreadContext(knownSummary, m.id);
+  const threadMailbox = String(knownSummary?.mailbox || m.mailbox || state.mailbox || "INBOX").trim() || "INBOX";
+  await loadThreadContext(knownSummary, m.id, threadMailbox);
   renderMessages(state.messages);
   syncMessageActiveDescendant();
   setActiveMailPane("reader");

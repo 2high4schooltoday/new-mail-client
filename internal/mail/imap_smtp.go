@@ -30,7 +30,7 @@ const (
 	defaultDialTimeout = 10 * time.Second
 	maxBodyBytes       = 1 << 20  // 1 MiB body preview
 	maxAttachmentBytes = 25 << 20 // 25 MiB per attachment
-	previewSampleBytes = 1024
+	previewSampleBytes = 8192
 )
 
 type IMAPSMTPClient struct {
@@ -116,9 +116,6 @@ func (c *IMAPSMTPClient) ListMessages(ctx context.Context, user, pass, mailbox s
 	previewSection := &imap.BodySectionName{
 		Peek:    true,
 		Partial: []int{0, previewSampleBytes},
-		BodyPartName: imap.BodyPartName{
-			Specifier: imap.TextSpecifier,
-		},
 	}
 	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, imap.FetchInternalDate, previewSection.FetchItem()}
 	messages := make(chan *imap.Message, pageSize)
@@ -237,9 +234,6 @@ func (c *IMAPSMTPClient) Search(ctx context.Context, user, pass, mailbox, query 
 	previewSection := &imap.BodySectionName{
 		Peek:    true,
 		Partial: []int{0, previewSampleBytes},
-		BodyPartName: imap.BodyPartName{
-			Specifier: imap.TextSpecifier,
-		},
 	}
 	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, imap.FetchInternalDate, previewSection.FetchItem()}
 	messages := make(chan *imap.Message, len(selected))
@@ -969,6 +963,7 @@ func envelopeFirstAddress(addrs []*imap.Address) string {
 func buildMessageSummary(msg *imap.Message, mailbox, from, subject string, date time.Time, section *imap.BodySectionName) MessageSummary {
 	if msg == nil {
 		return MessageSummary{
+			Mailbox:  mailbox,
 			From:     from,
 			Subject:  subject,
 			Date:     date,
@@ -980,12 +975,13 @@ func buildMessageSummary(msg *imap.Message, mailbox, from, subject string, date 
 		body := msg.GetBody(section)
 		if body != nil {
 			if raw, err := io.ReadAll(io.LimitReader(body, int64(previewSampleBytes*2))); err == nil {
-				preview = BuildPreviewFromBodySample(string(raw), DefaultPreviewMaxChars)
+				preview = BuildPreviewFromMIMERawSample(raw, DefaultPreviewMaxChars)
 			}
 		}
 	}
 	return MessageSummary{
 		ID:       EncodeMessageID(mailbox, msg.Uid),
+		Mailbox:  mailbox,
 		From:     from,
 		Subject:  subject,
 		Date:     date,

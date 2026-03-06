@@ -115,7 +115,11 @@ fn main() {
 
 fn run() -> Result<(), WorkerError> {
     let cfg = Config::from_env()?;
+    let req_path = request_path(&cfg);
     if !cfg.update_enabled {
+        // Prevent a stale request file from repeatedly retriggering the path unit
+        // when updates are intentionally disabled.
+        let _ = fs::remove_file(&req_path);
         return Ok(());
     }
 
@@ -141,10 +145,13 @@ fn run() -> Result<(), WorkerError> {
     drop(lock_file);
     let _lock_guard = PathCleanup::new(lock_path);
 
-    let req_path = request_path(&cfg);
     let mut req: ApplyRequest = match read_json_file(&req_path) {
         Ok(value) => value,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+            discard_invalid_request_payload(&cfg, &req_path, &err.to_string());
+            return Ok(());
+        }
         Err(err) => return Err(WorkerError::Io(err)),
     };
 
@@ -507,6 +514,24 @@ fn write_status(cfg: &Config, status: &ApplyStatus) -> Result<(), WorkerError> {
     write_json_atomic(&status_path(cfg), &payload, 0o640, 0o770)?;
     ensure_despatch_readable(&status_path(cfg))?;
     Ok(())
+}
+
+fn discard_invalid_request_payload(cfg: &Config, req_path: &Path, detail: &str) {
+    let now = now_rfc3339();
+    let status = ApplyStatus {
+        state: APPLY_STATE_FAILED.to_string(),
+        request_id: format!("invalid-request-{}", Utc::now().timestamp()),
+        requested_at: now.clone(),
+        started_at: now.clone(),
+        finished_at: now,
+        target_version: String::new(),
+        from_version: current_version(),
+        to_version: String::new(),
+        rolled_back: false,
+        error: format!("invalid updater request payload; discarded ({detail})"),
+    };
+    let _ = write_status(cfg, &status);
+    let _ = fs::remove_file(req_path);
 }
 
 fn ensure_despatch_readable(path: &Path) -> Result<(), WorkerError> {
@@ -1564,6 +1589,26 @@ mod tests {
         assert_eq!(status_mode, 0o770);
         assert_eq!(lock_mode, 0o750);
 
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn discard_invalid_request_payload_removes_request_file() {
+        let unique = format!(
+            "despatch-update-worker-invalid-request-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let cfg = test_config(base.clone());
+
+        fs::create_dir_all(request_dir(&cfg)).expect("create request dir");
+        let req_path = request_path(&cfg);
+        fs::write(&req_path, b"{").expect("write malformed request");
+
+        discard_invalid_request_payload(&cfg, &req_path, "unexpected end of json input");
+
+        assert!(!req_path.exists());
         let _ = fs::remove_dir_all(base);
     }
 

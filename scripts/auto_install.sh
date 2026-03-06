@@ -2341,6 +2341,8 @@ finish_stage_ok
 
 begin_stage "service_install_start" "Service Install and Start" "10"
 "${PREFIX[@]}" systemctl daemon-reload
+"${PREFIX[@]}" rm -f /var/lib/despatch/update/request/update-request.json /var/lib/despatch/update/lock/update.lock || true
+"${PREFIX[@]}" systemctl reset-failed despatch-updater.service despatch-updater.path || true
 "${PREFIX[@]}" systemctl enable --now despatch
 "${PREFIX[@]}" systemctl enable --now despatch-mailsec
 "${PREFIX[@]}" systemctl enable --now despatch-updater.path
@@ -2403,10 +2405,15 @@ fi
 
 step "Updater runtime readiness verification"
 if ! wait_for_condition "despatch updater path state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet despatch-updater.path; then
-  err "despatch-updater.path is not active after install."
-  err "Run: systemctl status despatch-updater.path --no-pager"
-  err "Run: systemctl status despatch-updater.service --no-pager"
-  exit 1
+  warn "despatch-updater.path is not active after initial start; attempting one-time recovery."
+  "${PREFIX[@]}" systemctl reset-failed despatch-updater.service despatch-updater.path || true
+  "${PREFIX[@]}" systemctl restart despatch-updater.path || true
+  if ! wait_for_condition "despatch updater path state" 20 1 "${PREFIX[@]}" systemctl is-active --quiet despatch-updater.path; then
+    err "despatch-updater.path is not active after install."
+    err "Run: systemctl status despatch-updater.path --no-pager"
+    err "Run: systemctl status despatch-updater.service --no-pager"
+    exit 1
+  fi
 fi
 if ! run_as_despatch test -w /var/lib/despatch/update/request; then
   err "despatch user cannot write /var/lib/despatch/update/request."

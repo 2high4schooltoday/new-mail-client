@@ -14,6 +14,7 @@ type Mailbox struct {
 
 type MessageSummary struct {
 	ID       string    `json:"id"`
+	Mailbox  string    `json:"mailbox,omitempty"`
 	From     string    `json:"from"`
 	Subject  string    `json:"subject"`
 	Date     time.Time `json:"date"`

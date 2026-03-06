@@ -34,6 +34,7 @@ test('desktop ux pass', async ({ page }) => {
 
   await expect(page.locator('#view-mail')).toBeVisible();
   await expect(page.locator('.mail-commandbar')).toBeVisible();
+  await expect(page.locator('.mail-commandbar-group')).toHaveCount(4);
   await expect(page.locator('#btn-reader-view-html')).toBeVisible();
   await expect(page.locator('#btn-reader-view-plain')).toBeVisible();
   await expect(page.locator('#btn-compose-open')).toBeVisible();
@@ -43,6 +44,10 @@ test('desktop ux pass', async ({ page }) => {
   await expect(page.locator('#btn-mark-seen')).toBeVisible();
   await expect(page.locator('#btn-trash')).toBeVisible();
   await expect(page.locator('#mail-pane-messages .searchbar')).toHaveCount(0);
+  await expect(page.locator('#mail-pane-mailboxes .pane-head h3')).toHaveCount(0);
+  await expect(page.locator('#mail-pane-messages .pane-head h3')).toHaveCount(0);
+  await expect(page.locator('#mail-pane-reader .pane-head h3')).toHaveCount(0);
+  await expect(page.locator('.reader-view-controls .reader-view-label')).toHaveText(/View:/i);
   await expect(page.locator('#mailboxes .mailbox-section-title').first()).toHaveText(/SYSTEM/i);
   await page.screenshot({ path: '/tmp/ux-desktop-mail.png', fullPage: true });
 
@@ -112,10 +117,14 @@ test('desktop ux pass', async ({ page }) => {
   await page.waitForTimeout(250);
 
   const messageRows = page.locator('.message-row-btn');
+  await expect(page.locator('.message-preview', { hasText: '(no preview)' })).toHaveCount(0);
   if (await messageRows.count()) {
+    const fromLabel = (await page.locator('.message-row-btn .message-from').first().textContent() || '').trim();
+    expect(fromLabel).not.toMatch(/<[^>]+>/);
     await messageRows.first().click();
     await page.waitForTimeout(300);
     await expect(page.locator('#thread-position')).toBeVisible();
+    await expect(page.locator('#thread-position')).not.toContainText('No thread context');
     await expect(page.locator('#btn-thread-prev')).toBeVisible();
     await expect(page.locator('#btn-thread-next')).toBeVisible();
     await expect(page.locator('#btn-reader-view-html')).toBeVisible();
@@ -127,6 +136,8 @@ test('desktop ux pass', async ({ page }) => {
       await expect(page.locator('#message-body-html-wrap')).not.toHaveClass(/hidden/);
       const srcdoc = (await page.locator('#message-body-html').getAttribute('srcdoc')) || '';
       expect(srcdoc).toContain('Content-Security-Policy');
+      const htmlBodyColor = await page.frameLocator('#message-body-html').locator('body').evaluate((n) => getComputedStyle(n).color);
+      expect(htmlBodyColor).not.toBe('rgb(0, 0, 0)');
 
       await page.click('#btn-reader-view-plain');
       await expect(page.locator('#btn-reader-view-plain')).toHaveClass(/is-active/);

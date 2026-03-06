@@ -325,12 +325,20 @@
 
         <article class="panel mail-commandbar" aria-label="Mail commands">
           <div class="mail-commandbar-actions">
-            <button id="btn-compose-open" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Compose</button>
-            <button id="btn-reply" class="cmd-btn cmd-btn--dense" type="button">Reply</button>
-            <button id="btn-forward" class="cmd-btn cmd-btn--dense" type="button">Forward</button>
-            <button id="btn-flag" class="cmd-btn cmd-btn--dense" type="button">Flag</button>
-            <button id="btn-mark-seen" class="cmd-btn cmd-btn--dense" type="button">Mark Seen</button>
-            <button id="btn-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Move To Trash</button>
+            <div class="mail-commandbar-group mail-commandbar-group--compose">
+              <button id="btn-compose-open" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Compose</button>
+            </div>
+            <div class="mail-commandbar-group" role="group" aria-label="Reply actions">
+              <button id="btn-reply" class="cmd-btn cmd-btn--dense" type="button">Reply</button>
+              <button id="btn-forward" class="cmd-btn cmd-btn--dense" type="button">Forward</button>
+            </div>
+            <div class="mail-commandbar-group" role="group" aria-label="Message state actions">
+              <button id="btn-flag" class="cmd-btn cmd-btn--dense" type="button">Flag</button>
+              <button id="btn-mark-seen" class="cmd-btn cmd-btn--dense" type="button">Mark Seen</button>
+            </div>
+            <div class="mail-commandbar-group mail-commandbar-group--danger" role="group" aria-label="Destructive actions">
+              <button id="btn-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Move To Trash</button>
+            </div>
           </div>
           <div class="mail-commandbar-search">
             <input id="search-input" type="text" placeholder="Search subject, body, sender">
@@ -340,15 +348,11 @@
 
         <div class="mail-layout">
           <aside id="mail-pane-mailboxes" class="panel mail-pane mail-pane--mailboxes" tabindex="-1">
-            <div class="pane-head">
-              <h3>Mailboxes</h3>
-            </div>
             <ul id="mailboxes" class="list mailbox-list" role="listbox" aria-label="Mailboxes" tabindex="0"></ul>
           </aside>
 
           <section id="mail-pane-messages" class="panel mail-pane mail-pane--messages" tabindex="-1">
             <div class="pane-head">
-              <h3>Messages</h3>
               <button id="mail-back-to-mailboxes" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
             </div>
             <ul id="messages" class="message-list" role="listbox" aria-label="Messages" tabindex="0"></ul>
@@ -356,14 +360,13 @@
 
           <section id="mail-pane-reader" class="panel mail-pane mail-pane--reader" tabindex="-1">
             <div class="pane-head">
-              <h3>Reader</h3>
               <button id="mail-back-to-messages" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
             </div>
             <div class="reader-header">
               <h4 id="message-subject-anchor" class="reader-subject">(no subject)</h4>
               <div id="message-meta" class="meta"></div>
               <div class="thread-context">
-                <span id="thread-position" class="thread-position">No thread context.</span>
+                <span id="thread-position" class="thread-position">Conversation: -</span>
                 <div class="thread-actions">
                   <button id="btn-thread-prev" class="cmd-btn cmd-btn--dense" type="button">Prev</button>
                   <button id="btn-thread-next" class="cmd-btn cmd-btn--dense" type="button">Next</button>
@@ -371,6 +374,7 @@
               </div>
             </div>
             <div class="reader-view-controls" role="group" aria-label="Reader view mode">
+              <span class="reader-view-label">View:</span>
               <button id="btn-reader-view-html" class="cmd-btn cmd-btn--dense" type="button">HTML</button>
               <button id="btn-reader-view-plain" class="cmd-btn cmd-btn--dense" type="button">Plain</button>
             </div>

@@ -142,6 +142,61 @@ func TestRunWorkerEnsuresDirectoryContract(t *testing.T) {
 	}
 }
 
+func TestRunWorkerDiscardsInvalidRequestPayload(t *testing.T) {
+	base := t.TempDir()
+	cfg := config.Config{
+		UpdateEnabled: true,
+		UpdateBaseDir: filepath.Join(base, "update"),
+	}
+	if err := os.MkdirAll(requestDir(cfg), 0o770); err != nil {
+		t.Fatalf("mkdir request dir: %v", err)
+	}
+	if err := os.WriteFile(requestPath(cfg), []byte("{"), 0o640); err != nil {
+		t.Fatalf("write malformed request: %v", err)
+	}
+
+	mgr := NewManager(cfg)
+	if err := mgr.runWorker(context.Background()); err != nil {
+		t.Fatalf("run worker with malformed request: %v", err)
+	}
+	if _, err := os.Stat(requestPath(cfg)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected malformed request to be discarded, stat err=%v", err)
+	}
+
+	st, err := readApplyStatus(statusPath(cfg))
+	if err != nil {
+		t.Fatalf("read status after malformed request: %v", err)
+	}
+	if st.State != ApplyStateFailed {
+		t.Fatalf("expected failed status for malformed request, got %q", st.State)
+	}
+	if !strings.Contains(st.Error, "invalid updater request payload") {
+		t.Fatalf("unexpected malformed request status error: %q", st.Error)
+	}
+}
+
+func TestRunWorkerRemovesStaleRequestWhenUpdatesDisabled(t *testing.T) {
+	base := t.TempDir()
+	cfg := config.Config{
+		UpdateEnabled: false,
+		UpdateBaseDir: filepath.Join(base, "update"),
+	}
+	if err := os.MkdirAll(requestDir(cfg), 0o770); err != nil {
+		t.Fatalf("mkdir request dir: %v", err)
+	}
+	if err := os.WriteFile(requestPath(cfg), []byte(`{"request_id":"stale"}`), 0o640); err != nil {
+		t.Fatalf("write stale request: %v", err)
+	}
+
+	mgr := NewManager(cfg)
+	if err := mgr.runWorker(context.Background()); err != nil {
+		t.Fatalf("run worker with updates disabled: %v", err)
+	}
+	if _, err := os.Stat(requestPath(cfg)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale request to be removed when updates are disabled, stat err=%v", err)
+	}
+}
+
 func TestQueueApplyIgnoresUnreadableStatusFile(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()

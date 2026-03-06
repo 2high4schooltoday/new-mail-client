@@ -50,6 +50,7 @@ const (
 	maxUploadTotalBytes         = 35 << 20
 	trustedDeviceTTL            = 30 * 24 * time.Hour
 	threadMessagesMaxScanPages  = 20
+	threadMessagesMaxPagesPerMB = 10
 	threadMessagesScanPageSize  = 50
 	mailRemoteImageFetchTimeout = 8 * time.Second
 	mailRemoteImageMaxBytes     = 10 << 20
@@ -922,6 +923,14 @@ func (h *Handlers) ListThreadMessages(w http.ResponseWriter, r *http.Request) {
 	if mailbox == "" {
 		mailbox = "INBOX"
 	}
+	scope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
+	if scope == "" {
+		scope = "mailbox"
+	}
+	if scope != "mailbox" && scope != "conversation" {
+		util.WriteError(w, 400, "bad_request", "scope must be mailbox or conversation", middleware.RequestID(r.Context()))
+		return
+	}
 	page, pageSize := parsePagination(r)
 	offset := (page - 1) * pageSize
 	if offset < 0 {
@@ -929,56 +938,130 @@ func (h *Handlers) ListThreadMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mailLogin := service.MailIdentity(u)
-	out := make([]mail.MessageSummary, 0, pageSize)
-	matched := 0
-	truncated := false
-	done := false
-	for scanPage := 1; scanPage <= threadMessagesMaxScanPages; scanPage++ {
-		items, listErr := h.svc.Mail().ListMessages(r.Context(), mailLogin, pass, mailbox, scanPage, threadMessagesScanPageSize)
+	scanMailboxes := []string{mailbox}
+	if scope == "conversation" {
+		available, listErr := h.svc.Mail().ListMailboxes(r.Context(), mailLogin, pass)
 		if listErr != nil {
 			util.WriteError(w, 502, "imap_error", listErr.Error(), middleware.RequestID(r.Context()))
 			return
 		}
-		if len(items) == 0 {
-			done = true
-			break
-		}
-		for _, item := range items {
-			candidate := item
-			if strings.TrimSpace(candidate.ThreadID) == "" {
-				candidate.ThreadID = mail.DeriveThreadID(mailbox, candidate.Subject, candidate.From)
+		scanMailboxes = threadConversationScanMailboxes(mailbox, available)
+	}
+
+	out := make([]mail.MessageSummary, 0, pageSize)
+	matched := 0
+	done := false
+	truncated := false
+	pagesScanned := 0
+	for _, scanMailbox := range scanMailboxes {
+		mailboxExhausted := false
+		for scanPage := 1; scanPage <= threadMessagesMaxPagesPerMB; scanPage++ {
+			if pagesScanned >= threadMessagesMaxScanPages {
+				truncated = true
+				done = false
+				goto finish
 			}
-			if candidate.ThreadID != threadID {
-				continue
+			pagesScanned++
+
+			items, listErr := h.svc.Mail().ListMessages(r.Context(), mailLogin, pass, scanMailbox, scanPage, threadMessagesScanPageSize)
+			if listErr != nil {
+				util.WriteError(w, 502, "imap_error", listErr.Error(), middleware.RequestID(r.Context()))
+				return
 			}
-			if matched < offset {
-				matched++
-				continue
+			if len(items) == 0 {
+				mailboxExhausted = true
+				break
 			}
-			if len(out) < pageSize {
-				out = append(out, candidate)
-				matched++
-				continue
+			for _, item := range items {
+				candidate := item
+				if strings.TrimSpace(candidate.Mailbox) == "" {
+					candidate.Mailbox = scanMailbox
+				}
+				if strings.TrimSpace(candidate.ThreadID) == "" {
+					candidate.ThreadID = mail.DeriveThreadID(scanMailbox, candidate.Subject, candidate.From)
+				}
+				if candidate.ThreadID != threadID {
+					continue
+				}
+				if matched < offset {
+					matched++
+					continue
+				}
+				if len(out) < pageSize {
+					out = append(out, candidate)
+					matched++
+					continue
+				}
+				done = true
+				break
 			}
-			done = true
-			break
+			if done {
+				break
+			}
 		}
 		if done {
 			break
 		}
-	}
-	if !done {
-		truncated = true
+		if !mailboxExhausted {
+			truncated = true
+		}
 	}
 
+finish:
 	util.WriteJSON(w, 200, map[string]any{
-		"thread_id": threadID,
-		"mailbox":   mailbox,
-		"page":      page,
-		"page_size": pageSize,
-		"truncated": truncated,
-		"items":     out,
+		"thread_id":         threadID,
+		"mailbox":           mailbox,
+		"scope":             scope,
+		"mailboxes_scanned": scanMailboxes,
+		"page":              page,
+		"page_size":         pageSize,
+		"truncated":         truncated,
+		"items":             out,
 	})
+}
+
+func threadConversationScanMailboxes(current string, available []mail.Mailbox) []string {
+	out := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		clean := strings.TrimSpace(name)
+		if clean == "" {
+			return
+		}
+		key := strings.ToLower(clean)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, clean)
+	}
+
+	add(current)
+	for _, role := range []string{"inbox", "sent", "archive"} {
+		for _, mb := range available {
+			if threadMailboxRole(mb.Name) == role {
+				add(mb.Name)
+			}
+		}
+	}
+	if len(out) == 0 {
+		add("INBOX")
+	}
+	return out
+}
+
+func threadMailboxRole(name string) string {
+	v := strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case v == "inbox" || strings.HasSuffix(v, "/inbox"):
+		return "inbox"
+	case v == "sent", v == "sent messages", strings.Contains(v, "sent"):
+		return "sent"
+	case v == "archive", strings.Contains(v, "archive"), strings.Contains(v, "all mail"):
+		return "archive"
+	default:
+		return ""
+	}
 }
 
 func (h *Handlers) SendMessage(w http.ResponseWriter, r *http.Request) {

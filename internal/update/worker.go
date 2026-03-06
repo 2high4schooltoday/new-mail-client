@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,7 +38,11 @@ func RunWorker(ctx context.Context, cfg config.Config) error {
 }
 
 func (m *Manager) runWorker(ctx context.Context) error {
+	reqPath := requestPath(m.cfg)
 	if !m.cfg.UpdateEnabled {
+		// Prevent a stale request file from repeatedly retriggering the path unit
+		// when updates are intentionally disabled.
+		_ = os.Remove(reqPath)
 		return nil
 	}
 	if err := ensureUpdaterRuntimeDirectories(m.cfg); err != nil {
@@ -55,8 +60,23 @@ func (m *Manager) runWorker(ctx context.Context) error {
 	defer os.Remove(lockPath(m.cfg))
 
 	var req ApplyRequest
-	if err := readJSONFile(requestPath(m.cfg), &req); err != nil {
+	if err := readJSONFile(reqPath, &req); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if isInvalidApplyRequestPayloadError(err) {
+			now := m.now()
+			_ = os.Remove(reqPath)
+			_ = writeJSONAtomic(statusPath(m.cfg), ApplyStatus{
+				State:       ApplyStateFailed,
+				RequestID:   fmt.Sprintf("invalid-request-%d", now.Unix()),
+				RequestedAt: now,
+				StartedAt:   now,
+				FinishedAt:  now,
+				FromVersion: version.Current().Version,
+				Error:       "invalid updater request payload; discarded",
+			}, 0o640, updaterDirModeForPath(m.cfg, statusDir(m.cfg), 0o750))
+			_ = ensureDespatchReadable(statusPath(m.cfg))
 			return nil
 		}
 		return err
@@ -92,7 +112,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 		finalStatus.FinishedAt = m.now()
 		_ = writeJSONAtomic(statusPath(m.cfg), finalStatus, 0o640, updaterDirModeForPath(m.cfg, statusDir(m.cfg), 0o750))
 		_ = ensureDespatchReadable(statusPath(m.cfg))
-		_ = os.Remove(requestPath(m.cfg))
+		_ = os.Remove(reqPath)
 	}()
 
 	target := strings.TrimSpace(req.TargetVersion)
@@ -119,6 +139,15 @@ func (m *Manager) runWorker(ctx context.Context) error {
 		_ = sqdb.Close()
 	}
 	return nil
+}
+
+func isInvalidApplyRequestPayloadError(err error) bool {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &syntaxErr) ||
+		errors.As(err, &typeErr) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, bool, error) {

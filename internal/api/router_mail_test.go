@@ -14,15 +14,28 @@ import (
 )
 
 type mailRouterTestClient struct {
-	listByPage map[int][]mail.MessageSummary
-	search     []mail.MessageSummary
+	listByPage        map[int][]mail.MessageSummary
+	listByMailboxPage map[string]map[int][]mail.MessageSummary
+	search            []mail.MessageSummary
+	mailboxes         []mail.Mailbox
 }
 
 func (m *mailRouterTestClient) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
+	if len(m.mailboxes) > 0 {
+		return m.mailboxes, nil
+	}
 	return []mail.Mailbox{{Name: "INBOX", Unread: 1, Messages: 3}}, nil
 }
 
 func (m *mailRouterTestClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
+	if m.listByMailboxPage != nil {
+		if byPage, ok := m.listByMailboxPage[mailbox]; ok {
+			if items, ok := byPage[page]; ok {
+				return items, nil
+			}
+			return []mail.MessageSummary{}, nil
+		}
+	}
 	if m.listByPage == nil {
 		return []mail.MessageSummary{}, nil
 	}
@@ -157,15 +170,23 @@ func TestV1ThreadMessagesFiltersAndPaginates(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var payload struct {
-		ThreadID  string                `json:"thread_id"`
-		Truncated bool                  `json:"truncated"`
-		Items     []mail.MessageSummary `json:"items"`
+		ThreadID         string                `json:"thread_id"`
+		Scope            string                `json:"scope"`
+		MailboxesScanned []string              `json:"mailboxes_scanned"`
+		Truncated        bool                  `json:"truncated"`
+		Items            []mail.MessageSummary `json:"items"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode thread payload: %v body=%s", err, rec.Body.String())
 	}
 	if payload.ThreadID != threadID {
 		t.Fatalf("expected thread_id %q, got %q", threadID, payload.ThreadID)
+	}
+	if payload.Scope != "mailbox" {
+		t.Fatalf("expected mailbox scope, got %q", payload.Scope)
+	}
+	if len(payload.MailboxesScanned) != 1 || payload.MailboxesScanned[0] != "INBOX" {
+		t.Fatalf("unexpected mailboxes_scanned: %+v", payload.MailboxesScanned)
 	}
 	if payload.Truncated {
 		t.Fatalf("expected truncated=false")
@@ -180,15 +201,84 @@ func TestV1ThreadMessagesFiltersAndPaginates(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	payload = struct {
-		ThreadID  string                `json:"thread_id"`
-		Truncated bool                  `json:"truncated"`
-		Items     []mail.MessageSummary `json:"items"`
+		ThreadID         string                `json:"thread_id"`
+		Scope            string                `json:"scope"`
+		MailboxesScanned []string              `json:"mailboxes_scanned"`
+		Truncated        bool                  `json:"truncated"`
+		Items            []mail.MessageSummary `json:"items"`
 	}{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode paginated thread payload: %v body=%s", err, rec.Body.String())
 	}
 	if len(payload.Items) != 1 || payload.Items[0].ID != "m3" {
 		t.Fatalf("expected second thread item m3, got %+v", payload.Items)
+	}
+}
+
+func TestV1ThreadMessagesConversationScopeScansDefaultFolders(t *testing.T) {
+	threadID := mail.DeriveThreadID("INBOX", "Release Plan", "alice@example.com")
+	router := newSendRouter(t, &mailRouterTestClient{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Unread: 1, Messages: 10},
+			{Name: "Sent", Unread: 0, Messages: 5},
+			{Name: "Archive", Unread: 0, Messages: 6},
+			{Name: "Trash", Unread: 0, Messages: 2},
+		},
+		listByMailboxPage: map[string]map[int][]mail.MessageSummary{
+			"INBOX": {
+				1: {
+					{ID: "i1", Mailbox: "INBOX", Subject: "Re: Release Plan", From: "alice@example.com", ThreadID: threadID},
+				},
+				2: {},
+			},
+			"Sent": {
+				1: {
+					{ID: "s1", Mailbox: "Sent", Subject: "Release Plan", From: "alice@example.com", ThreadID: threadID},
+				},
+				2: {},
+			},
+			"Archive": {
+				1: {
+					{ID: "a1", Mailbox: "Archive", Subject: "Fwd: Release Plan", From: "alice@example.com", ThreadID: threadID},
+				},
+				2: {},
+			},
+			"Trash": {
+				1: {
+					{ID: "t1", Mailbox: "Trash", Subject: "Release Plan", From: "alice@example.com", ThreadID: threadID},
+				},
+				2: {},
+			},
+		},
+	}, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	path := "/api/v1/threads/" + url.PathEscape(threadID) + "/messages?mailbox=INBOX&scope=conversation&page=1&page_size=10"
+	rec := authedV1Get(t, router, path, sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Scope            string                `json:"scope"`
+		MailboxesScanned []string              `json:"mailboxes_scanned"`
+		Items            []mail.MessageSummary `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode conversation payload: %v body=%s", err, rec.Body.String())
+	}
+	if payload.Scope != "conversation" {
+		t.Fatalf("expected conversation scope, got %q", payload.Scope)
+	}
+	if len(payload.MailboxesScanned) < 3 {
+		t.Fatalf("expected Inbox/Sent/Archive scan set, got %+v", payload.MailboxesScanned)
+	}
+	if len(payload.Items) != 3 {
+		t.Fatalf("expected 3 cross-mailbox thread items, got %+v", payload.Items)
+	}
+	for _, item := range payload.Items {
+		if item.Mailbox == "Trash" {
+			t.Fatalf("did not expect trash mailbox in default conversation scan: %+v", payload.Items)
+		}
 	}
 }
 

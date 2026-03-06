@@ -1,15 +1,20 @@
 package mail
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"html"
+	"io"
 	"regexp"
 	"strings"
+
+	gomail "github.com/emersion/go-message/mail"
 )
 
 const (
 	DefaultPreviewMaxChars = 180
+	previewMIMEReadBytes   = 4096
 )
 
 var (
@@ -32,13 +37,9 @@ func NormalizeThreadSubject(subject string) string {
 	return normalized
 }
 
-// DeriveThreadID builds a stable mailbox-scoped thread ID from normalized
+// DeriveThreadID builds a stable conversation-scoped thread ID from normalized
 // subject (or sender fallback when subject is empty).
 func DeriveThreadID(mailbox, subject, from string) string {
-	scope := strings.ToLower(strings.TrimSpace(mailbox))
-	if scope == "" {
-		scope = "unknown"
-	}
 	normalized := NormalizeThreadSubject(subject)
 	if normalized == "" {
 		normalized = strings.ToLower(strings.TrimSpace(from))
@@ -46,8 +47,8 @@ func DeriveThreadID(mailbox, subject, from string) string {
 	if normalized == "" {
 		normalized = "untitled"
 	}
-	sum := sha256.Sum256([]byte(scope + "\x00" + normalized))
-	return scope + ":" + hex.EncodeToString(sum[:10])
+	sum := sha256.Sum256([]byte(normalized))
+	return "conv:" + hex.EncodeToString(sum[:10])
 }
 
 // BuildPreviewFromBodySample creates a compact, plain-text snippet from sampled
@@ -70,4 +71,69 @@ func BuildPreviewFromBodySample(sample string, max int) string {
 		return compact
 	}
 	return strings.TrimSpace(string(runes[:max]))
+}
+
+// BuildPreviewFromMIMERawSample creates a robust snippet from a sampled RFC822
+// payload by preferring decoded text/plain and then decoded text/html.
+func BuildPreviewFromMIMERawSample(sample []byte, max int) string {
+	if len(sample) == 0 {
+		return ""
+	}
+	if max <= 0 {
+		max = DefaultPreviewMaxChars
+	}
+
+	plain, htmlSnippet := extractPreviewFromMIMEParts(sample)
+	if strings.TrimSpace(plain) != "" {
+		return BuildPreviewFromBodySample(plain, max)
+	}
+	if strings.TrimSpace(htmlSnippet) != "" {
+		return BuildPreviewFromBodySample(htmlSnippet, max)
+	}
+
+	bodySample := sample
+	if idx := bytes.Index(sample, []byte("\r\n\r\n")); idx >= 0 {
+		bodySample = sample[idx+4:]
+	} else if idx := bytes.Index(sample, []byte("\n\n")); idx >= 0 {
+		bodySample = sample[idx+2:]
+	}
+	return BuildPreviewFromBodySample(string(bodySample), max)
+}
+
+func extractPreviewFromMIMEParts(raw []byte) (string, string) {
+	mr, err := gomail.CreateReader(bytes.NewReader(raw))
+	if err != nil {
+		return "", ""
+	}
+
+	var plain string
+	var htmlSnippet string
+	for {
+		part, nextErr := mr.NextPart()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			break
+		}
+		desc := classifyMIMEPart(part.Header)
+		switch desc.kind {
+		case mimePartTextPlain:
+			if plain != "" {
+				continue
+			}
+			body, _ := io.ReadAll(io.LimitReader(part.Body, previewMIMEReadBytes))
+			plain = string(body)
+		case mimePartTextHTML:
+			if htmlSnippet != "" {
+				continue
+			}
+			body, _ := io.ReadAll(io.LimitReader(part.Body, previewMIMEReadBytes))
+			htmlSnippet = string(body)
+		}
+		if plain != "" && htmlSnippet != "" {
+			break
+		}
+	}
+	return plain, htmlSnippet
 }
