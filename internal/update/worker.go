@@ -40,13 +40,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 	if !m.cfg.UpdateEnabled {
 		return nil
 	}
-	if err := ensureDirs([]string{
-		requestDir(m.cfg),
-		statusDir(m.cfg),
-		lockDir(m.cfg),
-		workDir(m.cfg),
-		backupsDir(m.cfg),
-	}, 0o750); err != nil {
+	if err := ensureUpdaterRuntimeDirectories(m.cfg); err != nil {
 		return err
 	}
 	lockFD, err := os.OpenFile(lockPath(m.cfg), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
@@ -82,7 +76,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 		StartedAt:     started,
 		TargetVersion: strings.TrimSpace(req.TargetVersion),
 		FromVersion:   version.Current().Version,
-	}, 0o640)
+	}, 0o640, updaterDirModeForPath(m.cfg, statusDir(m.cfg), 0o750))
 	_ = ensureDespatchReadable(statusPath(m.cfg))
 
 	finalStatus := ApplyStatus{
@@ -96,7 +90,7 @@ func (m *Manager) runWorker(ctx context.Context) error {
 	}
 	defer func() {
 		finalStatus.FinishedAt = m.now()
-		_ = writeJSONAtomic(statusPath(m.cfg), finalStatus, 0o640)
+		_ = writeJSONAtomic(statusPath(m.cfg), finalStatus, 0o640, updaterDirModeForPath(m.cfg, statusDir(m.cfg), 0o750))
 		_ = ensureDespatchReadable(statusPath(m.cfg))
 		_ = os.Remove(requestPath(m.cfg))
 	}()

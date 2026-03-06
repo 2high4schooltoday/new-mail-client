@@ -120,10 +120,10 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 		RequestedBy:   strings.TrimSpace(requestedBy),
 		TargetVersion: target,
 	}
-	if err := ensureDirs([]string{requestDir(m.cfg), statusDir(m.cfg)}, 0o750); err != nil {
+	if err := ensureUpdaterRequestStatusDirectories(m.cfg); err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
-	if err := writeJSONAtomic(requestPath(m.cfg), req, 0o640); err != nil {
+	if err := writeJSONAtomic(requestPath(m.cfg), req, 0o640, updaterDirModeForPath(m.cfg, requestDir(m.cfg), 0o750)); err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
 	if err := writeJSONAtomic(statusPath(m.cfg), ApplyStatus{
@@ -131,7 +131,7 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 		RequestID:     req.RequestID,
 		RequestedAt:   req.RequestedAt,
 		TargetVersion: req.TargetVersion,
-	}, 0o640); err != nil {
+	}, 0o640, updaterDirModeForPath(m.cfg, statusDir(m.cfg), 0o750)); err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
 	return req, nil
@@ -172,7 +172,7 @@ func (m *Manager) checkWritablePath(dirPath, stage string) (bool, *ConfigDiagnos
 	}
 	pathState := describePathState(dirPath, 5)
 	repairHint := m.updaterPermissionRepairHint()
-	if err := os.MkdirAll(dirPath, 0o750); err != nil {
+	if err := ensureUpdaterWritableDirectory(m.cfg, dirPath); err != nil {
 		return false, &ConfigDiagnostic{
 			Reason:     fmt.Sprintf("%s_dir_unwritable", reasonPrefix),
 			Detail:     fmt.Sprintf("cannot access updater %s directory %s: %v (path_state=%s)", reasonPrefix, dirPath, err, pathState),

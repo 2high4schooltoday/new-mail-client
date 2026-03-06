@@ -8,15 +8,6 @@ import (
 	"path/filepath"
 )
 
-func ensureDirs(cfgPath []string, mode os.FileMode) error {
-	for _, p := range cfgPath {
-		if err := os.MkdirAll(p, mode); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func readJSONFile(path string, out any) error {
 	if err := rejectSymlink(path); err != nil {
 		return err
@@ -28,11 +19,15 @@ func readJSONFile(path string, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-func writeJSONAtomic(path string, payload any, mode os.FileMode) error {
+func writeJSONAtomic(path string, payload any, mode, parentMode os.FileMode) error {
 	if err := rejectSymlink(path); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, parentMode); err != nil {
+		return err
+	}
+	if err := os.Chmod(parent, parentMode); err != nil && !isUpdaterPermissionError(err) {
 		return err
 	}
 	raw, err := json.MarshalIndent(payload, "", "  ")

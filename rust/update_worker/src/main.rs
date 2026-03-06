@@ -5,7 +5,7 @@ use contracts::updater::{
     APPLY_STATE_IN_PROGRESS, APPLY_STATE_ROLLED_BACK,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use nix::unistd::{chown, Gid, User};
+use nix::unistd::{chown, geteuid, Gid, Uid, User};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use regex::Regex;
 use reqwest::blocking::Client;
@@ -119,16 +119,7 @@ fn run() -> Result<(), WorkerError> {
         return Ok(());
     }
 
-    ensure_dirs(
-        &[
-            request_dir(&cfg),
-            status_dir(&cfg),
-            lock_dir(&cfg),
-            work_dir(&cfg),
-            backups_dir(&cfg),
-        ],
-        0o750,
-    )?;
+    ensure_updater_dirs(&cfg)?;
 
     let lock_path = lock_path(&cfg);
     let mut lock_file = match OpenOptions::new()
@@ -385,10 +376,72 @@ fn lock_path(cfg: &Config) -> PathBuf {
     lock_dir(cfg).join("update.lock")
 }
 
-fn ensure_dirs(paths: &[PathBuf], mode: u32) -> Result<(), WorkerError> {
-    for path in paths {
-        fs::create_dir_all(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+#[derive(Clone, Copy)]
+enum UpdaterDirGroup {
+    Root,
+    Despatch,
+}
+
+#[derive(Clone)]
+struct UpdaterDirSpec {
+    path: PathBuf,
+    mode: u32,
+    group: UpdaterDirGroup,
+}
+
+fn updater_dir_specs(cfg: &Config) -> Vec<UpdaterDirSpec> {
+    vec![
+        UpdaterDirSpec {
+            path: cfg.update_base_dir.clone(),
+            mode: 0o750,
+            group: UpdaterDirGroup::Despatch,
+        },
+        UpdaterDirSpec {
+            path: request_dir(cfg),
+            mode: 0o770,
+            group: UpdaterDirGroup::Despatch,
+        },
+        UpdaterDirSpec {
+            path: status_dir(cfg),
+            mode: 0o770,
+            group: UpdaterDirGroup::Despatch,
+        },
+        UpdaterDirSpec {
+            path: lock_dir(cfg),
+            mode: 0o750,
+            group: UpdaterDirGroup::Root,
+        },
+        UpdaterDirSpec {
+            path: work_dir(cfg),
+            mode: 0o750,
+            group: UpdaterDirGroup::Root,
+        },
+        UpdaterDirSpec {
+            path: backups_dir(cfg),
+            mode: 0o750,
+            group: UpdaterDirGroup::Root,
+        },
+    ]
+}
+
+fn ensure_updater_dirs(cfg: &Config) -> Result<(), WorkerError> {
+    let specs = updater_dir_specs(cfg);
+    let running_as_root = geteuid().is_root();
+    let despatch_gid = if running_as_root {
+        Some(lookup_despatch_user()?.gid.as_raw())
+    } else {
+        None
+    };
+    for spec in specs {
+        fs::create_dir_all(&spec.path)?;
+        fs::set_permissions(&spec.path, fs::Permissions::from_mode(spec.mode))?;
+        if let Some(despatch_gid) = despatch_gid {
+            let gid = match spec.group {
+                UpdaterDirGroup::Root => 0,
+                UpdaterDirGroup::Despatch => despatch_gid,
+            };
+            chown(&spec.path, Some(Uid::from_raw(0)), Some(Gid::from_raw(gid)))?;
+        }
     }
     Ok(())
 }
@@ -399,10 +452,16 @@ fn read_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, io::Error> {
     serde_json::from_slice(&raw).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
-fn write_json_atomic(path: &Path, payload: &Value, mode: u32) -> Result<(), WorkerError> {
+fn write_json_atomic(
+    path: &Path,
+    payload: &Value,
+    mode: u32,
+    parent_mode: u32,
+) -> Result<(), WorkerError> {
     reject_symlink(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(parent_mode))?;
     }
     let mut raw = serde_json::to_string_pretty(payload)?;
     raw.push('\n');
@@ -445,7 +504,7 @@ fn write_status(cfg: &Config, status: &ApplyStatus) -> Result<(), WorkerError> {
         status.state = APPLY_STATE_FAILED.to_string();
     }
     let payload = serde_json::to_value(&status)?;
-    write_json_atomic(&status_path(cfg), &payload, 0o640)?;
+    write_json_atomic(&status_path(cfg), &payload, 0o640, 0o770)?;
     ensure_despatch_readable(&status_path(cfg))?;
     Ok(())
 }
@@ -1427,6 +1486,86 @@ fn local_base_url(listen_addr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_config(update_base_dir: PathBuf) -> Config {
+        Config {
+            update_enabled: true,
+            update_repo_owner: "2high4schooltoday".to_string(),
+            update_repo_name: "despatch".to_string(),
+            update_http_timeout_sec: 10,
+            update_github_token: String::new(),
+            update_backup_keep: 3,
+            update_base_dir,
+            update_install_dir: PathBuf::from("/tmp/despatch-install-test"),
+            update_service_name: "despatch".to_string(),
+            update_systemd_unit_dir: PathBuf::from("/etc/systemd/system"),
+            update_require_signature: false,
+            update_signature_asset: "checksums.txt.sig".to_string(),
+            update_signing_public_keys: Vec::new(),
+            listen_addr: ":8080".to_string(),
+            mailsec_enabled: false,
+            mailsec_socket: PathBuf::from("/tmp/despatch-mailsec.sock"),
+        }
+    }
+
+    #[test]
+    fn updater_directory_contract_modes_are_stable() {
+        let cfg = test_config(PathBuf::from("/tmp/despatch-update-contract-test"));
+        let specs = updater_dir_specs(&cfg);
+        let req = specs
+            .iter()
+            .find(|spec| spec.path == request_dir(&cfg))
+            .expect("request dir spec");
+        assert_eq!(req.mode, 0o770);
+        assert!(matches!(req.group, UpdaterDirGroup::Despatch));
+
+        let status = specs
+            .iter()
+            .find(|spec| spec.path == status_dir(&cfg))
+            .expect("status dir spec");
+        assert_eq!(status.mode, 0o770);
+        assert!(matches!(status.group, UpdaterDirGroup::Despatch));
+
+        let lock = specs
+            .iter()
+            .find(|spec| spec.path == lock_dir(&cfg))
+            .expect("lock dir spec");
+        assert_eq!(lock.mode, 0o750);
+        assert!(matches!(lock.group, UpdaterDirGroup::Root));
+    }
+
+    #[test]
+    fn ensure_updater_dirs_applies_mode_contract() {
+        let unique = format!(
+            "despatch-update-worker-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let cfg = test_config(base.clone());
+        ensure_updater_dirs(&cfg).expect("ensure dirs");
+
+        let req_mode = fs::metadata(request_dir(&cfg))
+            .expect("request metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let status_mode = fs::metadata(status_dir(&cfg))
+            .expect("status metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let lock_mode = fs::metadata(lock_dir(&cfg))
+            .expect("lock metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(req_mode, 0o770);
+        assert_eq!(status_mode, 0o770);
+        assert_eq!(lock_mode, 0o750);
+
+        let _ = fs::remove_dir_all(base);
+    }
 
     #[test]
     fn archive_candidates_include_aliases() {

@@ -42,6 +42,15 @@ func newUpdateTestStore(t *testing.T) *store.Store {
 	return store.New(sqdb)
 }
 
+func dirPerm(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Mode().Perm()
+}
+
 func TestCompareVersions(t *testing.T) {
 	t.Parallel()
 	if compareVersions("v1.2.3", "v1.2.3") {
@@ -89,8 +98,47 @@ func TestQueueApplyValidationAndInProgress(t *testing.T) {
 	if req.RequestID != "req-1" {
 		t.Fatalf("unexpected request id: %q", req.RequestID)
 	}
+	if got := dirPerm(t, cfg.UpdateBaseDir); got != 0o750 {
+		t.Fatalf("expected update base mode 0750, got %#o", got)
+	}
+	if got := dirPerm(t, requestDir(cfg)); got != 0o770 {
+		t.Fatalf("expected request dir mode 0770, got %#o", got)
+	}
+	if got := dirPerm(t, statusDir(cfg)); got != 0o770 {
+		t.Fatalf("expected status dir mode 0770, got %#o", got)
+	}
 	if _, err := mgr.QueueApply(context.Background(), st, "admin@example.com", "v1.2.4", "req-2"); err == nil {
 		t.Fatalf("expected in-progress protection on second request")
+	}
+}
+
+func TestRunWorkerEnsuresDirectoryContract(t *testing.T) {
+	base := t.TempDir()
+	cfg := config.Config{
+		UpdateEnabled: true,
+		UpdateBaseDir: filepath.Join(base, "update"),
+	}
+	mgr := NewManager(cfg)
+	if err := mgr.runWorker(context.Background()); err != nil {
+		t.Fatalf("run worker: %v", err)
+	}
+	if got := dirPerm(t, cfg.UpdateBaseDir); got != 0o750 {
+		t.Fatalf("expected update base mode 0750, got %#o", got)
+	}
+	if got := dirPerm(t, requestDir(cfg)); got != 0o770 {
+		t.Fatalf("expected request dir mode 0770, got %#o", got)
+	}
+	if got := dirPerm(t, statusDir(cfg)); got != 0o770 {
+		t.Fatalf("expected status dir mode 0770, got %#o", got)
+	}
+	if got := dirPerm(t, lockDir(cfg)); got != 0o750 {
+		t.Fatalf("expected lock dir mode 0750, got %#o", got)
+	}
+	if got := dirPerm(t, workDir(cfg)); got != 0o750 {
+		t.Fatalf("expected work dir mode 0750, got %#o", got)
+	}
+	if got := dirPerm(t, backupsDir(cfg)); got != 0o750 {
+		t.Fatalf("expected backups dir mode 0750, got %#o", got)
 	}
 }
 
@@ -220,7 +268,7 @@ func TestStatusReportsRequestDirDiagnostic(t *testing.T) {
 	}
 }
 
-func TestStatusReportsRequestProbeDiagnostic(t *testing.T) {
+func TestStatusAutoHealsRequestDirModeBeforeProbe(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()
 	unitDir := filepath.Join(base, "units")
@@ -259,17 +307,14 @@ func TestStatusReportsRequestProbeDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if status.Configured {
-		t.Fatalf("expected configured=false when request dir write probe fails")
+	if !status.Configured {
+		t.Fatalf("expected configured=true after auto-heal of request dir mode")
 	}
-	if status.ConfigDiagnostic == nil {
-		t.Fatalf("expected request probe diagnostic")
+	if status.ConfigDiagnostic != nil {
+		t.Fatalf("expected no config diagnostic after auto-heal, got %#v", status.ConfigDiagnostic)
 	}
-	if status.ConfigDiagnostic.Reason != "request_probe_failed" {
-		t.Fatalf("expected request_probe_failed, got %q", status.ConfigDiagnostic.Reason)
-	}
-	if !strings.Contains(status.ConfigDiagnostic.RepairHint, "install -d -o root -g despatch -m 0770") {
-		t.Fatalf("expected repair hint to include ownership/mode fix command, got %q", status.ConfigDiagnostic.RepairHint)
+	if got := dirPerm(t, requestDir(cfg)); got != 0o770 {
+		t.Fatalf("expected request dir mode repaired to 0770, got %#o", got)
 	}
 }
 

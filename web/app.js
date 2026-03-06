@@ -5001,6 +5001,21 @@ function isUpdateStateBusy(status) {
   return stateName === "queued" || stateName === "in_progress";
 }
 
+function handleUpdaterStatusUnavailable(err) {
+  if (!err || Number(err.status) !== 503) return false;
+  const last = state.update.lastStatus;
+  if (last && !last.configured) {
+    setUpdateNote(updateConfigDiagnosticMessage(last), "error");
+    return true;
+  }
+  if (isUpdateStateBusy(last)) {
+    setUpdateNote("Updater temporarily unavailable (HTTP 503). Waiting for service recovery.", "info");
+    return true;
+  }
+  setUpdateNote("Updater temporarily unavailable (HTTP 503).", "error");
+  return true;
+}
+
 function stopUpdatePolling() {
   if (!state.update.pollTimer) return;
   clearInterval(state.update.pollTimer);
@@ -5028,6 +5043,9 @@ function startUpdatePolling() {
         renderUpdateStatus(legacyUpdaterStatus());
         return;
       }
+      if (handleUpdaterStatusUnavailable(err)) {
+        return;
+      }
       setUpdateNote(`Failed to refresh update status: ${err.message}`, "error");
     }
   }, 2500);
@@ -5053,6 +5071,12 @@ async function loadUpdateStatus(forceCheck = false) {
       const legacy = legacyUpdaterStatus();
       renderUpdateStatus(legacy);
       return legacy;
+    }
+    if (handleUpdaterStatusUnavailable(err) && state.update.lastStatus) {
+      if (isUpdateStateBusy(state.update.lastStatus)) {
+        startUpdatePolling();
+      }
+      return state.update.lastStatus;
     }
     throw err;
   }
