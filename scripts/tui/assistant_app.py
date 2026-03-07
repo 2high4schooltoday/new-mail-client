@@ -33,7 +33,7 @@ from .rendering import (
 from .runner import OperationRunner
 from .screens import FIELD_INDEX_INSTALL, FIELD_INDEX_UNINSTALL, INSTALL_FIELDS, UNINSTALL_FIELDS, FieldDef, build_review_rows, field_display_value
 from .state import UIState, apply_runner_event, new_run_state
-from .system_ops import AppPaths, CancelToken, detect_arch, detect_host, detect_letsencrypt_cert_pair, detect_paths, detect_proxy_candidates, detect_service_state
+from .system_ops import AppPaths, CancelToken, detect_arch, detect_host, detect_letsencrypt_cert_pair, detect_paths, detect_proxy_candidates, detect_service_state, fetch_repo_text
 from .theme import Theme
 from .views import clamp
 from .widgets import Rect
@@ -118,18 +118,33 @@ def _seed_proxy_tls_defaults(spec: InstallSpec) -> bool:
     return changed
 
 
+_PREVIEW_LICENSE_BLOCKS = markdown_to_plain_blocks(
+    """
+# Despatch Software License
+
+Use of Despatch is subject to the terms described in the project license.
+
+- Read the full license before installation.
+- Choose Agree only if those terms work for you.
+"""
+)
+
+
 def _load_license_blocks() -> list[str]:
-    license_path = Path(__file__).resolve().parents[2] / "LICENSE.md"
     try:
-        markdown = license_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return [
-            "DESPATCH SOFTWARE LICENSE",
-            "",
-            f"The license file could not be loaded: {exc}",
-            "",
-            f"Expected path: {license_path}",
-        ]
+        markdown = fetch_repo_text("LICENSE.md")
+    except Exception as exc:
+        license_path = Path(__file__).resolve().parents[2] / "LICENSE.md"
+        try:
+            markdown = license_path.read_text(encoding="utf-8")
+        except OSError:
+            return [
+                "DESPATCH SOFTWARE LICENSE",
+                "",
+                f"The license could not be fetched from GitHub: {exc}",
+                "",
+                "Check network access to raw.githubusercontent.com and reopen the installer.",
+            ]
     return markdown_to_plain_blocks(markdown)
 
 
@@ -153,7 +168,7 @@ class DespatchTUI:
         self.last_summary_payload: dict[str, Any] = {}
         self.active_operation: str = ""
         self.install_license_accepted = False
-        self.license_blocks = _load_license_blocks()
+        self.license_blocks: list[str] = []
 
         hostname = detect_host()
         default_domain = hostname if "." in hostname else "example.com"
@@ -173,6 +188,11 @@ class DespatchTUI:
         self.log_level_order = ["debug", "info", "warn", "error"]
         self.ui.status_line = f"Ready. Log file: {self.logstore.log_path}"
         self.running = True
+
+    def _ensure_license_blocks(self, *, force: bool = False) -> None:
+        if self.license_blocks and not force:
+            return
+        self.license_blocks = _load_license_blocks()
 
     def run(self) -> None:
         curses.curs_set(0)
@@ -232,14 +252,13 @@ class DespatchTUI:
         rail_x = inner_x
         rail_y = header_divider_y + 1
         rail_h = max(0, footer_divider_y - rail_y)
-        main_x = rail_x + rail_w + 2
+        main_x = rail_x + rail_w + 3
         main_y = rail_y
-        main_w = inner_w - rail_w - 3
+        main_w = inner_w - rail_w - 4
         main_h = rail_h
 
         surface.hline(header_divider_y, inner_x, inner_w, self.glyphs.box_h, "chrome")
         surface.hline(footer_divider_y, inner_x, inner_w, self.glyphs.box_h, "chrome")
-        surface.vline(rail_y, rail_x + rail_w, rail_h, self.glyphs.box_v, "rail")
 
         self._draw_titlebar(surface, inner_x, inner_y, inner_w, title_h)
         self._draw_rail(surface, rail_x, rail_y, rail_w, rail_h)
@@ -385,16 +404,16 @@ class DespatchTUI:
             if risk_label:
                 surface.text(y, x + max(2, w - len(risk_label) - 1), risk_label, "warning")
             return
-        surface.box(y, x, h, w, self.glyphs, "chrome")
         marker = self.glyphs.card_on if selected else self.glyphs.card_off
         if selected:
-            surface.text(y + 1, x + 1, self.glyphs.marker, "primary")
+            surface.text(y + 1, x, self.glyphs.marker, "primary")
         title_style = "focus" if focused else ("heading" if selected else "panel")
-        surface.text(y + 1, x + 2, ellipsis_clip(f"{marker} {title}", max(8, w - len(risk_label) - 8), self.glyphs), title_style)
+        title_x = x + 2
+        surface.text(y + 1, title_x, ellipsis_clip(f"{marker} {title}", max(8, w - len(risk_label) - 4), self.glyphs), title_style)
         if risk_label:
-            surface.text(y + 1, x + max(2, w - len(risk_label) - 4), risk_label, "warning")
+            surface.text(y + 1, x + max(2, w - len(risk_label) - 1), risk_label, "warning")
         if h >= 4:
-            surface.text(y + 2, x + 2, ellipsis_clip(summary, max(8, w - 4), self.glyphs), "muted")
+            surface.text(y + 2, title_x, ellipsis_clip(summary, max(8, w - 4), self.glyphs), "muted")
 
     def _draw_form_step(self, surface: CursesSurface, step: AssistantStep, x: int, y: int, w: int, h: int) -> None:
         values = self._current_values()
@@ -454,6 +473,7 @@ class DespatchTUI:
         self.focus.set_items(items, preferred=preferred)
 
     def _draw_document_step(self, surface: CursesSurface, step: AssistantStep, x: int, y: int, w: int, h: int) -> None:
+        self._ensure_license_blocks()
         row = section_heading(surface, y + 1, x + 1, w - 2, step.title, step.summary, glyphs=self.glyphs)
         row = self._draw_info_block(
             surface,
@@ -1070,6 +1090,7 @@ class DespatchTUI:
             self.ui.document_scroll = 0
             if meta.key == "install":
                 self.install_license_accepted = False
+                self._ensure_license_blocks(force=True)
             self.ui.status_line = f"Selected: {meta.title}"
             self.focus.set_items([], preferred=None)
 
@@ -1549,6 +1570,7 @@ def _preview_tui(width: int, height: int, *, ascii_mode: bool = False) -> Despat
     tui = DespatchTUI(_PreviewWindow(width, height))
     tui.theme = Theme(has_color=False)
     tui.glyphs = ASCII_GLYPHS if ascii_mode else UNICODE_GLYPHS
+    tui.license_blocks = list(_PREVIEW_LICENSE_BLOCKS)
     tui.ui.status_line = f"Ready. Log file: {tui.logstore.log_path}"
     return tui
 

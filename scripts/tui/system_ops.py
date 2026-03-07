@@ -7,12 +7,15 @@ import socket
 import subprocess
 import time
 import urllib.request
+from urllib.parse import quote
 from pathlib import Path
 from typing import Callable
 
 from .models import AppPaths
 
 REMOTE_SCRIPT_BASE = "https://raw.githubusercontent.com/2high4schooltoday/despatch/main/scripts"
+DEFAULT_REPO_URL = "https://github.com/2high4schooltoday/despatch.git"
+DEFAULT_REPO_REF = "main"
 
 
 class CancelToken:
@@ -67,6 +70,44 @@ def detect_paths() -> AppPaths:
         uninstall_script=scripts_dir / "uninstall.sh",
         diagnose_script=scripts_dir / "diagnose_access.sh",
     )
+
+
+def github_repo_slug(repo_url: str) -> str:
+    raw = (repo_url or "").strip()
+    if raw.startswith("git@github.com:"):
+        raw = raw.split(":", 1)[1]
+    elif "github.com/" in raw:
+        raw = raw.split("github.com/", 1)[1]
+    raw = raw.removesuffix(".git").strip("/")
+    parts = [part for part in raw.split("/") if part]
+    if len(parts) < 2:
+        return ""
+    return f"{parts[0]}/{parts[1]}"
+
+
+def github_raw_url(path: str, repo_url: str | None = None, repo_ref: str | None = None) -> str:
+    slug = github_repo_slug(repo_url or os.environ.get("DESPATCH_REPO_URL", DEFAULT_REPO_URL))
+    if not slug:
+        slug = github_repo_slug(DEFAULT_REPO_URL)
+    ref = quote((repo_ref or os.environ.get("DESPATCH_REPO_REF", DEFAULT_REPO_REF)).strip() or DEFAULT_REPO_REF, safe="/")
+    rel = quote(path.strip("/"), safe="/")
+    return f"https://raw.githubusercontent.com/{slug}/{ref}/{rel}"
+
+
+def fetch_repo_text(
+    path: str,
+    repo_url: str | None = None,
+    repo_ref: str | None = None,
+    *,
+    timeout: float = 4.0,
+    opener: Callable[..., object] | None = None,
+) -> str:
+    url = github_raw_url(path, repo_url=repo_url, repo_ref=repo_ref)
+    request = urllib.request.Request(url, headers={"User-Agent": "despatch-installer/1.0"})
+    opener = opener or urllib.request.urlopen
+    with opener(request, timeout=timeout) as response:  # type: ignore[misc]
+        data = response.read()
+    return data.decode("utf-8")
 
 
 def have_cmd(name: str) -> bool:

@@ -89,10 +89,20 @@ class CursesSurface:
     def hline(self, y: int, x: int, w: int, ch: str, style: str = "panel") -> None:
         if w <= 0:
             return
+        acs = self._acs_hline(ch)
+        if acs is not None:
+            for xx in range(x, x + w):
+                safe_addch(self.stdscr, y, xx, acs, self._attr(style))
+            return
         safe_addstr(self.stdscr, y, x, ch * w, self._attr(style))
 
     def vline(self, y: int, x: int, h: int, ch: str, style: str = "panel") -> None:
         if h <= 0:
+            return
+        acs = self._acs_vline(ch)
+        if acs is not None:
+            for yy in range(y, y + h):
+                safe_addch(self.stdscr, yy, x, acs, self._attr(style))
             return
         code = ord(ch[:1]) if ch else ord(" ")
         for yy in range(y, y + h):
@@ -102,10 +112,20 @@ class CursesSurface:
         glyphs = glyphs or current_glyphs()
         if h < 2 or w < 2:
             return
-        self.text(y, x, glyphs.box_tl, style)
-        self.text(y, x + w - 1, glyphs.box_tr, style)
-        self.text(y + h - 1, x, glyphs.box_bl, style)
-        self.text(y + h - 1, x + w - 1, glyphs.box_br, style)
+        tl = self._acs_corner(glyphs.box_tl)
+        tr = self._acs_corner(glyphs.box_tr)
+        bl = self._acs_corner(glyphs.box_bl)
+        br = self._acs_corner(glyphs.box_br)
+        if tl is not None and tr is not None and bl is not None and br is not None:
+            safe_addch(self.stdscr, y, x, tl, self._attr(style))
+            safe_addch(self.stdscr, y, x + w - 1, tr, self._attr(style))
+            safe_addch(self.stdscr, y + h - 1, x, bl, self._attr(style))
+            safe_addch(self.stdscr, y + h - 1, x + w - 1, br, self._attr(style))
+        else:
+            self.text(y, x, glyphs.box_tl, style)
+            self.text(y, x + w - 1, glyphs.box_tr, style)
+            self.text(y + h - 1, x, glyphs.box_bl, style)
+            self.text(y + h - 1, x + w - 1, glyphs.box_br, style)
         self.hline(y, x + 1, w - 2, glyphs.box_h, style)
         self.hline(y + h - 1, x + 1, w - 2, glyphs.box_h, style)
         self.vline(y + 1, x, h - 2, glyphs.box_v, style)
@@ -113,6 +133,32 @@ class CursesSurface:
 
     def _attr(self, style: str) -> int:
         return getattr(self.theme.attrs, style, self.theme.attrs.panel)
+
+    @staticmethod
+    def _acs_hline(ch: str) -> int | None:
+        if ch in {"─", "━", "═"}:
+            return curses.ACS_HLINE
+        return None
+
+    @staticmethod
+    def _acs_vline(ch: str) -> int | None:
+        if ch in {"│", "┃", "║"}:
+            return curses.ACS_VLINE
+        return None
+
+    @staticmethod
+    def _acs_corner(ch: str) -> int | None:
+        mapping = {
+            "╭": curses.ACS_ULCORNER,
+            "┌": curses.ACS_ULCORNER,
+            "╮": curses.ACS_URCORNER,
+            "┐": curses.ACS_URCORNER,
+            "╰": curses.ACS_LLCORNER,
+            "└": curses.ACS_LLCORNER,
+            "╯": curses.ACS_LRCORNER,
+            "┘": curses.ACS_LRCORNER,
+        }
+        return mapping.get(ch)
 
 
 @dataclass(frozen=True)

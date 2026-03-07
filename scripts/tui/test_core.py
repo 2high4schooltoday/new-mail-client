@@ -20,7 +20,7 @@ from scripts.tui.logstore import LogStore
 from scripts.tui.models import AppPaths
 from scripts.tui.runner import OperationRunner
 from scripts.tui.state import apply_runner_event, new_run_state
-from scripts.tui.system_ops import detect_letsencrypt_cert_pair
+from scripts.tui.system_ops import detect_letsencrypt_cert_pair, fetch_repo_text, github_raw_url
 
 
 class InstallSpecTests(unittest.TestCase):
@@ -143,8 +143,8 @@ class PreviewRenderTests(unittest.TestCase):
     def test_review_preview_wraps_long_values_without_overflow(self) -> None:
         lines = render_review_preview(120, 34, long_values=True)
         joined = "\n".join(lines)
-        self.assertIn("really.long.example.mail.2h4", joined)
-        self.assertIn("s2d.ru/with/a/deep/path", joined)
+        self.assertIn("really.long.example.mail.2h", joined)
+        self.assertIn("4s2d.ru/with/a/deep/path", joined)
         self.assertIn("with/a/deep/path", joined)
         self.assertTrue(all(len(line) == 120 for line in lines))
 
@@ -300,6 +300,41 @@ class RunnerTests(unittest.TestCase):
 
 
 class SystemOpsTests(unittest.TestCase):
+    def test_github_raw_url_uses_default_repo(self) -> None:
+        self.assertEqual(
+            github_raw_url("LICENSE.md", repo_url="https://github.com/2high4schooltoday/despatch.git", repo_ref="main"),
+            "https://raw.githubusercontent.com/2high4schooltoday/despatch/main/LICENSE.md",
+        )
+
+    def test_github_raw_url_accepts_git_ssh_remote(self) -> None:
+        self.assertEqual(
+            github_raw_url("scripts/tui/assistant_app.py", repo_url="git@github.com:2high4schooltoday/despatch.git", repo_ref="release/test"),
+            "https://raw.githubusercontent.com/2high4schooltoday/despatch/release/test/scripts/tui/assistant_app.py",
+        )
+
+    def test_fetch_repo_text_uses_supplied_opener(self) -> None:
+        class _FakeResponse:
+            def __enter__(self) -> "_FakeResponse":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                _ = exc_type, exc, tb
+
+            def read(self) -> bytes:
+                return b"license text"
+
+        called: dict[str, object] = {}
+
+        def fake_opener(request, timeout=0.0):  # type: ignore[no-untyped-def]
+            called["url"] = request.full_url
+            called["timeout"] = timeout
+            return _FakeResponse()
+
+        text = fetch_repo_text("LICENSE.md", opener=fake_opener, timeout=1.25)
+        self.assertEqual(text, "license text")
+        self.assertEqual(called["url"], "https://raw.githubusercontent.com/2high4schooltoday/despatch/main/LICENSE.md")
+        self.assertEqual(called["timeout"], 1.25)
+
     def test_detect_letsencrypt_cert_pair_prefers_exact_domain(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             live = Path(td)
