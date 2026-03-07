@@ -193,7 +193,8 @@ Privileged binaries installed by current releases:
 - `/opt/despatch/despatch-update-worker`
 
 Default runtime paths:
-- request: `/var/lib/despatch/update/request/update-request.json`
+- request queue: `/var/lib/despatch/update/request/update-request-*.json`
+- legacy request file (still accepted during transition): `/var/lib/despatch/update/request/update-request.json`
 - status: `/var/lib/despatch/update/status/update-status.json`
 - lock: `/var/lib/despatch/update/lock/update.lock`
 - backups: `/var/lib/despatch/update/backups/`
@@ -258,6 +259,11 @@ sudo systemctl daemon-reload
 sudo systemctl restart despatch-pam-reset-helper.socket despatch-pam-reset-helper.service
 sudo systemctl restart despatch-updater.path
 ```
+
+Updater runtime behavior:
+- Admin apply queues a request file and relies on `despatch-updater.path` to hand it to the privileged worker.
+- `despatch-updater.path` must stay `active`; if it is inactive, Admin now reports the runtime as not configured instead of leaving updates stuck in `queued`.
+- Current releases refresh updater unit templates from `deploy/` during apply so updater fixes self-propagate after one repaired/manual rollout.
 
 ## CAPTCHA with CAP standalone (Ubuntu)
 Registration supports `turnstile`, `hcaptcha`, and self-hosted [`tiagozip/cap`](https://github.com/tiagozip/cap).

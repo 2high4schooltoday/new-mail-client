@@ -6,6 +6,7 @@ import (
 	crand "crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -51,6 +52,51 @@ func dirPerm(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
+func writeUpdaterUnitFiles(t *testing.T, unitDir string) {
+	t.Helper()
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	workerPath := filepath.Join(unitDir, "fake-update-worker")
+	if err := os.WriteFile(workerPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake updater worker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("[Path]\nUnit=despatch-updater.service\n"), 0o644); err != nil {
+		t.Fatalf("write updater path unit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.service"), []byte("[Service]\nExecStart="+workerPath+"\n"), 0o644); err != nil {
+		t.Fatalf("write updater service unit: %v", err)
+	}
+}
+
+func installFakeSystemctl(t *testing.T, pathLoad, pathActive, serviceLoad, serviceActive string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "systemctl")
+	body := fmt.Sprintf(`#!/bin/sh
+prop=""
+unit=""
+for arg in "$@"; do
+  case "$arg" in
+    --property=*) prop="${arg#--property=}" ;;
+    show|--value) ;;
+    *) unit="$arg" ;;
+  esac
+done
+case "${unit}:${prop}" in
+  despatch-updater.path:LoadState) printf '%%s\n' %q ;;
+  despatch-updater.path:ActiveState) printf '%%s\n' %q ;;
+  despatch-updater.service:LoadState) printf '%%s\n' %q ;;
+  despatch-updater.service:ActiveState) printf '%%s\n' %q ;;
+  *) printf 'unsupported systemctl args: %%s\n' "$*" >&2; exit 1 ;;
+esac
+`, pathLoad, pathActive, serviceLoad, serviceActive)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestCompareVersions(t *testing.T) {
 	t.Parallel()
 	if compareVersions("v1.2.3", "v1.2.3") {
@@ -68,12 +114,8 @@ func TestQueueApplyValidationAndInProgress(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()
 	unitDir := filepath.Join(base, "units")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatalf("mkdir unit dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
-		t.Fatalf("write unit file: %v", err)
-	}
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
@@ -201,12 +243,8 @@ func TestQueueApplyIgnoresUnreadableStatusFile(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()
 	unitDir := filepath.Join(base, "units")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatalf("mkdir unit dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
-		t.Fatalf("write unit file: %v", err)
-	}
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
@@ -277,12 +315,8 @@ func TestStatusReportsRequestDirDiagnostic(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()
 	unitDir := filepath.Join(base, "units")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatalf("mkdir unit dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
-		t.Fatalf("write updater marker: %v", err)
-	}
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
@@ -327,12 +361,8 @@ func TestStatusAutoHealsRequestDirModeBeforeProbe(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()
 	unitDir := filepath.Join(base, "units")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatalf("mkdir unit dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
-		t.Fatalf("write updater marker: %v", err)
-	}
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
@@ -377,12 +407,8 @@ func TestStatusConfiguredWhenUpdaterReady(t *testing.T) {
 	st := newUpdateTestStore(t)
 	base := t.TempDir()
 	unitDir := filepath.Join(base, "units")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatalf("mkdir unit dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
-		t.Fatalf("write updater marker: %v", err)
-	}
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
 	cfg := config.Config{
 		UpdateEnabled:          true,
 		UpdateRepoOwner:        "2high4schooltoday",
@@ -408,6 +434,168 @@ func TestStatusConfiguredWhenUpdaterReady(t *testing.T) {
 	}
 	if status.ConfigDiagnostic != nil {
 		t.Fatalf("expected no config diagnostic when updater is configured, got %#v", status.ConfigDiagnostic)
+	}
+}
+
+func TestStatusReportsUpdaterPathInactiveDiagnostic(t *testing.T) {
+	st := newUpdateTestStore(t)
+	base := t.TempDir()
+	unitDir := filepath.Join(base, "units")
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "inactive", "loaded", "inactive")
+	cfg := config.Config{
+		UpdateEnabled:          true,
+		UpdateRepoOwner:        "2high4schooltoday",
+		UpdateRepoName:         "despatch",
+		UpdateCheckIntervalMin: 60,
+		UpdateHTTPTimeoutSec:   10,
+		UpdateBackupKeep:       3,
+		UpdateBaseDir:          filepath.Join(base, "update"),
+		UpdateInstallDir:       filepath.Join(base, "install"),
+		UpdateServiceName:      "despatch",
+		UpdateSystemdUnitDir:   unitDir,
+	}
+	if err := st.UpsertSetting(context.Background(), settingLastCheckAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("set last check timestamp: %v", err)
+	}
+	mgr := NewManager(cfg)
+	status, err := mgr.Status(context.Background(), st, false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Configured {
+		t.Fatalf("expected configured=false when updater path unit is inactive")
+	}
+	if status.ConfigDiagnostic == nil || status.ConfigDiagnostic.Reason != "updater_path_inactive" {
+		t.Fatalf("expected updater_path_inactive diagnostic, got %#v", status.ConfigDiagnostic)
+	}
+}
+
+func TestQueueApplyWritesUniqueRequestFile(t *testing.T) {
+	st := newUpdateTestStore(t)
+	base := t.TempDir()
+	unitDir := filepath.Join(base, "units")
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
+	cfg := config.Config{
+		UpdateEnabled:          true,
+		UpdateRepoOwner:        "2high4schooltoday",
+		UpdateRepoName:         "despatch",
+		UpdateCheckIntervalMin: 60,
+		UpdateHTTPTimeoutSec:   10,
+		UpdateBackupKeep:       3,
+		UpdateBaseDir:          filepath.Join(base, "update"),
+		UpdateInstallDir:       filepath.Join(base, "install"),
+		UpdateServiceName:      "despatch",
+		UpdateSystemdUnitDir:   unitDir,
+	}
+	mgr := NewManager(cfg)
+	req, err := mgr.QueueApply(context.Background(), st, "admin@example.com", "v1.2.3", "req-queue")
+	if err != nil {
+		t.Fatalf("queue apply: %v", err)
+	}
+	pending, err := pendingRequestPaths(cfg)
+	if err != nil {
+		t.Fatalf("pending request paths: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected exactly one pending request path, got %v", pending)
+	}
+	if filepath.Base(pending[0]) == filepath.Base(requestPath(cfg)) {
+		t.Fatalf("expected non-legacy queued request file, got %s", pending[0])
+	}
+	var decoded ApplyRequest
+	if err := readJSONFile(pending[0], &decoded); err != nil {
+		t.Fatalf("read queued request: %v", err)
+	}
+	if decoded.RequestID != req.RequestID {
+		t.Fatalf("expected queued request id %q, got %q", req.RequestID, decoded.RequestID)
+	}
+}
+
+func TestStatusFailsStaleQueuedRequest(t *testing.T) {
+	st := newUpdateTestStore(t)
+	base := t.TempDir()
+	unitDir := filepath.Join(base, "units")
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "inactive", "loaded", "inactive")
+	cfg := config.Config{
+		UpdateEnabled:          true,
+		UpdateRepoOwner:        "2high4schooltoday",
+		UpdateRepoName:         "despatch",
+		UpdateCheckIntervalMin: 60,
+		UpdateHTTPTimeoutSec:   10,
+		UpdateBackupKeep:       3,
+		UpdateBaseDir:          filepath.Join(base, "update"),
+		UpdateInstallDir:       filepath.Join(base, "install"),
+		UpdateServiceName:      "despatch",
+		UpdateSystemdUnitDir:   unitDir,
+	}
+	mgr := NewManager(cfg)
+	now := time.Now().UTC()
+	mgr.now = func() time.Time { return now }
+	req := ApplyRequest{
+		RequestID:     "req-stale",
+		RequestedAt:   now.Add(-2 * updateQueuePickupGrace),
+		RequestedBy:   "admin@example.com",
+		TargetVersion: "v1.2.3",
+	}
+	if err := ensureUpdaterRequestStatusDirectories(cfg); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writeJSONAtomic(requestQueuePath(req, cfg), req, 0o640, updaterDirModeForPath(cfg, requestDir(cfg), 0o750)); err != nil {
+		t.Fatalf("write request file: %v", err)
+	}
+	if err := writeJSONAtomic(statusPath(cfg), ApplyStatus{
+		State:         ApplyStateQueued,
+		RequestID:     req.RequestID,
+		RequestedAt:   req.RequestedAt,
+		TargetVersion: req.TargetVersion,
+	}, 0o640, updaterDirModeForPath(cfg, statusDir(cfg), 0o750)); err != nil {
+		t.Fatalf("write status file: %v", err)
+	}
+	if err := st.UpsertSetting(context.Background(), settingLastCheckAt, now.Format(time.RFC3339)); err != nil {
+		t.Fatalf("set last check timestamp: %v", err)
+	}
+	status, err := mgr.Status(context.Background(), st, false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Apply.State != ApplyStateFailed {
+		t.Fatalf("expected stale queued request to become failed, got %#v", status.Apply)
+	}
+	if !strings.Contains(status.Apply.Error, "queued request was not picked up") {
+		t.Fatalf("unexpected stale queue error: %q", status.Apply.Error)
+	}
+	pending, err := pendingRequestPaths(cfg)
+	if err != nil {
+		t.Fatalf("pending request paths: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected stale request files to be removed, got %v", pending)
+	}
+}
+
+func TestFindPayloadRootRequiresDeploy(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"despatch", "despatch-pam-reset-helper", "despatch-update-worker"} {
+		if err := os.WriteFile(filepath.Join(root, rel), []byte("ok"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{"web", "migrations"} {
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+	}
+	if _, err := findPayloadRoot(root); err == nil {
+		t.Fatalf("expected missing deploy directory to fail payload root validation")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "deploy"), 0o755); err != nil {
+		t.Fatalf("mkdir deploy: %v", err)
+	}
+	if _, err := findPayloadRoot(root); err != nil {
+		t.Fatalf("expected payload root validation to pass once deploy exists: %v", err)
 	}
 }
 

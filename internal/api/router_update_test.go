@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,51 @@ import (
 	"despatch/internal/update"
 	"despatch/internal/util"
 )
+
+func writeUpdaterUnitFilesForAPITest(t *testing.T, unitDir string) {
+	t.Helper()
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatalf("mkdir unit dir: %v", err)
+	}
+	workerPath := filepath.Join(unitDir, "fake-update-worker")
+	if err := os.WriteFile(workerPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake updater worker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("[Path]\nUnit=despatch-updater.service\n"), 0o644); err != nil {
+		t.Fatalf("write updater path unit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.service"), []byte("[Service]\nExecStart="+workerPath+"\n"), 0o644); err != nil {
+		t.Fatalf("write updater service unit: %v", err)
+	}
+}
+
+func installFakeSystemctlForAPITest(t *testing.T, pathLoad, pathActive, serviceLoad, serviceActive string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "systemctl")
+	body := fmt.Sprintf(`#!/bin/sh
+prop=""
+unit=""
+for arg in "$@"; do
+  case "$arg" in
+    --property=*) prop="${arg#--property=}" ;;
+    show|--value) ;;
+    *) unit="$arg" ;;
+  esac
+done
+case "${unit}:${prop}" in
+  despatch-updater.path:LoadState) printf '%%s\n' %q ;;
+  despatch-updater.path:ActiveState) printf '%%s\n' %q ;;
+  despatch-updater.service:LoadState) printf '%%s\n' %q ;;
+  despatch-updater.service:ActiveState) printf '%%s\n' %q ;;
+  *) printf 'unsupported systemctl args: %%s\n' "$*" >&2; exit 1 ;;
+esac
+`, pathLoad, pathActive, serviceLoad, serviceActive)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 type updateTestFixture struct {
 	router     http.Handler
@@ -66,12 +112,8 @@ func newUpdateFixture(t *testing.T, enabled bool, configured bool) updateTestFix
 	updateBase := filepath.Join(base, "update")
 	unitDir := filepath.Join(base, "units")
 	if configured {
-		if err := os.MkdirAll(unitDir, 0o755); err != nil {
-			t.Fatalf("mkdir unit dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(unitDir, "despatch-updater.path"), []byte("ok"), 0o644); err != nil {
-			t.Fatalf("write updater unit marker: %v", err)
-		}
+		writeUpdaterUnitFilesForAPITest(t, unitDir)
+		installFakeSystemctlForAPITest(t, "loaded", "active", "loaded", "inactive")
 	}
 
 	cfg := config.Config{
@@ -104,6 +146,13 @@ func newUpdateFixture(t *testing.T, enabled bool, configured bool) updateTestFix
 		store:      st,
 		requestDir: filepath.Join(updateBase, "request"),
 	}
+}
+
+func newUpdateFixtureWithRuntimeState(t *testing.T, enabled bool, pathLoad, pathActive, serviceLoad, serviceActive string) updateTestFixture {
+	t.Helper()
+	fx := newUpdateFixture(t, enabled, true)
+	installFakeSystemctlForAPITest(t, pathLoad, pathActive, serviceLoad, serviceActive)
+	return fx
 }
 
 func loginCookies(t *testing.T, router http.Handler, email, password string) (*http.Cookie, *http.Cookie) {
@@ -268,5 +317,49 @@ func TestAdminUpdateApplyQueuesAndBlocksConcurrent(t *testing.T) {
 	}
 	if apiErr.Code != "update_in_progress" {
 		t.Fatalf("expected update_in_progress, got %q", apiErr.Code)
+	}
+}
+
+func TestAdminUpdateStatusReportsInactiveUpdaterPathDiagnostic(t *testing.T) {
+	fx := newUpdateFixtureWithRuntimeState(t, true, "loaded", "inactive", "loaded", "inactive")
+	sessionCookie, _ := loginCookies(t, fx.router, "admin@example.com", "SecretPass123!")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/system/update/status", nil)
+	req.AddCookie(sessionCookie)
+	rec := httptest.NewRecorder()
+	fx.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload update.StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode status payload: %v body=%s", err, rec.Body.String())
+	}
+	if payload.Configured {
+		t.Fatalf("expected configured=false when updater path unit is inactive")
+	}
+	if payload.ConfigDiagnostic == nil || payload.ConfigDiagnostic.Reason != "updater_path_inactive" {
+		t.Fatalf("expected updater_path_inactive diagnostic, got %#v", payload.ConfigDiagnostic)
+	}
+}
+
+func TestAdminUpdateApplyReturns503WhenUpdaterPathInactive(t *testing.T) {
+	fx := newUpdateFixtureWithRuntimeState(t, true, "loaded", "inactive", "loaded", "inactive")
+	sessionCookie, csrfCookie := loginCookies(t, fx.router, "admin@example.com", "SecretPass123!")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/system/update/apply", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfCookie.Value)
+	req.AddCookie(sessionCookie)
+	req.AddCookie(csrfCookie)
+	rec := httptest.NewRecorder()
+	fx.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var apiErr util.APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode error payload: %v body=%s", err, rec.Body.String())
+	}
+	if apiErr.Code != "updater_not_configured" {
+		t.Fatalf("expected updater_not_configured, got %#v", apiErr)
 	}
 }

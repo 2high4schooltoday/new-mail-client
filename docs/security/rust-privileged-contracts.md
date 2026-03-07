@@ -44,7 +44,8 @@ Logging:
 ## 2. Updater Worker File Contract
 
 Paths (under `UPDATE_BASE_DIR`):
-- request: `request/update-request.json`
+- request queue: `request/update-request-*.json`
+- legacy request path accepted during transition: `request/update-request.json`
 - status: `status/update-status.json`
 - lock: `lock/update.lock`
 - backups: `backups/`
@@ -64,6 +65,7 @@ Status JSON schema:
 
 Operational rules:
 - Request/status files remain JSON and pretty-printed
+- Workers consume the oldest pending request file and continue accepting the legacy fixed request filename during transition
 - Lock file remains exclusive-create guarded
 - Worker maintains staged swap + rollback semantics
 - Worker rejects symlinked request/status paths before reads/writes

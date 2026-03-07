@@ -115,11 +115,10 @@ fn main() {
 
 fn run() -> Result<(), WorkerError> {
     let cfg = Config::from_env()?;
-    let req_path = request_path(&cfg);
     if !cfg.update_enabled {
         // Prevent a stale request file from repeatedly retriggering the path unit
         // when updates are intentionally disabled.
-        let _ = fs::remove_file(&req_path);
+        let _ = remove_pending_request_paths(&cfg);
         return Ok(());
     }
 
@@ -144,6 +143,12 @@ fn run() -> Result<(), WorkerError> {
     )?;
     drop(lock_file);
     let _lock_guard = PathCleanup::new(lock_path);
+
+    let req_path = match first_pending_request_path(&cfg) {
+        Ok(path) => path,
+        Err(WorkerError::Io(err)) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
 
     let mut req: ApplyRequest = match read_json_file(&req_path) {
         Ok(value) => value,
@@ -373,6 +378,58 @@ fn backups_dir(cfg: &Config) -> PathBuf {
 
 fn request_path(cfg: &Config) -> PathBuf {
     request_dir(cfg).join("update-request.json")
+}
+
+fn request_queue_path(req: &ApplyRequest, cfg: &Config) -> PathBuf {
+    let request_id = sanitize_path_token(req.request_id.trim());
+    let ts = chrono::DateTime::parse_from_rfc3339(req.requested_at.trim())
+        .map(|v| v.timestamp_nanos_opt().unwrap_or_default())
+        .unwrap_or_else(|_| Utc::now().timestamp_nanos_opt().unwrap_or_default());
+    request_dir(cfg).join(format!("update-request-{ts:020}-{request_id}.json"))
+}
+
+fn pending_request_paths(cfg: &Config) -> Result<Vec<PathBuf>, WorkerError> {
+    let mut out = Vec::new();
+    let legacy = request_path(cfg);
+    if legacy.exists() {
+        out.push(legacy);
+    }
+    let mut queued = Vec::new();
+    if request_dir(cfg).exists() {
+        for entry in fs::read_dir(request_dir(cfg))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("update-request-") && name.ends_with(".json") {
+                queued.push(entry.path());
+            }
+        }
+    }
+    queued.sort();
+    queued.dedup();
+    out.extend(queued);
+    Ok(out)
+}
+
+fn first_pending_request_path(cfg: &Config) -> Result<PathBuf, WorkerError> {
+    pending_request_paths(cfg)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| WorkerError::Io(io::Error::from(io::ErrorKind::NotFound)))
+}
+
+fn remove_pending_request_paths(cfg: &Config) -> Result<(), WorkerError> {
+    for path in pending_request_paths(cfg)? {
+        if let Err(err) = fs::remove_file(&path) {
+            if err.kind() != io::ErrorKind::NotFound {
+                return Err(WorkerError::Io(err));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn status_path(cfg: &Config) -> PathBuf {
@@ -645,6 +702,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         &payload_root.join("migrations"),
         &stage_dir.join("migrations"),
     )?;
+    copy_dir(&payload_root.join("deploy"), &stage_dir.join("deploy"))?;
     let mailsec_payload = payload_root.join("despatch-mailsec-service");
     let mailsec_payload_present = mailsec_payload.exists();
     if mailsec_payload_present {
@@ -654,32 +712,13 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
             0o755,
         )?;
     }
-    let mailsec_unit_path = payload_root.join("deploy").join("despatch-mailsec.service");
-    let mailsec_unit_present = mailsec_unit_path.exists();
     let current_mailsec = cfg.update_install_dir.join("despatch-mailsec-service");
     let current_mailsec_present = current_mailsec.exists();
-    let installed_mailsec_unit = cfg.update_systemd_unit_dir.join("despatch-mailsec.service");
-    let installed_mailsec_unit_present = installed_mailsec_unit.exists();
-    let install_deploy_mailsec_unit = cfg
-        .update_install_dir
-        .join("deploy")
-        .join("despatch-mailsec.service");
-    let install_deploy_mailsec_unit_present = install_deploy_mailsec_unit.exists();
     let mailsec_unit_known_to_systemd = systemd_unit_known("despatch-mailsec.service");
 
     if cfg.mailsec_enabled && !mailsec_payload_present && !current_mailsec_present {
         return Err(WorkerError::Message(
             "mailsec is enabled but despatch-mailsec-service is missing in both current install and release payload".to_string(),
-        ));
-    }
-    if cfg.mailsec_enabled
-        && !mailsec_unit_present
-        && !installed_mailsec_unit_present
-        && !install_deploy_mailsec_unit_present
-        && !mailsec_unit_known_to_systemd
-    {
-        return Err(WorkerError::Message(
-            "mailsec is enabled but despatch-mailsec.service is missing in payload, install deploy/, and systemd unit directory".to_string(),
         ));
     }
 
@@ -700,6 +739,9 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     let prev_mig = cfg
         .update_install_dir
         .join(format!(".prev-migrations-{}", sanitize_path_token(&run_id)));
+    let prev_deploy = cfg
+        .update_install_dir
+        .join(format!(".prev-deploy-{}", sanitize_path_token(&run_id)));
     let prev_mailsec = cfg
         .update_install_dir
         .join(format!(".prev-mailsec-{}", sanitize_path_token(&run_id)));
@@ -709,12 +751,14 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     let current_worker = cfg.update_install_dir.join("despatch-update-worker");
     let current_web = cfg.update_install_dir.join("web");
     let current_mig = cfg.update_install_dir.join("migrations");
+    let current_deploy = cfg.update_install_dir.join("deploy");
 
     let stage_bin = stage_dir.join("despatch");
     let stage_pam = stage_dir.join("despatch-pam-reset-helper");
     let stage_worker = stage_dir.join("despatch-update-worker");
     let stage_web = stage_dir.join("web");
     let stage_mig = stage_dir.join("migrations");
+    let stage_deploy = stage_dir.join("deploy");
     let stage_mailsec = stage_dir.join("despatch-mailsec-service");
 
     let _ = fs::remove_file(&prev_bin);
@@ -722,6 +766,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     let _ = fs::remove_file(&prev_worker);
     let _ = fs::remove_dir_all(&prev_web);
     let _ = fs::remove_dir_all(&prev_mig);
+    let _ = fs::remove_dir_all(&prev_deploy);
     let _ = fs::remove_file(&prev_mailsec);
 
     let swap_items = vec![
@@ -747,19 +792,36 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         }
         swapped.push((current_mailsec.clone(), prev_mailsec.clone()));
     }
-
-    let mut mailsec_unit_source: Option<PathBuf> = None;
-    if mailsec_unit_present {
-        mailsec_unit_source = Some(mailsec_unit_path.clone());
-    } else if install_deploy_mailsec_unit_present {
-        mailsec_unit_source = Some(install_deploy_mailsec_unit.clone());
+    if let Err(err) = swap_path_optional(&current_deploy, &stage_deploy, &prev_deploy) {
+        rollback_paths(&swapped)?;
+        return Err(err);
     }
+    swapped.push((current_deploy.clone(), prev_deploy.clone()));
+
+    let updater_service_src = current_deploy.join("despatch-updater.service");
+    let updater_path_src = current_deploy.join("despatch-updater.path");
+    if !updater_service_src.exists() || !updater_path_src.exists() {
+        rollback_paths(&swapped)?;
+        return Err(WorkerError::Message(
+            "deploy payload is missing despatch-updater.path or despatch-updater.service after refresh".to_string(),
+        ));
+    }
+    copy_file(
+        &updater_service_src,
+        &cfg.update_systemd_unit_dir.join("despatch-updater.service"),
+        0o644,
+    )?;
+    copy_file(
+        &updater_path_src,
+        &cfg.update_systemd_unit_dir.join("despatch-updater.path"),
+        0o644,
+    )?;
+
+    let mailsec_unit_source = current_deploy.join("despatch-mailsec.service");
     let mailsec_unit_dst = cfg.update_systemd_unit_dir.join("despatch-mailsec.service");
-    if let Some(src) = mailsec_unit_source {
-        if let Err(err) = copy_file(&src, &mailsec_unit_dst, 0o644) {
-            if is_read_only_or_permission_error(&err)
-                && (installed_mailsec_unit_present || mailsec_unit_known_to_systemd)
-            {
+    if mailsec_unit_source.exists() {
+        if let Err(err) = copy_file(&mailsec_unit_source, &mailsec_unit_dst, 0o644) {
+            if is_read_only_or_permission_error(&err) && mailsec_unit_known_to_systemd {
                 // Keep using existing unit when systemd unit dir is read-only.
             } else {
                 rollback_paths(&swapped)?;
@@ -767,12 +829,23 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
                     "mailsec unit install failed: {err}"
                 )));
             }
-        } else if let Err(err) = run_cmd("systemctl", &["daemon-reload"], Duration::from_secs(60)) {
-            rollback_paths(&swapped)?;
-            return Err(WorkerError::Message(format!(
-                "mailsec daemon-reload failed: {err}"
-            )));
         }
+    }
+    if let Err(err) = run_cmd("systemctl", &["daemon-reload"], Duration::from_secs(60)) {
+        rollback_paths(&swapped)?;
+        return Err(WorkerError::Message(format!(
+            "systemd daemon-reload failed: {err}"
+        )));
+    }
+    if let Err(err) = run_cmd(
+        "systemctl",
+        &["enable", "--now", "despatch-updater.path"],
+        Duration::from_secs(60),
+    ) {
+        rollback_paths(&swapped)?;
+        return Err(WorkerError::Message(format!(
+            "updater path activation failed: {err}"
+        )));
     }
     let mailsec_unit_now_present =
         mailsec_unit_dst.exists() || systemd_unit_known("despatch-mailsec.service");
@@ -782,11 +855,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
             "mailsec is enabled but systemd unit despatch-mailsec.service is still missing after update".to_string(),
         ));
     }
-    if cfg.mailsec_enabled
-        || mailsec_payload_present
-        || mailsec_unit_present
-        || mailsec_unit_now_present
-    {
+    if cfg.mailsec_enabled || mailsec_payload_present || mailsec_unit_now_present {
         if let Err(err) = run_cmd(
             "systemctl",
             &["enable", "--now", "despatch-mailsec"],
@@ -843,6 +912,7 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
     move_if_exists(&prev_worker, &backup_dest.join("despatch-update-worker"))?;
     move_if_exists(&prev_web, &backup_dest.join("web"))?;
     move_if_exists(&prev_mig, &backup_dest.join("migrations"))?;
+    move_if_exists(&prev_deploy, &backup_dest.join("deploy"))?;
     move_if_exists(&prev_mailsec, &backup_dest.join("despatch-mailsec-service"))?;
 
     trim_backups(&backups_dir(cfg), cfg.update_backup_keep)?;
@@ -1203,6 +1273,7 @@ fn find_payload_root(extract_dir: &Path) -> Result<PathBuf, WorkerError> {
         "despatch-update-worker",
         "web",
         "migrations",
+        "deploy",
     ];
 
     if has_required_paths(extract_dir, &required) {
@@ -1218,7 +1289,7 @@ fn find_payload_root(extract_dir: &Path) -> Result<PathBuf, WorkerError> {
     }
 
     Err(WorkerError::Message(
-        "release payload missing required files (despatch, despatch-pam-reset-helper, despatch-update-worker, web, migrations)".to_string(),
+        "release payload missing required files (despatch, despatch-pam-reset-helper, despatch-update-worker, web, migrations, deploy)".to_string(),
     ))
 }
 
@@ -1610,6 +1681,59 @@ mod tests {
 
         assert!(!req_path.exists());
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn pending_request_paths_include_legacy_and_queue_requests() {
+        let unique = format!(
+            "despatch-update-worker-queue-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let cfg = test_config(base.clone());
+        fs::create_dir_all(request_dir(&cfg)).expect("create request dir");
+        fs::write(request_path(&cfg), b"{}").expect("write legacy request");
+        let queued_req = ApplyRequest {
+            request_id: "second".to_string(),
+            requested_at: "1970-01-01T00:00:00Z".to_string(),
+            requested_by: String::new(),
+            target_version: String::new(),
+        };
+        fs::write(request_queue_path(&queued_req, &cfg), b"{}").expect("write queued request");
+
+        let paths = pending_request_paths(&cfg).expect("pending request paths");
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], request_path(&cfg));
+        assert!(paths[1]
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .starts_with("update-request-"));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn find_payload_root_requires_deploy_dir() {
+        let unique = format!(
+            "despatch-update-worker-payload-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let root = std::env::temp_dir().join(unique);
+        fs::create_dir_all(root.join("web")).expect("mkdir web");
+        fs::create_dir_all(root.join("migrations")).expect("mkdir migrations");
+        fs::write(root.join("despatch"), b"ok").expect("write despatch");
+        fs::write(root.join("despatch-pam-reset-helper"), b"ok").expect("write pam helper");
+        fs::write(root.join("despatch-update-worker"), b"ok").expect("write update worker");
+
+        assert!(find_payload_root(&root).is_err());
+
+        fs::create_dir_all(root.join("deploy")).expect("mkdir deploy");
+        assert!(find_payload_root(&root).is_ok());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

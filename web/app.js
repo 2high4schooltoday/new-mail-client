@@ -5445,6 +5445,14 @@ function updateConfigDiagnosticMessage(status) {
   let headline = "Updater is not configured on this host.";
   if (reason === "updater_unit_missing") {
     headline = "Updater units are missing on this host.";
+  } else if (reason === "updater_service_missing") {
+    headline = "Updater service unit is missing or not loaded by systemd.";
+  } else if (reason === "updater_path_inactive") {
+    headline = "Updater path unit is installed but not active.";
+  } else if (reason === "updater_worker_missing") {
+    headline = "Updater service does not resolve to a working updater executable.";
+  } else if (reason === "updater_runtime_probe_failed") {
+    headline = "Updater runtime could not be inspected through systemd.";
   } else if (reason === "request_dir_unwritable" || reason === "status_dir_unwritable") {
     headline = "Updater request/status directories are not writable by the despatch service user.";
   } else if (reason === "request_probe_failed" || reason === "status_probe_failed") {

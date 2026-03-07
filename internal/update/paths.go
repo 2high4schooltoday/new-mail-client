@@ -41,3 +41,15 @@ func lockPath(cfg config.Config) string {
 func updaterPathUnitPath(cfg config.Config) string {
 	return filepath.Join(cfg.UpdateSystemdUnitDir, "despatch-updater.path")
 }
+
+func updaterServiceUnitPath(cfg config.Config) string {
+	return filepath.Join(cfg.UpdateSystemdUnitDir, "despatch-updater.service")
+}
+
+func updaterServiceOverrideDir(cfg config.Config) string {
+	return filepath.Join(cfg.UpdateSystemdUnitDir, "despatch-updater.service.d")
+}
+
+func installDeployDir(cfg config.Config) string {
+	return filepath.Join(cfg.UpdateInstallDir, "deploy")
+}

@@ -38,11 +38,10 @@ func RunWorker(ctx context.Context, cfg config.Config) error {
 }
 
 func (m *Manager) runWorker(ctx context.Context) error {
-	reqPath := requestPath(m.cfg)
 	if !m.cfg.UpdateEnabled {
 		// Prevent a stale request file from repeatedly retriggering the path unit
 		// when updates are intentionally disabled.
-		_ = os.Remove(reqPath)
+		_ = removePendingRequestPaths(m.cfg)
 		return nil
 	}
 	if err := ensureUpdaterRuntimeDirectories(m.cfg); err != nil {
@@ -58,6 +57,14 @@ func (m *Manager) runWorker(ctx context.Context) error {
 	_, _ = lockFD.WriteString(fmt.Sprintf("pid=%d started_at=%s\n", os.Getpid(), m.now().Format(time.RFC3339)))
 	_ = lockFD.Close()
 	defer os.Remove(lockPath(m.cfg))
+
+	reqPath, err := firstPendingRequestPath(m.cfg)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
 
 	var req ApplyRequest
 	if err := readJSONFile(reqPath, &req); err != nil {
@@ -237,10 +244,19 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if err := copyFile(filepath.Join(payloadRoot, "despatch"), filepath.Join(stageDir, "despatch"), 0o755); err != nil {
 		return "", false, err
 	}
+	if err := copyFile(filepath.Join(payloadRoot, "despatch-pam-reset-helper"), filepath.Join(stageDir, "despatch-pam-reset-helper"), 0o755); err != nil {
+		return "", false, err
+	}
+	if err := copyFile(filepath.Join(payloadRoot, "despatch-update-worker"), filepath.Join(stageDir, "despatch-update-worker"), 0o755); err != nil {
+		return "", false, err
+	}
 	if err := copyDir(filepath.Join(payloadRoot, "web"), filepath.Join(stageDir, "web")); err != nil {
 		return "", false, err
 	}
 	if err := copyDir(filepath.Join(payloadRoot, "migrations"), filepath.Join(stageDir, "migrations")); err != nil {
+		return "", false, err
+	}
+	if err := copyDir(filepath.Join(payloadRoot, "deploy"), filepath.Join(stageDir, "deploy")); err != nil {
 		return "", false, err
 	}
 	mailSecPayloadPath := filepath.Join(payloadRoot, "despatch-mailsec-service")
@@ -253,13 +269,7 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	mailSecUnitPath := filepath.Join(payloadRoot, "deploy", "despatch-mailsec.service")
-	mailSecUnitPresent := false
-	if _, err := os.Stat(mailSecUnitPath); err == nil {
-		mailSecUnitPresent = true
-	} else if !os.IsNotExist(err) {
-		return "", false, err
-	}
+
 	currentMailSec := filepath.Join(m.cfg.UpdateInstallDir, "despatch-mailsec-service")
 	currentMailSecPresent := false
 	if _, err := os.Stat(currentMailSec); err == nil {
@@ -267,52 +277,54 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
-	systemMailSecUnit := filepath.Join(m.cfg.UpdateSystemdUnitDir, "despatch-mailsec.service")
-	systemMailSecUnitPresent := false
-	if _, err := os.Stat(systemMailSecUnit); err == nil {
-		systemMailSecUnitPresent = true
-	} else if !os.IsNotExist(err) {
-		return "", false, err
-	}
-	installDeployMailSecUnit := filepath.Join(m.cfg.UpdateInstallDir, "deploy", "despatch-mailsec.service")
-	installDeployMailSecUnitPresent := false
-	if _, err := os.Stat(installDeployMailSecUnit); err == nil {
-		installDeployMailSecUnitPresent = true
-	} else if !os.IsNotExist(err) {
-		return "", false, err
-	}
 	mailSecUnitKnownToSystemd := systemdUnitKnown(ctx, "despatch-mailsec.service")
 	if m.cfg.MailSecEnabled && !mailSecPayloadPresent && !currentMailSecPresent {
 		return "", false, fmt.Errorf("mailsec is enabled but despatch-mailsec-service is missing in both current install and release payload")
 	}
-	if m.cfg.MailSecEnabled && !mailSecUnitPresent && !systemMailSecUnitPresent && !installDeployMailSecUnitPresent && !mailSecUnitKnownToSystemd {
-		return "", false, fmt.Errorf("mailsec is enabled but despatch-mailsec.service is missing in payload, install deploy/, and systemd unit directory")
-	}
 
 	prevBin := filepath.Join(m.cfg.UpdateInstallDir, ".prev-despatch-"+sanitizePathToken(runID))
+	prevPam := filepath.Join(m.cfg.UpdateInstallDir, ".prev-pam-reset-helper-"+sanitizePathToken(runID))
+	prevWorker := filepath.Join(m.cfg.UpdateInstallDir, ".prev-update-worker-"+sanitizePathToken(runID))
 	prevWeb := filepath.Join(m.cfg.UpdateInstallDir, ".prev-web-"+sanitizePathToken(runID))
 	prevMig := filepath.Join(m.cfg.UpdateInstallDir, ".prev-migrations-"+sanitizePathToken(runID))
+	prevDeploy := filepath.Join(m.cfg.UpdateInstallDir, ".prev-deploy-"+sanitizePathToken(runID))
 	prevMailSec := filepath.Join(m.cfg.UpdateInstallDir, ".prev-mailsec-"+sanitizePathToken(runID))
 
 	currentBin := filepath.Join(m.cfg.UpdateInstallDir, "despatch")
+	currentPam := filepath.Join(m.cfg.UpdateInstallDir, "despatch-pam-reset-helper")
+	currentWorker := filepath.Join(m.cfg.UpdateInstallDir, "despatch-update-worker")
 	currentWeb := filepath.Join(m.cfg.UpdateInstallDir, "web")
 	currentMig := filepath.Join(m.cfg.UpdateInstallDir, "migrations")
+	currentDeploy := installDeployDir(m.cfg)
 	currentMailSec = filepath.Join(m.cfg.UpdateInstallDir, "despatch-mailsec-service")
 	stageBin := filepath.Join(stageDir, "despatch")
+	stagePam := filepath.Join(stageDir, "despatch-pam-reset-helper")
+	stageWorker := filepath.Join(stageDir, "despatch-update-worker")
 	stageWeb := filepath.Join(stageDir, "web")
 	stageMig := filepath.Join(stageDir, "migrations")
+	stageDeploy := filepath.Join(stageDir, "deploy")
 	stageMailSec := filepath.Join(stageDir, "despatch-mailsec-service")
 
-	for _, p := range []string{prevBin, prevWeb, prevMig, prevMailSec} {
+	for _, p := range []string{prevBin, prevPam, prevWorker, prevWeb, prevMig, prevDeploy, prevMailSec} {
 		_ = os.RemoveAll(p)
 	}
 
 	swapped := false
+	pamSwapped := false
+	workerSwapped := false
+	deploySwapped := false
 	mailSecSwapped := false
 	rollback := func() error {
 		_ = os.RemoveAll(currentWeb)
 		_ = os.RemoveAll(currentMig)
+		_ = os.RemoveAll(currentDeploy)
 		_ = os.Remove(currentBin)
+		if pamSwapped {
+			_ = os.Remove(currentPam)
+		}
+		if workerSwapped {
+			_ = os.Remove(currentWorker)
+		}
 		if mailSecSwapped {
 			_ = os.Remove(currentMailSec)
 		}
@@ -331,6 +343,27 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 				return err
 			}
 		}
+		if pamSwapped {
+			if _, err := os.Stat(prevPam); err == nil {
+				if err := os.Rename(prevPam, currentPam); err != nil {
+					return err
+				}
+			}
+		}
+		if workerSwapped {
+			if _, err := os.Stat(prevWorker); err == nil {
+				if err := os.Rename(prevWorker, currentWorker); err != nil {
+					return err
+				}
+			}
+		}
+		if deploySwapped {
+			if _, err := os.Stat(prevDeploy); err == nil {
+				if err := os.Rename(prevDeploy, currentDeploy); err != nil {
+					return err
+				}
+			}
+		}
 		if mailSecSwapped {
 			if _, err := os.Stat(prevMailSec); err == nil {
 				if err := os.Rename(prevMailSec, currentMailSec); err != nil {
@@ -344,6 +377,16 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if err := swapPath(currentBin, stageBin, prevBin); err != nil {
 		return "", false, err
 	}
+	if err := swapPathOptional(currentPam, stagePam, prevPam); err != nil {
+		_ = rollback()
+		return "", false, err
+	}
+	pamSwapped = true
+	if err := swapPathOptional(currentWorker, stageWorker, prevWorker); err != nil {
+		_ = rollback()
+		return "", false, err
+	}
+	workerSwapped = true
 	if err := swapPath(currentWeb, stageWeb, prevWeb); err != nil {
 		_ = rollback()
 		return "", false, err
@@ -352,6 +395,11 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		_ = rollback()
 		return "", false, err
 	}
+	if err := swapPathOptional(currentDeploy, stageDeploy, prevDeploy); err != nil {
+		_ = rollback()
+		return "", false, err
+	}
+	deploySwapped = true
 	if mailSecPayloadPresent {
 		if err := swapPathOptional(currentMailSec, stageMailSec, prevMailSec); err != nil {
 			_ = rollback()
@@ -361,17 +409,49 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	}
 	swapped = true
 
-	mailSecUnitSource := ""
-	switch {
-	case mailSecUnitPresent:
-		mailSecUnitSource = mailSecUnitPath
-	case installDeployMailSecUnitPresent:
-		mailSecUnitSource = installDeployMailSecUnit
-	}
+	mailSecUnitSource := filepath.Join(currentDeploy, "despatch-mailsec.service")
 	mailSecUnitDst := filepath.Join(m.cfg.UpdateSystemdUnitDir, "despatch-mailsec.service")
-	if mailSecUnitSource != "" {
+	updaterServiceSource := filepath.Join(currentDeploy, "despatch-updater.service")
+	updaterPathSource := filepath.Join(currentDeploy, "despatch-updater.path")
+	updaterServiceDst := updaterServiceUnitPath(m.cfg)
+	updaterPathDst := updaterPathUnitPath(m.cfg)
+	if _, err := os.Stat(updaterServiceSource); err != nil {
+		if rbErr := rollback(); rbErr != nil {
+			return "", false, fmt.Errorf("updater service unit missing after deploy refresh: %v; rollback failed: %v", err, rbErr)
+		}
+		return "", true, fmt.Errorf("deploy payload is missing despatch-updater.service after refresh")
+	}
+	if _, err := os.Stat(updaterPathSource); err != nil {
+		if rbErr := rollback(); rbErr != nil {
+			return "", false, fmt.Errorf("updater path unit missing after deploy refresh: %v; rollback failed: %v", err, rbErr)
+		}
+		return "", true, fmt.Errorf("deploy payload is missing despatch-updater.path after refresh")
+	}
+
+	runtimeBeforeUnitRefresh := m.runtimeProbe(ctx, m.cfg)
+	reloadRequired := false
+	for _, unitCopy := range []struct {
+		src         string
+		dst         string
+		description string
+	}{
+		{src: updaterServiceSource, dst: updaterServiceDst, description: "updater service"},
+		{src: updaterPathSource, dst: updaterPathDst, description: "updater path"},
+	} {
+		if err := copyFile(unitCopy.src, unitCopy.dst, 0o644); err != nil {
+			if isReadOnlyOrPermissionError(err) && runtimeBeforeUnitRefresh.Healthy() {
+				continue
+			}
+			if rbErr := rollback(); rbErr != nil {
+				return "", false, fmt.Errorf("%s unit install failed: %v; rollback failed: %v", unitCopy.description, err, rbErr)
+			}
+			return "", true, err
+		}
+		reloadRequired = true
+	}
+	if _, err := os.Stat(mailSecUnitSource); err == nil {
 		if err := copyFile(mailSecUnitSource, mailSecUnitDst, 0o644); err != nil {
-			if isReadOnlyOrPermissionError(err) && (systemMailSecUnitPresent || mailSecUnitKnownToSystemd) {
+			if isReadOnlyOrPermissionError(err) && mailSecUnitKnownToSystemd {
 				// Keep using the existing unit when systemd unit dir cannot be modified (e.g. read-only host rootfs).
 			} else {
 				if rbErr := rollback(); rbErr != nil {
@@ -379,13 +459,20 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 				}
 				return "", true, err
 			}
-		} else {
-			if err := runCmd(ctx, "systemctl", "daemon-reload"); err != nil {
-				if rbErr := rollback(); rbErr != nil {
-					return "", false, fmt.Errorf("mailsec daemon-reload failed: %v; rollback failed: %v", err, rbErr)
-				}
-				return "", true, err
+		}
+		reloadRequired = true
+	} else if err != nil && !os.IsNotExist(err) {
+		if rbErr := rollback(); rbErr != nil {
+			return "", false, fmt.Errorf("mailsec unit stat failed: %v; rollback failed: %v", err, rbErr)
+		}
+		return "", true, err
+	}
+	if reloadRequired {
+		if err := runCmd(ctx, "systemctl", "daemon-reload"); err != nil {
+			if rbErr := rollback(); rbErr != nil {
+				return "", false, fmt.Errorf("systemd daemon-reload failed: %v; rollback failed: %v", err, rbErr)
 			}
+			return "", true, err
 		}
 	}
 	mailSecUnitNowPresent := false
@@ -400,13 +487,26 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 	if !mailSecUnitNowPresent {
 		mailSecUnitNowPresent = systemdUnitKnown(ctx, "despatch-mailsec.service")
 	}
+	if err := runCmd(ctx, "systemctl", "enable", "--now", "despatch-updater.path"); err != nil {
+		if rbErr := rollback(); rbErr != nil {
+			return "", false, fmt.Errorf("updater path activation failed: %v; rollback failed: %v", err, rbErr)
+		}
+		return "", true, err
+	}
+	runtimeAfterUnitRefresh := m.runtimeProbe(ctx, m.cfg)
+	if !runtimeAfterUnitRefresh.Healthy() {
+		if rbErr := rollback(); rbErr != nil {
+			return "", false, fmt.Errorf("updater runtime is unhealthy after unit refresh: %s; rollback failed: %v", runtimeAfterUnitRefresh.StaleQueueError(), rbErr)
+		}
+		return "", true, fmt.Errorf("updater runtime is unhealthy after unit refresh: %s", runtimeAfterUnitRefresh.StaleQueueError())
+	}
 	if m.cfg.MailSecEnabled && !mailSecUnitNowPresent {
 		if rbErr := rollback(); rbErr != nil {
 			return "", false, fmt.Errorf("mailsec unit missing after update; rollback failed: %v", rbErr)
 		}
 		return "", true, fmt.Errorf("mailsec is enabled but systemd unit despatch-mailsec.service is still missing after update")
 	}
-	if m.cfg.MailSecEnabled || mailSecPayloadPresent || mailSecUnitPresent || mailSecUnitNowPresent {
+	if m.cfg.MailSecEnabled || mailSecPayloadPresent || mailSecUnitNowPresent {
 		if err := runCmd(ctx, "systemctl", "enable", "--now", "despatch-mailsec"); err != nil {
 			if rbErr := rollback(); rbErr != nil {
 				return "", false, fmt.Errorf("mailsec enable failed: %v; rollback failed: %v", err, rbErr)
@@ -445,9 +545,12 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		return release.TagName, false, err
 	}
 	_ = os.Rename(prevBin, filepath.Join(backupDest, "despatch"))
+	_ = os.Rename(prevPam, filepath.Join(backupDest, "despatch-pam-reset-helper"))
+	_ = os.Rename(prevWorker, filepath.Join(backupDest, "despatch-update-worker"))
 	_ = os.Rename(prevMailSec, filepath.Join(backupDest, "despatch-mailsec-service"))
 	_ = os.Rename(prevWeb, filepath.Join(backupDest, "web"))
 	_ = os.Rename(prevMig, filepath.Join(backupDest, "migrations"))
+	_ = os.Rename(prevDeploy, filepath.Join(backupDest, "deploy"))
 	trimBackups(backupsDir(m.cfg), m.cfg.UpdateBackupKeep)
 
 	return release.TagName, false, nil
@@ -720,7 +823,7 @@ func extractTarGz(src, dest string) error {
 }
 
 func findPayloadRoot(extractDir string) (string, error) {
-	required := []string{"despatch", "web", "migrations"}
+	required := []string{"despatch", "despatch-pam-reset-helper", "despatch-update-worker", "web", "migrations", "deploy"}
 	if hasRequiredPaths(extractDir, required) {
 		return extractDir, nil
 	}
@@ -734,7 +837,7 @@ func findPayloadRoot(extractDir string) (string, error) {
 			return root, nil
 		}
 	}
-	return "", fmt.Errorf("release payload missing required files (despatch, web, migrations)")
+	return "", fmt.Errorf("release payload missing required files (despatch, despatch-pam-reset-helper, despatch-update-worker, web, migrations, deploy)")
 }
 
 func hasRequiredPaths(root string, required []string) bool {

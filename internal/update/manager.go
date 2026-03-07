@@ -31,21 +31,24 @@ const (
 var targetVersionRx = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type Manager struct {
-	cfg config.Config
-	gh  *githubClient
-	now func() time.Time
+	cfg          config.Config
+	gh           *githubClient
+	now          func() time.Time
+	runtimeProbe updaterRuntimeProbeFunc
 }
 
 func NewManager(cfg config.Config) *Manager {
 	return &Manager{
-		cfg: cfg,
-		gh:  newGitHubClient(cfg),
-		now: func() time.Time { return time.Now().UTC() },
+		cfg:          cfg,
+		gh:           newGitHubClient(cfg),
+		now:          func() time.Time { return time.Now().UTC() },
+		runtimeProbe: defaultUpdaterRuntimeProbe,
 	}
 }
 
 func (m *Manager) Status(ctx context.Context, st *store.Store, forceCheck bool) (StatusResponse, error) {
-	configured, configDiagnostic := m.configurationStatus()
+	runtimeStatus := m.runtimeProbe(ctx, m.cfg)
+	configured, configDiagnostic := m.configurationStatus(runtimeStatus)
 	status := StatusResponse{
 		Enabled:          m.cfg.UpdateEnabled,
 		Configured:       configured,
@@ -84,6 +87,11 @@ func (m *Manager) Status(ctx context.Context, st *store.Store, forceCheck bool) 
 		return StatusResponse{}, err
 	}
 	status.Apply = apply
+	if recovered, err := m.recoverStaleQueuedApply(runtimeStatus, status.Apply); err != nil {
+		return StatusResponse{}, err
+	} else {
+		status.Apply = recovered
+	}
 	if status.Apply.State == ApplyStateIdle {
 		if _, err := os.Stat(lockPath(m.cfg)); err == nil {
 			status.Apply.State = ApplyStateInProgress
@@ -93,7 +101,17 @@ func (m *Manager) Status(ctx context.Context, st *store.Store, forceCheck bool) 
 }
 
 func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, targetVersion, requestID string) (ApplyRequest, error) {
-	configured, _ := m.configurationStatus()
+	runtimeStatus := m.runtimeProbe(ctx, m.cfg)
+	current, err := readApplyStatusTolerant(statusPath(m.cfg))
+	if err != nil {
+		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
+	}
+	if recovered, err := m.recoverStaleQueuedApply(runtimeStatus, current); err != nil {
+		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
+	} else {
+		current = recovered
+	}
+	configured, _ := m.configurationStatus(runtimeStatus)
 	if !m.cfg.UpdateEnabled || !configured {
 		return ApplyRequest{}, ErrUpdaterNotConfigured
 	}
@@ -104,11 +122,14 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 	if requestID = strings.TrimSpace(requestID); requestID == "" {
 		requestID = uuid.NewString()
 	}
-	current, err := readApplyStatusTolerant(statusPath(m.cfg))
+	if current.State == ApplyStateQueued || current.State == ApplyStateInProgress {
+		return ApplyRequest{}, ErrUpdateInProgress
+	}
+	pendingPaths, err := pendingRequestPaths(m.cfg)
 	if err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
-	if current.State == ApplyStateQueued || current.State == ApplyStateInProgress {
+	if len(pendingPaths) > 0 {
 		return ApplyRequest{}, ErrUpdateInProgress
 	}
 	if _, err := os.Stat(lockPath(m.cfg)); err == nil {
@@ -123,7 +144,8 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 	if err := ensureUpdaterRequestStatusDirectories(m.cfg); err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
-	if err := writeJSONAtomic(requestPath(m.cfg), req, 0o640, updaterDirModeForPath(m.cfg, requestDir(m.cfg), 0o750)); err != nil {
+	reqQueuePath := requestQueuePath(req, m.cfg)
+	if err := writeJSONAtomic(reqQueuePath, req, 0o640, updaterDirModeForPath(m.cfg, requestDir(m.cfg), 0o750)); err != nil {
 		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
 	}
 	if err := writeJSONAtomic(statusPath(m.cfg), ApplyStatus{
@@ -137,7 +159,7 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 	return req, nil
 }
 
-func (m *Manager) configurationStatus() (bool, *ConfigDiagnostic) {
+func (m *Manager) configurationStatus(runtimeStatus updaterRuntimeStatus) (bool, *ConfigDiagnostic) {
 	if !m.cfg.UpdateEnabled {
 		return false, nil
 	}
@@ -156,10 +178,25 @@ func (m *Manager) configurationStatus() (bool, *ConfigDiagnostic) {
 			),
 		}
 	}
+	servicePath := updaterServiceUnitPath(m.cfg)
+	if _, err := os.Stat(servicePath); err != nil {
+		detail := fmt.Sprintf("required updater service unit is missing: %s", servicePath)
+		if !os.IsNotExist(err) {
+			detail = fmt.Sprintf("cannot verify updater service unit at %s: %v", servicePath, err)
+		}
+		return false, &ConfigDiagnostic{
+			Reason:     "updater_service_missing",
+			Detail:     detail,
+			RepairHint: updaterUnitInstallRepairHint(m.cfg),
+		}
+	}
 	if ok, diag := m.checkWritablePath(requestDir(m.cfg), "request"); !ok {
 		return false, diag
 	}
 	if ok, diag := m.checkWritablePath(statusDir(m.cfg), "status"); !ok {
+		return false, diag
+	}
+	if diag := runtimeStatus.ConfigDiagnostic(m.cfg); diag != nil {
 		return false, diag
 	}
 	return true, nil
@@ -306,6 +343,35 @@ func compareVersions(current, latest string) bool {
 		return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), "v")
 	}
 	return trim(c) != trim(l)
+}
+
+func (m *Manager) recoverStaleQueuedApply(runtimeStatus updaterRuntimeStatus, current ApplyStatus) (ApplyStatus, error) {
+	if current.State != ApplyStateQueued {
+		return current, nil
+	}
+	if _, err := os.Stat(lockPath(m.cfg)); err == nil {
+		return current, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return ApplyStatus{}, err
+	}
+	requestedAt := current.RequestedAt
+	if requestedAt.IsZero() {
+		return current, nil
+	}
+	if m.now().Before(requestedAt.Add(updateQueuePickupGrace)) {
+		return current, nil
+	}
+	if err := removePendingRequestPaths(m.cfg); err != nil {
+		return ApplyStatus{}, err
+	}
+	current.State = ApplyStateFailed
+	current.FinishedAt = m.now()
+	current.Error = runtimeStatus.StaleQueueError()
+	if err := writeJSONAtomic(statusPath(m.cfg), current, 0o640, updaterDirModeForPath(m.cfg, statusDir(m.cfg), 0o750)); err != nil {
+		return ApplyStatus{}, err
+	}
+	_ = ensureDespatchReadable(statusPath(m.cfg))
+	return current, nil
 }
 
 func ApplyErrorCode(err error) string {
