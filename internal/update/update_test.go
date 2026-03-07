@@ -69,6 +69,19 @@ func writeUpdaterUnitFiles(t *testing.T, unitDir string) {
 	}
 }
 
+func makeLockDirUnreadable(t *testing.T, cfg config.Config) {
+	t.Helper()
+	if err := os.MkdirAll(lockDir(cfg), 0o750); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	if err := os.Chmod(lockDir(cfg), 0o000); err != nil {
+		t.Fatalf("chmod lock dir unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(lockDir(cfg), 0o750)
+	})
+}
+
 func installFakeSystemctl(t *testing.T, pathLoad, pathActive, serviceLoad, serviceActive string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -270,6 +283,36 @@ func TestQueueApplyIgnoresUnreadableStatusFile(t *testing.T) {
 
 	if _, err := mgr.QueueApply(context.Background(), st, "admin@example.com", "v1.2.3", "req-perm"); err != nil {
 		t.Fatalf("queue apply should tolerate unreadable status file: %v", err)
+	}
+}
+
+func TestQueueApplyIgnoresUnreadableLockDir(t *testing.T) {
+	st := newUpdateTestStore(t)
+	base := t.TempDir()
+	unitDir := filepath.Join(base, "units")
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "active", "loaded", "inactive")
+	cfg := config.Config{
+		UpdateEnabled:          true,
+		UpdateRepoOwner:        "2high4schooltoday",
+		UpdateRepoName:         "despatch",
+		UpdateCheckIntervalMin: 60,
+		UpdateHTTPTimeoutSec:   10,
+		UpdateBackupKeep:       3,
+		UpdateBaseDir:          filepath.Join(base, "update"),
+		UpdateInstallDir:       filepath.Join(base, "install"),
+		UpdateServiceName:      "despatch",
+		UpdateSystemdUnitDir:   unitDir,
+	}
+	makeLockDirUnreadable(t, cfg)
+	mgr := NewManager(cfg)
+
+	req, err := mgr.QueueApply(context.Background(), st, "admin@example.com", "v1.2.3", "req-lock-perms")
+	if err != nil {
+		t.Fatalf("queue apply with unreadable lock dir: %v", err)
+	}
+	if req.RequestID != "req-lock-perms" {
+		t.Fatalf("unexpected request id: %q", req.RequestID)
 	}
 }
 
@@ -573,6 +616,64 @@ func TestStatusFailsStaleQueuedRequest(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("expected stale request files to be removed, got %v", pending)
+	}
+}
+
+func TestStatusFailsStaleQueuedRequestWhenLockDirUnreadable(t *testing.T) {
+	st := newUpdateTestStore(t)
+	base := t.TempDir()
+	unitDir := filepath.Join(base, "units")
+	writeUpdaterUnitFiles(t, unitDir)
+	installFakeSystemctl(t, "loaded", "inactive", "loaded", "inactive")
+	cfg := config.Config{
+		UpdateEnabled:          true,
+		UpdateRepoOwner:        "2high4schooltoday",
+		UpdateRepoName:         "despatch",
+		UpdateCheckIntervalMin: 60,
+		UpdateHTTPTimeoutSec:   10,
+		UpdateBackupKeep:       3,
+		UpdateBaseDir:          filepath.Join(base, "update"),
+		UpdateInstallDir:       filepath.Join(base, "install"),
+		UpdateServiceName:      "despatch",
+		UpdateSystemdUnitDir:   unitDir,
+	}
+	now := time.Now().UTC()
+	mgr := NewManager(cfg)
+	mgr.now = func() time.Time { return now }
+	if err := ensureUpdaterRequestStatusDirectories(cfg); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	makeLockDirUnreadable(t, cfg)
+	req := ApplyRequest{
+		RequestID:     "req-stale-unreadable-lock",
+		RequestedAt:   now.Add(-2 * updateQueuePickupGrace),
+		RequestedBy:   "admin@example.com",
+		TargetVersion: "v1.2.3",
+	}
+	if err := writeJSONAtomic(requestQueuePath(req, cfg), req, 0o640, updaterDirModeForPath(cfg, requestDir(cfg), 0o750)); err != nil {
+		t.Fatalf("write request file: %v", err)
+	}
+	if err := writeJSONAtomic(statusPath(cfg), ApplyStatus{
+		State:         ApplyStateQueued,
+		RequestID:     req.RequestID,
+		RequestedAt:   req.RequestedAt,
+		TargetVersion: req.TargetVersion,
+	}, 0o640, updaterDirModeForPath(cfg, statusDir(cfg), 0o750)); err != nil {
+		t.Fatalf("write status file: %v", err)
+	}
+	if err := st.UpsertSetting(context.Background(), settingLastCheckAt, now.Format(time.RFC3339)); err != nil {
+		t.Fatalf("set last check timestamp: %v", err)
+	}
+
+	status, err := mgr.Status(context.Background(), st, false)
+	if err != nil {
+		t.Fatalf("status with unreadable lock dir: %v", err)
+	}
+	if status.Apply.State != ApplyStateFailed {
+		t.Fatalf("expected stale queued request to become failed, got %#v", status.Apply)
+	}
+	if !strings.Contains(status.Apply.Error, "queued request was not picked up") {
+		t.Fatalf("unexpected stale queue error: %q", status.Apply.Error)
 	}
 }
 

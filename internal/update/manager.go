@@ -93,7 +93,9 @@ func (m *Manager) Status(ctx context.Context, st *store.Store, forceCheck bool) 
 		status.Apply = recovered
 	}
 	if status.Apply.State == ApplyStateIdle {
-		if _, err := os.Stat(lockPath(m.cfg)); err == nil {
+		if held, err := updaterLockHeld(m.cfg); err != nil {
+			return StatusResponse{}, err
+		} else if held {
 			status.Apply.State = ApplyStateInProgress
 		}
 	}
@@ -132,7 +134,9 @@ func (m *Manager) QueueApply(ctx context.Context, st *store.Store, requestedBy, 
 	if len(pendingPaths) > 0 {
 		return ApplyRequest{}, ErrUpdateInProgress
 	}
-	if _, err := os.Stat(lockPath(m.cfg)); err == nil {
+	if held, err := updaterLockHeld(m.cfg); err != nil {
+		return ApplyRequest{}, fmt.Errorf("%w: %v", ErrUpdateRequestFailed, err)
+	} else if held {
 		return ApplyRequest{}, ErrUpdateInProgress
 	}
 	req := ApplyRequest{
@@ -349,10 +353,10 @@ func (m *Manager) recoverStaleQueuedApply(runtimeStatus updaterRuntimeStatus, cu
 	if current.State != ApplyStateQueued {
 		return current, nil
 	}
-	if _, err := os.Stat(lockPath(m.cfg)); err == nil {
-		return current, nil
-	} else if err != nil && !os.IsNotExist(err) {
+	if held, err := updaterLockHeld(m.cfg); err != nil {
 		return ApplyStatus{}, err
+	} else if held {
+		return current, nil
 	}
 	requestedAt := current.RequestedAt
 	if requestedAt.IsZero() {
@@ -397,4 +401,20 @@ func readApplyStatusTolerant(path string) (ApplyStatus, error) {
 		return ApplyStatus{State: ApplyStateIdle}, nil
 	}
 	return ApplyStatus{}, err
+}
+
+func updaterLockHeld(cfg config.Config) (bool, error) {
+	_, err := os.Stat(lockPath(cfg))
+	switch {
+	case err == nil:
+		return true, nil
+	case os.IsNotExist(err):
+		return false, nil
+	case os.IsPermission(err):
+		// The lock directory is intentionally root-owned. Unprivileged web/admin
+		// paths must not fail just because they cannot inspect it directly.
+		return false, nil
+	default:
+		return false, err
+	}
 }
