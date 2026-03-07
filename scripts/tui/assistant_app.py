@@ -10,13 +10,13 @@ from typing import Any
 
 from .assistant import OPERATIONS, AssistantStep, Operation, field_def, operation_flow, operation_meta, visible_fields
 from .focus import FocusState
-from .glyphs import Glyphs, braille_texture, current_glyphs, smooth_bar, step_glyph
+from .glyphs import ASCII_GLYPHS, Glyphs, UNICODE_GLYPHS, braille_texture, current_glyphs, step_glyph
 from .logstore import LogStore
 from .modals import ConfirmModal
 from .models import DIAG_STAGE_DEFS, INSTALL_STAGE_DEFS, UNINSTALL_STAGE_DEFS, DiagnoseSpec, InstallSpec, OperationResult, RunnerError, RunState, UninstallSpec
-from .rendering import BufferSurface, CursesSurface, choose_layout, wrap_paragraph
+from .rendering import BufferSurface, CursesSurface, choose_layout, ellipsis_clip, key_value_row, progress_bar, section_heading, soft_panel, titled_rule, wrap_paragraph
 from .runner import OperationRunner
-from .screens import FIELD_INDEX_INSTALL, FIELD_INDEX_UNINSTALL, INSTALL_FIELDS, UNINSTALL_FIELDS, FieldDef, build_review_lines
+from .screens import FIELD_INDEX_INSTALL, FIELD_INDEX_UNINSTALL, INSTALL_FIELDS, UNINSTALL_FIELDS, FieldDef, build_review_rows
 from .state import UIState, apply_runner_event, new_run_state
 from .system_ops import AppPaths, CancelToken, detect_arch, detect_host, detect_letsencrypt_cert_pair, detect_paths, detect_proxy_candidates, detect_service_state
 from .theme import Theme
@@ -194,18 +194,20 @@ class DespatchTUI:
         title_h = tier.title_h
         footer_h = tier.footer_h
         footer_y = outer_y + outer_h - footer_h
+        header_divider_y = inner_y + title_h - 1
+        footer_divider_y = footer_y - 1
         rail_w = tier.rail_w
         rail_x = inner_x
-        rail_y = inner_y + title_h
-        rail_h = inner_h - title_h - footer_h + 1
+        rail_y = header_divider_y + 1
+        rail_h = max(0, footer_divider_y - rail_y)
         main_x = rail_x + rail_w + 2
         main_y = rail_y
         main_w = inner_w - rail_w - 3
         main_h = rail_h
 
-        surface.hline(inner_y + title_h - 1, inner_x, inner_w, self.glyphs.box_h, "chrome")
-        surface.hline(footer_y - 1, inner_x, inner_w, self.glyphs.box_h, "chrome")
-        surface.vline(rail_y, rail_x + rail_w, rail_h - 1, self.glyphs.box_v, "chrome")
+        surface.hline(header_divider_y, inner_x, inner_w, self.glyphs.box_h, "chrome")
+        surface.hline(footer_divider_y, inner_x, inner_w, self.glyphs.box_h, "chrome")
+        surface.vline(rail_y, rail_x + rail_w, rail_h, self.glyphs.box_v, "rail")
 
         self._draw_titlebar(surface, inner_x, inner_y, inner_w, title_h)
         self._draw_rail(surface, rail_x, rail_y, rail_w, rail_h)
@@ -218,21 +220,25 @@ class DespatchTUI:
         center_x = x + max(0, (w - len(title)) // 2)
         surface.text(y, center_x, title, "titlebar")
         mode_label = "UTF-8" if self.glyphs.unicode else "ASCII"
-        surface.text(y + 1, x + 2, sub[: max(0, w - 24)], "rail")
-        surface.text(y + 1, x + max(2, w - len(mode_label) - 4), mode_label, "rail")
+        meta_w = max(12, w - len(mode_label) - 8)
+        surface.text(y + 1, x + 2, ellipsis_clip(sub, meta_w, self.glyphs), "rail")
+        surface.text(y + 1, x + max(2, w - len(mode_label) - 2), mode_label, "rail")
         if self.ui.mode == "welcome":
             hint = "Installer flow is guided. Only one decision is emphasized at a time."
         else:
             meta = operation_meta(self.wizard.operation)
             hint = f"{meta.short_title}  ·  {self._current_step().title}"
-        surface.text(y + h - 1, x + 2, hint[: max(0, w - 4)], "muted")
+        surface.text(y + 2, x + 2, ellipsis_clip(hint, max(8, w - 4), self.glyphs), "muted")
+
+    def _label_width(self, width: int) -> int:
+        return 24 if width >= 78 else 20
 
     def _draw_rail(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
         ill_h = 7 if h >= 18 else 5
         surface.text(y, x + 2, "DESPATCH", "heading")
         texture = braille_texture(max(8, w - 4), ill_h - 1, self.glyphs)
         for idx, line in enumerate(texture[: max(0, ill_h - 1)]):
-            surface.text(y + 1 + idx, x + 2, line[: max(0, w - 4)], "rail")
+            surface.text(y + 1 + idx, x + 2, ellipsis_clip(line, max(8, w - 4), self.glyphs), "rail")
 
         rail_y = y + ill_h + 1
         if self.ui.mode == "welcome":
@@ -242,7 +248,7 @@ class DespatchTUI:
                 "Safe fallbacks for root-required work",
             ]
             for idx, item in enumerate(intro):
-                surface.text(rail_y + idx * 2, x + 2, f"{self.glyphs.bullet} {item}"[: max(0, w - 4)], "panel")
+                surface.text(rail_y + idx * 2, x + 2, ellipsis_clip(f"{self.glyphs.bullet} {item}", max(8, w - 4), self.glyphs), "panel")
             return
 
         flow = operation_flow(self.wizard.operation)
@@ -250,24 +256,27 @@ class DespatchTUI:
         surface.text(rail_y, x + 2, meta.accent, "heading")
         step_y = rail_y + 2
         current_idx = self.wizard.step_idx
+        show_timeline = bool(self.run_state and self.ui.mode == "assistant" and self._current_step().kind in {"progress", "completion"})
+        step_gap = 1 if show_timeline else 2
         for idx, step in enumerate(flow):
-            if step_y + idx >= y + h - 2:
+            line_y = step_y + idx * step_gap
+            if line_y >= y + h - 2:
                 break
             status = "pending"
             active = idx == current_idx
             if idx < current_idx:
                 status = "ok"
-            if self.ui.mode == "assistant" and step.kind in {"progress", "completion"} and self.run_state:
-                active = idx == current_idx
             glyph = step_glyph(status, active=active, glyphs=self.glyphs)
             style = "heading" if active else "panel"
             if idx < current_idx:
                 style = "success"
-            surface.text(step_y + idx * 2, x + 2, f"{glyph} {step.title}"[: max(0, w - 4)], style)
+            surface.fill(line_y, x + 2, 1, max(0, w - 4), " ", "panel")
+            surface.text(line_y, x + 2, ellipsis_clip(f"{glyph} {step.title}", max(8, w - 4), self.glyphs), style)
 
-        if self.run_state and self.ui.mode == "assistant" and self._current_step().kind in {"progress", "completion"}:
-            base = min(y + h - 9, step_y + len(flow) * 2 + 1)
-            surface.text(base, x + 2, "Stage timeline", "heading")
+        if show_timeline:
+            base = min(y + h - 9, step_y + len(flow) * step_gap + 1)
+            surface.fill(base, x + 2, 1, max(0, w - 4), " ", "panel")
+            titled_rule(surface, base, x + 2, max(8, w - 4), "Stage timeline", self.glyphs, title_style="heading")
             stage_row = base + 2
             for stage_id in self.run_state.stage_order[: max(0, y + h - stage_row - 1)]:
                 stage = self.run_state.stages[stage_id]
@@ -282,7 +291,8 @@ class DespatchTUI:
                     style = "primary"
                 elif stage.status == "pending":
                     style = "muted"
-                surface.text(stage_row, x + 2, f"{glyph} {label}"[: max(0, w - 4)], style)
+                surface.fill(stage_row, x + 2, 1, max(0, w - 4), " ", "panel")
+                surface.text(stage_row, x + 2, ellipsis_clip(f"{glyph} {label}", max(8, w - 4), self.glyphs), style)
                 stage_row += 1
                 if stage_row >= y + h - 1:
                     break
@@ -310,17 +320,11 @@ class DespatchTUI:
         self._draw_completion_step(surface, x, y, w, h, tier)
 
     def _draw_welcome(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
-        surface.text(y + 1, x + 1, "Welcome to the Despatch Installer", "heading")
         copy = (
             "This assistant prepares installation, removal, diagnostics, and host inspection using a guided flow. "
             "Review the selected task, then continue to the next screen."
         )
-        summary_lines = wrap_paragraph(copy, w - 6)
-        max_copy = 1 if h < 18 else 2
-        for idx, line in enumerate(summary_lines[:max_copy]):
-            surface.text(y + 3 + idx, x + 1, line, "panel")
-
-        card_y = y + 5 + max_copy
+        card_y = section_heading(surface, y + 1, x + 1, w - 2, "Welcome to the Despatch Installer", copy, glyphs=self.glyphs)
         compact = h < 18
         card_h = 1 if compact else 4
         gap = 0 if compact else 1
@@ -341,38 +345,32 @@ class DespatchTUI:
 
     def _draw_card(self, surface: CursesSurface, y: int, x: int, w: int, h: int, title: str, summary: str, risk: str, selected: bool, focused: bool) -> None:
         if h <= 1:
-            style = "focus" if focused else ("selection" if selected else "panel")
+            style = "focus" if focused else ("heading" if selected else "panel")
             marker = self.glyphs.card_on if selected else self.glyphs.card_off
-            surface.text(y, x + 1, f"{marker} {title}"[: max(0, w - len(risk) - 4)], style)
+            available = max(8, w - len(risk) - 5)
+            surface.text(y, x + 1, ellipsis_clip(f"{marker} {title}", available, self.glyphs), style)
             risk_style = "warning" if risk == "HIGH" else "rail"
             surface.text(y, x + max(2, w - len(risk) - 1), risk, risk_style)
             return
-        style = "selection" if selected else "chrome"
-        if focused:
-            style = "focus"
-        surface.box(y, x, h, w, self.glyphs, style)
+        surface.box(y, x, h, w, self.glyphs, "selection" if selected else "chrome")
         marker = self.glyphs.card_on if selected else self.glyphs.card_off
-        surface.text(y + 1, x + 2, f"{marker} {title}", "heading" if selected else "panel")
+        if selected:
+            surface.text(y + 1, x + 1, self.glyphs.marker, "primary")
+        title_style = "focus" if focused else ("heading" if selected else "panel")
+        surface.text(y + 1, x + 2, ellipsis_clip(f"{marker} {title}", max(8, w - len(risk) - 8), self.glyphs), title_style)
         risk_style = "warning" if risk == "HIGH" else "rail"
         surface.text(y + 1, x + max(2, w - len(risk) - 4), risk, risk_style)
         if h >= 4:
-            surface.text(y + 2, x + 2, summary[: max(0, w - 4)], "muted")
-        if selected:
-            surface.text(y + 1, x + 1, self.glyphs.marker, "primary")
-            if h >= 4:
-                surface.text(y + 2, x + 1, self.glyphs.marker, "primary")
+            surface.text(y + 2, x + 2, ellipsis_clip(summary, max(8, w - 4), self.glyphs), "muted")
 
     def _draw_form_step(self, surface: CursesSurface, step: AssistantStep, x: int, y: int, w: int, h: int) -> None:
         values = self._current_values()
         names = visible_fields(self.wizard.operation, step, values)
         items: list[str] = []
-        surface.text(y + 1, x + 1, step.title, "heading")
-        for idx, line in enumerate(wrap_paragraph(step.summary, w - 6)):
-            surface.text(y + 3 + idx, x + 1, line, "panel")
-        row = y + 6
+        row = section_heading(surface, y + 1, x + 1, w - 2, step.title, step.summary, glyphs=self.glyphs)
 
         if self.wizard.operation == "install" and step.key == "scope":
-            self._draw_info_block(
+            row = self._draw_info_block(
                 surface,
                 row,
                 x + 1,
@@ -383,30 +381,27 @@ class DespatchTUI:
                     f"Root dir: {self.paths.root_dir}",
                     f"Scripts dir: {self.paths.scripts_dir}",
                 ],
+                title="Host summary",
             )
-            row += 6
         elif self.wizard.operation == "install" and step.key == "network":
             hints = [
                 f"Detected proxies: {', '.join(detect_proxy_candidates()) or 'none'}",
                 f"Suggested base domain: {self.install_spec.base_domain}",
             ]
-            self._draw_info_block(surface, row, x + 1, w - 2, hints)
-            row += 4
+            row = self._draw_info_block(surface, row, x + 1, w - 2, hints, title="Detected")
         elif self.wizard.operation == "install" and step.key == "security":
             hints = [
                 "PAM mode is recommended for local system auth.",
                 "SQL mode requires both driver and DSN before install can start.",
                 "Proxy TLS auto-fills detected Let's Encrypt paths when possible.",
             ]
-            self._draw_info_block(surface, row, x + 1, w - 2, hints)
-            row += 5
+            row = self._draw_info_block(surface, row, x + 1, w - 2, hints, title="Notes")
         elif self.wizard.operation == "uninstall" and step.key == "backup":
             hints = [
                 "Backups are exported before destructive cleanup when enabled.",
                 "Use review to confirm the exact removal scope.",
             ]
-            self._draw_info_block(surface, row, x + 1, w - 2, hints)
-            row += 4
+            row = self._draw_info_block(surface, row, x + 1, w - 2, hints, title="Backup notes")
 
         self.wizard.field_idx = clamp(self.wizard.field_idx, 0, max(0, len(names) - 1))
         for idx, name in enumerate(names):
@@ -416,9 +411,9 @@ class DespatchTUI:
             fid = f"field:{name}"
             items.append(fid)
             focused = self.focus.current == fid or (not self.focus.current and idx == self.wizard.field_idx)
-            self._draw_field_row(surface, row, x + 1, w - 2, field, getattr(values, name), focused)
-            self.mouse_targets.append(Rect(row, x + 1, 3, w - 2, fid))
-            row += 3 if field.help_text else 2
+            start_row = row
+            row = self._draw_field_row(surface, row, x + 1, w - 2, field, getattr(values, name), focused)
+            self.mouse_targets.append(Rect(start_row, x + 1, max(1, row - start_row), w - 2, fid))
             if row >= y + h - 4:
                 break
 
@@ -426,86 +421,112 @@ class DespatchTUI:
         preferred = self.focus.current if self.focus.current in items else (f"field:{names[self.wizard.field_idx]}" if names else self._footer_action_ids()[-1])
         self.focus.set_items(items, preferred=preferred)
 
-    def _draw_info_block(self, surface: CursesSurface, y: int, x: int, w: int, lines: list[str]) -> None:
-        surface.box(y, x, len(lines) + 2, w, self.glyphs, "chrome")
-        for idx, line in enumerate(lines):
-            surface.text(y + 1 + idx, x + 2, f"{self.glyphs.bullet} {line}"[: max(0, w - 4)], "muted")
+    def _draw_info_block(self, surface: CursesSurface, y: int, x: int, w: int, lines: list[str], title: str = "") -> int:
+        row = soft_panel(surface, y, x, w, lines, glyphs=self.glyphs, title=title)
+        return row + 1
 
-    def _draw_field_row(self, surface: CursesSurface, y: int, x: int, w: int, field: FieldDef, value: Any, focused: bool) -> None:
-        label_style = "heading" if focused else "panel"
+    def _draw_field_row(self, surface: CursesSurface, y: int, x: int, w: int, field: FieldDef, value: Any, focused: bool) -> int:
+        label_style = "heading" if focused else "muted"
         value_style = "focus" if focused else "selection"
-        surface.text(y, x + 1, field.label, label_style)
-        shown = self._field_value(field, value)
-        safe_width = max(10, w - 28)
-        surface.text(y, x + max(24, w - safe_width - 2), shown[:safe_width], value_style)
         if field.help_text:
-            surface.text(y + 1, x + 2, field.help_text[: max(0, w - 4)], "muted")
-        surface.hline(y + (2 if field.help_text else 1), x, w, self.glyphs.shade_light, "rail")
+            help_lines = wrap_paragraph(field.help_text, max(8, w - 4))
+        else:
+            help_lines = []
+        row = y
+        row += key_value_row(
+            surface,
+            row,
+            x,
+            w,
+            field.label,
+            self._field_value(field, value),
+            glyphs=self.glyphs,
+            label_w=self._label_width(w),
+            label_style=label_style,
+            value_style=value_style,
+            focused=focused,
+        )
+        for line in help_lines:
+            surface.text(row, x + 2, line[: max(0, w - 4)], "muted")
+            row += 1
+        return row + 1
 
     def _draw_review_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
-        surface.text(y + 1, x + 1, "Review", "heading")
         if self.wizard.operation == "install":
-            lines = build_review_lines(self.install_spec, INSTALL_FIELDS)
+            rows = build_review_rows(self.install_spec, INSTALL_FIELDS)
             errors = self.install_spec.validate()
             summary = "Review the resolved install contract before starting the installer."
         else:
-            lines = build_review_lines(self.uninstall_spec, UNINSTALL_FIELDS)
+            rows = build_review_rows(self.uninstall_spec, UNINSTALL_FIELDS)
             errors = []
             summary = "Review the selected teardown contract before starting the uninstall run."
-        for idx, line in enumerate(wrap_paragraph(summary, w - 6)):
-            surface.text(y + 3 + idx, x + 1, line, "panel")
-        row = y + 6
-        for line in lines[: max(0, h - 12)]:
-            label, _, value = line.partition("  ")
-            surface.text(row, x + 1, label[:32], "muted")
-            surface.text(row, x + 34, value[: max(0, w - 36)], "panel")
-            row += 1
+        row = section_heading(surface, y + 1, x + 1, w - 2, "Review", summary, glyphs=self.glyphs)
+        row = titled_rule(surface, row, x + 1, w - 2, "Resolved configuration", self.glyphs, title_style="heading")
+        for label, value in rows:
+            used = key_value_row(
+                surface,
+                row,
+                x + 1,
+                w - 2,
+                label,
+                value,
+                glyphs=self.glyphs,
+                label_w=self._label_width(w),
+                label_style="muted",
+                value_style="panel",
+            )
+            row += used
+            if row >= y + h - 6:
+                break
         row += 1
         if errors:
-            surface.text(row, x + 1, "Validation", "warning")
-            for err in errors[:3]:
-                row += 1
-                surface.text(row, x + 3, f"{self.glyphs.bullet} {err}"[: max(0, w - 4)], "error")
+            soft_panel(surface, row, x + 1, w - 2, errors[:3], glyphs=self.glyphs, title="Validation", line_style="error", title_style="warning")
         else:
             surface.text(row, x + 1, "Validation: ready", "success")
-        self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[-1])
+        preferred = self.focus.current or ("assistant:back" if errors else self._footer_action_ids()[-1])
+        self.focus.set_items(self._footer_action_ids(), preferred=preferred)
 
     def _draw_intro_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
         step = self._current_step()
-        surface.text(y + 1, x + 1, step.title, "heading")
-        for idx, line in enumerate(wrap_paragraph(step.summary, w - 6)):
-            surface.text(y + 3 + idx, x + 1, line, "panel")
+        row = section_heading(surface, y + 1, x + 1, w - 2, step.title, step.summary, glyphs=self.glyphs)
         bullets = [
             "No destructive changes will be applied.",
             "A summary artifact is exported automatically.",
             f"Current service state: {detect_service_state()}",
         ]
-        box_y = y + 8
-        self._draw_info_block(surface, box_y, x + 1, w - 2, bullets)
+        self._draw_info_block(surface, row, x + 1, w - 2, bullets, title="What this does")
         self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[-1])
 
     def _draw_status_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
-        surface.text(y + 1, x + 1, "Host Status", "heading")
-        status_lines = [
-            f"Service state: {detect_service_state()}",
-            f"Host: {detect_host()}",
-            f"Arch: {detect_arch()}",
-            f"Root dir: {self.paths.root_dir}",
-            f"Scripts dir: {self.paths.scripts_dir}",
-            f"Log file: {self.logstore.log_path}",
+        status_rows = [
+            ("Service state", detect_service_state()),
+            ("Host", detect_host()),
+            ("Arch", detect_arch()),
+            ("Root dir", self.paths.root_dir),
+            ("Scripts dir", self.paths.scripts_dir),
+            ("Log file", self.logstore.log_path),
         ]
-        row = y + 3
-        for line in status_lines:
-            surface.text(row, x + 1, line[: max(0, w - 2)], "panel")
-            row += 2
+        row = section_heading(surface, y + 1, x + 1, w - 2, "Host Status", "", glyphs=self.glyphs)
+        row = titled_rule(surface, row, x + 1, w - 2, "Detected", self.glyphs)
+        for label, value in status_rows:
+            row += key_value_row(
+                surface,
+                row,
+                x + 1,
+                w - 2,
+                label,
+                value,
+                glyphs=self.glyphs,
+                label_w=self._label_width(w),
+            )
         surface.text(row + 1, x + 1, "Use Diagnose for deeper network and proxy checks.", "muted")
         self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
 
     def _draw_progress_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int, tier: Any) -> None:
         run = self.run_state
-        surface.text(y + 1, x + 1, self._current_step().title, "heading")
+        row = section_heading(surface, y + 1, x + 1, w - 2, self._current_step().title, "", glyphs=self.glyphs)
         if run is None:
-            surface.text(y + 3, x + 1, "No active run.", "muted")
+            surface.text(row, x + 1, "No active run.", "muted")
             self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
             return
         overall = run.overall_progress
@@ -513,21 +534,50 @@ class DespatchTUI:
         stage_ratio = 0.0
         if active and active.total > 0:
             stage_ratio = min(1.0, max(0.0, active.current / active.total))
-        bar_w = max(18, w - 10)
-        surface.text(y + 3, x + 1, smooth_bar(bar_w, overall, self.glyphs), "primary")
-        surface.text(y + 4, x + 1, f"Overall {int(overall * 100):3d}%", "panel")
-        surface.text(y + 6, x + 1, f"Run ID: {run.run_id}", "panel")
-        surface.text(y + 7, x + 1, f"Status: {run.status}", "heading")
-        surface.text(y + 8, x + 1, f"Active stage: {(active.title if active else '-')}", "panel")
+        bar_w = max(18, w - 2)
+        progress_bar(surface, row, x + 1, bar_w, overall, glyphs=self.glyphs)
+        surface.text(row + 1, x + 1, f"Overall {int(overall * 100):3d}%", "panel")
+        row += 3
+        row = titled_rule(surface, row, x + 1, w - 2, "Run details", self.glyphs)
+        details = [
+            ("Run ID", run.run_id),
+            ("Status", run.status),
+            ("Active stage", active.title if active else "-"),
+            ("Stage progress", f"{int(stage_ratio * 100):3d}%"),
+        ]
         message = active.message if active and active.message else "Working"
-        surface.text(y + 9, x + 1, f"Message: {message}"[: max(0, w - 2)], "muted")
-        surface.text(y + 10, x + 1, f"Stage progress: {int(stage_ratio * 100):3d}%", "muted")
+        for label, value in details:
+            style = "primary" if label == "Status" and run.status == "running" else "panel"
+            row += key_value_row(
+                surface,
+                row,
+                x + 1,
+                w - 2,
+                label,
+                value,
+                glyphs=self.glyphs,
+                label_w=self._label_width(w),
+                value_style=style,
+            )
+        row += key_value_row(
+            surface,
+            row,
+            x + 1,
+            w - 2,
+            "Message",
+            message,
+            glyphs=self.glyphs,
+            label_w=self._label_width(w),
+            value_style="muted",
+        )
 
-        if self.ui.log_drawer_open:
-            log_y = min(y + 12, y + h - tier.log_h - 1)
-            self._draw_log_drawer(surface, x + 1, log_y, w - 2, min(tier.log_h, y + h - log_y - 1))
+        available = max(0, y + h - row - 1)
+        if self.ui.log_drawer_open and available >= 5:
+            log_h = min(tier.log_h, available)
+            log_y = y + h - log_h
+            self._draw_log_drawer(surface, x + 1, log_y, w - 2, log_h)
         else:
-            surface.text(y + 12, x + 1, "Press L to show recent logs.", "muted")
+            surface.text(y + h - 2, x + 1, "Press L to show recent logs.", "muted")
         self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
 
     def _draw_completion_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int, tier: Any) -> None:
@@ -540,30 +590,34 @@ class DespatchTUI:
             self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
             return
         lead = "The operation completed successfully." if result.status == "ok" else "Review the reported issues before retrying."
+        row = y + 3
         for idx, line in enumerate(wrap_paragraph(lead, w - 6)):
-            surface.text(y + 3 + idx, x + 1, line, "panel")
-        row = y + 6
-        surface.text(row, x + 1, f"Log file: {self.logstore.log_path}"[: max(0, w - 2)], "muted")
+            surface.text(row + idx, x + 1, line, "panel")
+        row += len(wrap_paragraph(lead, w - 6)) + 1
+        surface.text(row, x + 1, ellipsis_clip(f"Log file: {self.logstore.log_path}", max(8, w - 2), self.glyphs), "muted")
         row += 2
         if result.errors:
-            surface.text(row, x + 1, "Findings", "warning")
+            row = titled_rule(surface, row, x + 1, w - 2, "Findings", self.glyphs, title_style="warning")
             for err in result.errors[:3]:
-                row += 1
-                surface.text(row, x + 3, f"{self.glyphs.bullet} {err.code}: {err.message}"[: max(0, w - 4)], "error")
-                if err.suggested_fix:
-                    row += 1
-                    surface.text(row, x + 5, err.suggested_fix[: max(0, w - 6)], "muted")
+                row = soft_panel(
+                    surface,
+                    row,
+                    x + 1,
+                    w - 2,
+                    [f"{err.code}: {err.message}"] + ([err.suggested_fix] if err.suggested_fix else []),
+                    glyphs=self.glyphs,
+                    line_style="error",
+                ) + 1
         else:
             surface.text(row, x + 1, "No blocking findings were reported.", "success")
-        row += 2
+            row += 2
         if result.next_actions:
-            surface.text(row, x + 1, "Next actions", "heading")
-            for action in result.next_actions[:3]:
-                row += 1
-                surface.text(row, x + 3, f"{self.glyphs.bullet} {action}"[: max(0, w - 4)], "panel")
-        if self.ui.log_drawer_open:
-            log_y = min(row + 2, y + h - tier.log_h - 1)
-            self._draw_log_drawer(surface, x + 1, log_y, w - 2, min(tier.log_h, y + h - log_y - 1))
+            row = self._draw_info_block(surface, row, x + 1, w - 2, result.next_actions[:3], title="Next actions")
+        available = max(0, y + h - row - 1)
+        if self.ui.log_drawer_open and available >= 5:
+            log_h = min(tier.log_h, available)
+            log_y = y + h - log_h
+            self._draw_log_drawer(surface, x + 1, log_y, w - 2, log_h)
         else:
             surface.text(y + h - 3, x + 1, "Press L to show the recent log drawer.", "muted")
         self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
@@ -590,32 +644,42 @@ class DespatchTUI:
             surface.text(y + 1 + idx, x + 1, entry.format_line()[: max(0, w - 2)], style)
 
     def _draw_footer(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
-        surface.text(y, x + 2, self.ui.status_line[: max(0, w - 4)], "muted")
         actions = self._footer_actions()
-        total_w = sum(len(label) + 4 for label, _, _, _ in actions) + max(0, len(actions) - 1) * 2
+        total_w = sum(self._button_width(label) for label, _, _, _ in actions) + max(0, len(actions) - 1) * 1
+        status_w = max(8, w - total_w - 8)
+        surface.text(y, x + 2, ellipsis_clip(self.ui.status_line, status_w, self.glyphs), "muted")
         col = x + max(2, w - total_w - 2)
         for label, action, style, disabled in actions:
             focused = self.focus.current == action
             rect = self._draw_action_button(surface, y + 1, col, label, action, style, focused, disabled)
             self.mouse_targets.append(rect)
-            col += rect.w + 2
+            col += rect.w + 1
         key_hint = "Tab cycle  Arrows move  Enter activate  Esc back  L log  Ctrl+X cancel"
-        surface.text(y + 2, x + 2, key_hint[: max(0, w - 4)], "rail")
+        surface.text(y + 2, x + 2, ellipsis_clip(key_hint, max(8, w - 4), self.glyphs), "rail")
 
     def _draw_action_button(self, surface: CursesSurface, y: int, x: int, label: str, action: str, style: str, focused: bool, disabled: bool) -> Rect:
         if disabled:
             paint = "button_disabled"
-        elif focused:
-            paint = "focus"
         elif style == "primary":
             paint = "button_primary"
         elif style == "danger":
             paint = "button_danger"
         else:
             paint = "button"
-        text = f" {label} "
-        surface.text(y, x, text, paint)
-        return Rect(y=y, x=x, h=1, w=len(text), action=action)
+        clipped = ellipsis_clip(label, max(4, len(label)), self.glyphs)
+        text = f" {clipped} "
+        marker_style = "focus" if focused and not disabled else "rail"
+        left = "[" if focused and not disabled else " "
+        right = "]" if focused and not disabled else " "
+        if focused and not disabled and style == "secondary":
+            paint = "focus"
+        surface.text(y, x, left, marker_style)
+        surface.text(y, x + 1, text, paint)
+        surface.text(y, x + 1 + len(text), right, marker_style)
+        return Rect(y=y, x=x, h=1, w=len(text) + 2, action=action)
+
+    def _button_width(self, label: str) -> int:
+        return len(f" {ellipsis_clip(label, max(4, len(label)), self.glyphs)} ") + 2
 
     def _footer_actions(self) -> list[tuple[str, str, str, bool]]:
         if self.ui.mode == "welcome":
@@ -663,6 +727,12 @@ class DespatchTUI:
 
     def _footer_action_ids(self) -> list[str]:
         return [action for _, action, _, _ in self._footer_actions()]
+
+    def _action_disabled(self, action_id: str) -> bool:
+        for _, action, _, disabled in self._footer_actions():
+            if action == action_id:
+                return disabled
+        return False
 
     def _current_step(self) -> AssistantStep:
         flow = operation_flow(self.wizard.operation)
@@ -776,6 +846,9 @@ class DespatchTUI:
 
     def _activate_focus(self, focus_id: str) -> None:
         if not focus_id:
+            return
+        if focus_id.startswith("assistant:") and self._action_disabled(focus_id):
+            self.ui.status_line = "That action is unavailable until the current issues are resolved."
             return
         if focus_id.startswith("welcome:"):
             self._activate_welcome(focus_id)
@@ -1253,100 +1326,113 @@ def run_curses_main(stdscr: curses.window) -> None:
     DespatchTUI(stdscr).run()
 
 
-def render_welcome_preview(width: int, height: int) -> list[str]:
+class _PreviewWindow:
+    def __init__(self, width: int, height: int) -> None:
+        self._width = width
+        self._height = height
+
+    def getmaxyx(self) -> tuple[int, int]:
+        return (self._height, self._width)
+
+
+def _preview_tui(width: int, height: int, *, ascii_mode: bool = False) -> DespatchTUI:
+    tui = DespatchTUI(_PreviewWindow(width, height))
+    tui.theme = Theme(has_color=False)
+    tui.glyphs = ASCII_GLYPHS if ascii_mode else UNICODE_GLYPHS
+    tui.ui.status_line = f"Ready. Log file: {tui.logstore.log_path}"
+    return tui
+
+
+def _render_preview(tui: DespatchTUI, width: int, height: int) -> list[str]:
     surface = BufferSurface(width, height)
-    glyphs = current_glyphs()
-    tier = choose_layout(width, height)
-    outer_y = 1
-    outer_x = 2
-    outer_h = height - 2
-    outer_w = width - 4
-    surface.box(outer_y, outer_x, outer_h, outer_w, glyphs, "chrome")
-    inner_x = outer_x + 1
-    inner_y = outer_y + 1
-    inner_w = outer_w - 2
-    inner_h = outer_h - 2
-    footer_h = tier.footer_h
-    title_h = tier.title_h
-    footer_y = outer_y + outer_h - footer_h
-    rail_w = tier.rail_w
-    rail_x = inner_x
-    rail_y = inner_y + title_h
-    rail_h = inner_h - title_h - footer_h + 1
-    main_x = rail_x + rail_w + 2
-    main_y = rail_y
-    main_w = inner_w - rail_w - 3
-    main_h = rail_h
-    surface.hline(inner_y + title_h - 1, inner_x, inner_w, glyphs.box_h, "chrome")
-    surface.hline(footer_y - 1, inner_x, inner_w, glyphs.box_h, "chrome")
-    surface.vline(rail_y, rail_x + rail_w, rail_h - 1, glyphs.box_v, "chrome")
-    surface.text(inner_y, inner_x + max(2, (inner_w - len("Despatch Installer Assistant")) // 2), "Despatch Installer Assistant", "titlebar")
-    surface.text(inner_y + 2, rail_x + 2, "DESPATCH", "heading")
-    texture = braille_texture(max(8, rail_w - 4), 4, glyphs)
-    for idx, line in enumerate(texture):
-        surface.text(inner_y + 3 + idx, rail_x + 2, line[: max(0, rail_w - 4)], "rail")
-    surface.text(main_y + 1, main_x + 1, "Welcome to the Despatch Installer", "heading")
-    compact = main_h < 18
-    card_y = main_y + (6 if compact else 7)
-    card_h = 1 if compact else 4
-    gap = 0 if compact else 1
-    for idx, meta in enumerate(OPERATIONS):
-        top = card_y + idx * (card_h + gap)
-        if top + card_h >= main_y + main_h:
-            break
-        selected = idx == 0
-        if compact:
-            marker = glyphs.card_on if selected else glyphs.card_off
-            surface.text(top, main_x + 2, f"{marker} {meta.title}"[: max(0, main_w - len(meta.risk) - 6)], "heading" if selected else "panel")
-            surface.text(top, main_x + max(2, main_w - len(meta.risk) - 1), meta.risk, "warning" if meta.risk == "HIGH" else "rail")
-        else:
-            surface.box(top, main_x + 1, card_h, main_w - 2, glyphs, "selection" if selected else "chrome")
-            marker = glyphs.card_on if selected else glyphs.card_off
-            surface.text(top + 1, main_x + 3, f"{marker} {meta.title}", "heading")
-    surface.text(footer_y, inner_x + 2, "Ready.", "muted")
-    surface.text(footer_y + 1, inner_x + inner_w - 24, " Continue ", "button_primary")
+    tui._draw_shell(surface)  # type: ignore[arg-type]
     return surface.render()
 
 
-def render_progress_preview(width: int, height: int, log_open: bool = False) -> list[str]:
-    surface = BufferSurface(width, height)
-    glyphs = current_glyphs()
-    tier = choose_layout(width, height)
-    outer_y = 1
-    outer_x = 2
-    outer_h = height - 2
-    outer_w = width - 4
-    surface.box(outer_y, outer_x, outer_h, outer_w, glyphs, "chrome")
-    inner_x = outer_x + 1
-    inner_y = outer_y + 1
-    inner_w = outer_w - 2
-    inner_h = outer_h - 2
-    footer_h = tier.footer_h
-    title_h = tier.title_h
-    footer_y = outer_y + outer_h - footer_h
-    rail_w = tier.rail_w
-    rail_x = inner_x
-    rail_y = inner_y + title_h
-    rail_h = inner_h - title_h - footer_h + 1
-    main_x = rail_x + rail_w + 2
-    main_y = rail_y
-    main_w = inner_w - rail_w - 3
-    main_h = rail_h
-    surface.hline(inner_y + title_h - 1, inner_x, inner_w, glyphs.box_h, "chrome")
-    surface.hline(footer_y - 1, inner_x, inner_w, glyphs.box_h, "chrome")
-    surface.vline(rail_y, rail_x + rail_w, rail_h - 1, glyphs.box_v, "chrome")
-    surface.text(main_y + 1, main_x + 1, "Installing", "heading")
-    surface.text(main_y + 3, main_x + 1, smooth_bar(max(18, main_w - 8), 0.62, glyphs), "primary")
-    surface.text(main_y + 4, main_x + 1, "Overall  62%", "panel")
-    surface.text(rail_y + 2, rail_x + 2, "Stage timeline", "heading")
-    demo = [("Preflight", "ok"), ("Build", "running"), ("Proxy", "pending")]
-    row = rail_y + 4
-    for title, status in demo:
-        surface.text(row, rail_x + 2, f"{step_glyph(status, active=status == 'running', glyphs=glyphs)} {title}", "panel")
-        row += 1
-    if log_open:
-        log_y = min(main_y + 12, main_y + main_h - tier.log_h - 1)
-        surface.box(log_y, main_x + 1, min(tier.log_h, main_y + main_h - log_y - 1), main_w - 2, glyphs, "chrome")
-        surface.text(log_y, main_x + 3, " Log ", "rail")
-        surface.text(log_y + 1, main_x + 2, "18:34:57 [INFO ] [system] stage running", "panel")
-    return surface.render()
+def _step_index(operation: Operation, step_key: str) -> int:
+    flow = operation_flow(operation)
+    for idx, step in enumerate(flow):
+        if step.key == step_key:
+            return idx
+    raise ValueError(f"unknown step {operation}:{step_key}")
+
+
+def render_welcome_preview(width: int, height: int, ascii_mode: bool = False) -> list[str]:
+    tui = _preview_tui(width, height, ascii_mode=ascii_mode)
+    tui.ui.mode = "welcome"
+    tui.selected_operation = 0
+    return _render_preview(tui, width, height)
+
+
+def render_form_preview(width: int, height: int, step_key: str, ascii_mode: bool = False) -> list[str]:
+    tui = _preview_tui(width, height, ascii_mode=ascii_mode)
+    tui.ui.mode = "assistant"
+    tui.wizard = WizardState(operation="install", step_idx=_step_index("install", step_key), field_idx=0)
+    tui.install_spec.base_domain = "mail.2h4s2d.ru"
+    tui.install_spec.listen_addr = ":8080"
+    tui.install_spec.proxy_setup = True
+    tui.install_spec.proxy_server = "apache2"
+    tui.install_spec.proxy_server_name = "mail.2h4s2d.ru"
+    tui.install_spec.proxy_tls = True
+    tui.install_spec.proxy_cert = "/etc/letsencrypt/live/mail.2h4s2d.ru/fullchain.pem"
+    tui.install_spec.proxy_key = "/etc/letsencrypt/live/mail.2h4s2d.ru/privkey.pem"
+    tui.install_spec.dovecot_auth_mode = "pam"
+    tui.focus.set_items([f"field:{visible_fields('install', tui._current_step(), tui.install_spec)[0]}"], preferred=None)
+    return _render_preview(tui, width, height)
+
+
+def render_review_preview(width: int, height: int, ascii_mode: bool = False, *, long_values: bool = False) -> list[str]:
+    tui = _preview_tui(width, height, ascii_mode=ascii_mode)
+    tui.ui.mode = "assistant"
+    tui.wizard = WizardState(operation="install", step_idx=_step_index("install", "review"), field_idx=0)
+    tui.install_spec.base_domain = "mail.2h4s2d.ru"
+    tui.install_spec.proxy_server = "apache2"
+    tui.install_spec.proxy_server_name = "mail.2h4s2d.ru"
+    tui.install_spec.proxy_setup = True
+    tui.install_spec.proxy_tls = True
+    tui.install_spec.proxy_cert = (
+        "/etc/letsencrypt/live/mail.2h4s2d.ru/fullchain.pem"
+        if not long_values
+        else "/etc/letsencrypt/live/really.long.example.mail.2h4s2d.ru/with/a/deep/path/fullchain.pem"
+    )
+    tui.install_spec.proxy_key = (
+        "/etc/letsencrypt/live/mail.2h4s2d.ru/privkey.pem"
+        if not long_values
+        else "/etc/letsencrypt/live/really.long.example.mail.2h4s2d.ru/with/a/deep/path/privkey.pem"
+    )
+    tui.install_spec.dovecot_auth_db_dsn = (
+        ""
+        if not long_values
+        else "host=db.internal.example port=5432 user=despatch password=secret dbname=despatch sslmode=disable"
+    )
+    return _render_preview(tui, width, height)
+
+
+def render_progress_preview(width: int, height: int, log_open: bool = False, ascii_mode: bool = False) -> list[str]:
+    tui = _preview_tui(width, height, ascii_mode=ascii_mode)
+    tui.ui.mode = "assistant"
+    tui.ui.log_drawer_open = log_open
+    tui.wizard = WizardState(operation="install", step_idx=_PROGRESS_STAGE_INDEX["install"], field_idx=0)
+    tui.run_state = new_run_state("install", "31458ff8-9adc-4b81-9eee-dd554ddae2e0", INSTALL_STAGE_DEFS)
+    apply_runner_event(tui.run_state, {"type": "stage_result", "stage_id": "preflight", "status": "ok", "error_code": ""})
+    apply_runner_event(tui.run_state, {"type": "stage_result", "stage_id": "fetch_source", "status": "ok", "error_code": ""})
+    apply_runner_event(tui.run_state, {"type": "stage_start", "stage_id": "build", "message": "started"})
+    apply_runner_event(tui.run_state, {"type": "stage_progress", "stage_id": "build", "current": "0", "total": "1", "message": "started"})
+    tui.ui.status_line = "warning: function `request_queue_path` is never used"
+    tui.logstore.append("info", "system", "stage running", category="system")
+    return _render_preview(tui, width, height)
+
+
+def render_completion_preview(width: int, height: int, log_open: bool = False, ascii_mode: bool = False) -> list[str]:
+    tui = _preview_tui(width, height, ascii_mode=ascii_mode)
+    tui.ui.mode = "assistant"
+    tui.ui.log_drawer_open = log_open
+    tui.wizard = WizardState(operation="diagnose", step_idx=_COMPLETION_STAGE_INDEX["diagnose"], field_idx=0)
+    tui.last_result = OperationResult(
+        status="ok",
+        next_actions=["Open web UI and verify OOBE/mail access."],
+    )
+    tui.ui.status_line = "Log drawer shown." if log_open else "Ready."
+    tui.logstore.append("info", "system", "Status: inactive", category="system")
+    tui.logstore.append("info", "network", "Healthy: Internet access path looks good.", category="network")
+    return _render_preview(tui, width, height)

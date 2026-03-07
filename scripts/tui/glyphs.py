@@ -121,6 +121,27 @@ def smooth_bar(width: int, ratio: float, glyphs: Glyphs | None = None) -> str:
     return "".join(out)
 
 
+def smooth_bar_parts(width: int, ratio: float, glyphs: Glyphs | None = None) -> tuple[str, str]:
+    glyphs = glyphs or current_glyphs()
+    width = max(1, int(width))
+    ratio = max(0.0, min(1.0, float(ratio)))
+    if not glyphs.unicode:
+        fill = int(round(width * ratio))
+        return "#" * fill, glyphs.box_h * max(0, width - fill)
+
+    total_units = int(round(width * 8 * ratio))
+    full = total_units // 8
+    rem = total_units % 8
+    filled: list[str] = []
+    for _ in range(min(width, full)):
+        filled.append(_BLOCKS[-1])
+    if full < width and rem:
+        filled.append(_BLOCKS[rem - 1])
+    fill_text = "".join(filled)
+    empty_text = glyphs.box_h * max(0, width - len(fill_text))
+    return fill_text, empty_text
+
+
 def step_glyph(status: str, *, active: bool, glyphs: Glyphs | None = None) -> str:
     glyphs = glyphs or current_glyphs()
     normalized = (status or "pending").lower()

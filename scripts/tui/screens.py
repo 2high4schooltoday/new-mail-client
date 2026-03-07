@@ -80,13 +80,17 @@ FIELD_INDEX_INSTALL: dict[str, FieldDef] = {f.name: f for f in INSTALL_FIELDS}
 FIELD_INDEX_UNINSTALL: dict[str, FieldDef] = {f.name: f for f in UNINSTALL_FIELDS}
 
 
-def build_review_lines(obj: Any, fields: tuple[FieldDef, ...]) -> list[str]:
-    lines: list[str] = []
+def build_review_rows(obj: Any, fields: tuple[FieldDef, ...]) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
     for field in fields:
         value = getattr(obj, field.name, "")
         if isinstance(value, bool):
             shown = "Enabled" if value else "Disabled"
         else:
             shown = str(value) or "(empty)"
-        lines.append(f"{field.label:<34} {shown}")
-    return lines
+        rows.append((field.label, shown))
+    return rows
+
+
+def build_review_lines(obj: Any, fields: tuple[FieldDef, ...]) -> list[str]:
+    return [f"{label:<34} {value}" for label, value in build_review_rows(obj, fields)]

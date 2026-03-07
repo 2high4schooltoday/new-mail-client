@@ -41,8 +41,8 @@ class Theme:
             info=0,
             success=curses.A_BOLD,
             selection=curses.A_BOLD,
-            focus=curses.A_REVERSE,
-            button=0,
+            focus=curses.A_BOLD | curses.A_UNDERLINE,
+            button=curses.A_BOLD,
             button_primary=curses.A_BOLD,
             button_danger=curses.A_BOLD,
             button_disabled=curses.A_DIM,
@@ -63,9 +63,9 @@ class Theme:
         curses.init_pair(2, curses.COLOR_YELLOW, -1)  # mustard
         curses.init_pair(3, curses.COLOR_RED, -1)     # crimson/error
         curses.init_pair(4, curses.COLOR_MAGENTA, -1) # rust-ish fallback
-        curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # focused
-        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_RED)     # primary btn
-        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_WHITE)   # button base
+        curses.init_pair(5, curses.COLOR_YELLOW, -1)                  # focused/accent
+        curses.init_pair(6, curses.COLOR_RED, -1)                     # primary/action accent
+        curses.init_pair(7, curses.COLOR_WHITE, -1)                   # button base
         curses.init_pair(8, curses.COLOR_WHITE, -1)                   # chrome
         curses.init_pair(9, curses.COLOR_YELLOW, -1)                  # selection
 
@@ -81,11 +81,11 @@ class Theme:
             error=curses.color_pair(3) | curses.A_BOLD,
             info=curses.color_pair(4),
             success=curses.color_pair(1) | curses.A_BOLD,
-            selection=curses.color_pair(9) | curses.A_BOLD,
-            focus=curses.color_pair(5) | curses.A_BOLD,
-            button=curses.color_pair(7),
-            button_primary=curses.color_pair(6) | curses.A_BOLD,
+            selection=curses.color_pair(9),
+            focus=curses.color_pair(5) | curses.A_BOLD | curses.A_UNDERLINE,
+            button=curses.color_pair(7) | curses.A_BOLD,
+            button_primary=curses.color_pair(2) | curses.A_BOLD,
             button_danger=curses.color_pair(3) | curses.A_BOLD,
-            button_disabled=curses.A_DIM,
+            button_disabled=curses.color_pair(8) | curses.A_DIM,
         )
         return theme

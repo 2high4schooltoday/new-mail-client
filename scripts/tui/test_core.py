@@ -6,7 +6,13 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.tui.assistant import INSTALL_FLOW, UNINSTALL_FLOW, visible_fields
-from scripts.tui.assistant_app import render_progress_preview, render_welcome_preview
+from scripts.tui.assistant_app import (
+    render_completion_preview,
+    render_form_preview,
+    render_progress_preview,
+    render_review_preview,
+    render_welcome_preview,
+)
 from scripts.tui.glyphs import ASCII_GLYPHS, UNICODE_GLYPHS, smooth_bar
 from scripts.tui.models import INSTALL_STAGE_DEFS, InstallSpec
 from scripts.tui.logstore import LogStore
@@ -87,12 +93,42 @@ class PreviewRenderTests(unittest.TestCase):
         self.assertIn("Welcome to the Despatch Installer", joined)
         self.assertIn("Continue", joined)
 
+    def test_header_hint_does_not_share_the_divider_row(self) -> None:
+        lines = render_welcome_preview(120, 34)
+        self.assertIn("Installer flow is guided.", lines[4])
+        self.assertNotIn("Installer flow", lines[5])
+
+    def test_form_previews_remove_full_width_shade_artifacts(self) -> None:
+        for step_key in ("scope", "network", "security"):
+            lines = render_form_preview(120, 34, step_key)
+            joined = "\n".join(lines)
+            self.assertNotIn("░░░░░░", joined)
+            self.assertIn("Back", joined)
+            self.assertIn("Continue", joined)
+
+    def test_review_preview_wraps_long_values_without_overflow(self) -> None:
+        lines = render_review_preview(120, 34, long_values=True)
+        joined = "\n".join(lines)
+        self.assertIn("really.long.example.mail.2h4", joined)
+        self.assertIn("s2d.ru/with/a/deep/path", joined)
+        self.assertIn("with/a/deep/path", joined)
+        self.assertTrue(all(len(line) == 120 for line in lines))
+
     def test_progress_preview_can_show_log_drawer(self) -> None:
         lines = render_progress_preview(120, 34, True)
         joined = "\n".join(lines)
         self.assertIn("Installing", joined)
         self.assertIn("Stage timeline", joined)
         self.assertIn("Log", joined)
+        self.assertIn("Show Log", "\n".join(render_progress_preview(120, 34, False)))
+        self.assertIn("Hide Log", joined)
+
+    def test_completion_preview_can_show_log_drawer(self) -> None:
+        lines = render_completion_preview(120, 34, True)
+        joined = "\n".join(lines)
+        self.assertIn("Completed", joined)
+        self.assertIn("Next actions", joined)
+        self.assertIn("Hide Log", joined)
 
     def test_compact_preview_still_renders_shell(self) -> None:
         lines = render_welcome_preview(96, 24)
@@ -100,6 +136,13 @@ class PreviewRenderTests(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertIn("Install Or Upgrade Despatch", joined)
         self.assertIn("Uninstall", joined)
+
+    def test_ascii_preview_still_renders_clean_shell(self) -> None:
+        lines = render_welcome_preview(96, 24, ascii_mode=True)
+        joined = "\n".join(lines)
+        self.assertIn("ASCII", joined)
+        self.assertIn("Continue", joined)
+        self.assertTrue(all(len(line) == 96 for line in lines))
 
 
 class LogStoreTests(unittest.TestCase):
