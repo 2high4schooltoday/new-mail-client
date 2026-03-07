@@ -7,7 +7,7 @@ from .screens import FIELD_INDEX_INSTALL, FIELD_INDEX_UNINSTALL, FieldDef
 
 
 Operation = Literal["install", "uninstall", "diagnose", "status"]
-StepKind = Literal["welcome", "form", "review", "status", "progress", "completion", "intro"]
+StepKind = Literal["welcome", "form", "review", "status", "progress", "completion", "intro", "document"]
 
 
 @dataclass(frozen=True)
@@ -32,17 +32,17 @@ class OperationMeta:
 OPERATIONS: tuple[OperationMeta, ...] = (
     OperationMeta(
         key="install",
-        title="Install Or Upgrade Despatch",
+        title="Install or Update Despatch",
         short_title="Install",
-        summary="Prepare the host, configure network exposure, review the install contract, and run staged checks.",
-        accent="Install / Upgrade",
+        summary="Set up Despatch with a guided installer, review your choices, and let it finish the setup for you.",
+        accent="Install / Update",
         risk="LOW",
     ),
     OperationMeta(
         key="uninstall",
         title="Uninstall Despatch",
         short_title="Uninstall",
-        summary="Back up selected data, review removal scope, and run a controlled teardown.",
+        summary="Choose what to keep, review what will be removed, and let Despatch clean up the rest.",
         accent="Uninstall",
         risk="HIGH",
     ),
@@ -50,7 +50,7 @@ OPERATIONS: tuple[OperationMeta, ...] = (
         key="diagnose",
         title="Run Deployment Diagnostics",
         short_title="Diagnose",
-        summary="Check service reachability, proxy wiring, and deployment health without destructive changes.",
+        summary="Check whether the current setup looks healthy without changing the system.",
         accent="Diagnose",
         risk="LOW",
     ),
@@ -58,7 +58,7 @@ OPERATIONS: tuple[OperationMeta, ...] = (
         key="status",
         title="Inspect Host Status",
         short_title="Status",
-        summary="Read current service and environment status without changing the system.",
+        summary="See the current host and service status without making any changes.",
         accent="Status",
         risk="LOW",
     ),
@@ -67,23 +67,29 @@ OPERATIONS: tuple[OperationMeta, ...] = (
 
 INSTALL_FLOW: tuple[AssistantStep, ...] = (
     AssistantStep(
+        key="license",
+        title="Software License",
+        summary="Read the license agreement for Despatch. You must agree before installation can continue.",
+        kind="document",
+    ),
+    AssistantStep(
         key="scope",
-        title="Install Scope And Host Summary",
-        summary="Confirm the host target, fixed application paths, and whether Despatch should manage its systemd service.",
+        title="Where Despatch will be set up",
+        summary="Confirm this server and whether Despatch should start automatically when the server starts.",
         kind="form",
         fields=("install_service",),
     ),
     AssistantStep(
         key="network",
-        title="Network And Exposure",
-        summary="Define the primary domain, listen address, and whether external traffic is routed through a reverse proxy.",
+        title="How people will reach Despatch",
+        summary="Choose the address people will use and whether Despatch is connected through an existing web server.",
         kind="form",
         fields=("base_domain", "listen_addr", "proxy_setup", "proxy_server", "proxy_server_name"),
     ),
     AssistantStep(
         key="security",
-        title="Security And Mail Auth",
-        summary="Choose the mail authentication mode, optional SQL settings, TLS, firewall behavior, and dependency automation.",
+        title="Sign-in and connection settings",
+        summary="Choose how people sign in, whether to use HTTPS, and whether the installer should handle firewall and package setup.",
         kind="form",
         fields=(
             "dovecot_auth_mode",
@@ -101,20 +107,20 @@ INSTALL_FLOW: tuple[AssistantStep, ...] = (
     ),
     AssistantStep(
         key="review",
-        title="Review",
-        summary="Validate the install contract, inspect detected values, and start the installer when ready.",
+        title="Ready to install",
+        summary="Review your choices, fix anything that needs attention, and start the installation when ready.",
         kind="review",
     ),
     AssistantStep(
         key="progress",
-        title="Installing",
-        summary="Despatch is executing the staged install flow and validating runtime invariants.",
+        title="Installing Despatch",
+        summary="Despatch is setting itself up on this server.",
         kind="progress",
     ),
     AssistantStep(
         key="completion",
-        title="Completion",
-        summary="The install flow has finished. Review result details and next actions.",
+        title="Finished",
+        summary="Installation is complete. Review the result and any next steps.",
         kind="completion",
     ),
 )

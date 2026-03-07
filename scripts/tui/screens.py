@@ -21,6 +21,8 @@ class FieldDef:
     ftype: str
     options: tuple[str, ...] = ()
     help_text: str = ""
+    display_options: tuple[tuple[str, str], ...] = ()
+    empty_text: str = "Not set"
 
 
 @dataclass(frozen=True)
@@ -31,23 +33,42 @@ class WizardStep:
 
 
 INSTALL_FIELDS: tuple[FieldDef, ...] = (
-    FieldDef("base_domain", "Base Domain", "text", help_text="Primary mail domain used by setup."),
-    FieldDef("listen_addr", "Listen Address", "text", help_text="Bind address for web service, e.g. :8080."),
-    FieldDef("install_service", "Install Systemd Service", "bool"),
-    FieldDef("proxy_setup", "Configure Reverse Proxy", "bool"),
-    FieldDef("proxy_server", "Proxy Server", "choice", ("nginx", "apache2")),
-    FieldDef("proxy_server_name", "Proxy Server Name", "text"),
-    FieldDef("proxy_tls", "Enable Proxy TLS", "bool"),
-    FieldDef("proxy_cert", "TLS Cert Path", "text"),
-    FieldDef("proxy_key", "TLS Key Path", "text"),
-    FieldDef("dovecot_auth_mode", "Dovecot Auth Mode", "choice", ("pam", "sql")),
-    FieldDef("dovecot_auth_db_driver", "SQL Driver", "choice", ("", "mysql", "pgx")),
-    FieldDef("dovecot_auth_db_dsn", "SQL DSN", "text"),
-    FieldDef("ufw_enable", "Enable UFW", "bool"),
-    FieldDef("ufw_open_proxy_ports", "Open 80/443 in UFW", "bool"),
-    FieldDef("ufw_open_direct_port", "Open 8080 in UFW", "bool"),
-    FieldDef("run_diagnose", "Run Diagnose After Install", "bool"),
-    FieldDef("auto_install_deps", "Auto-install Missing Dependencies", "bool"),
+    FieldDef("base_domain", "Website address", "text", help_text="The address people will use to open Despatch."),
+    FieldDef("listen_addr", "Internal port", "text", help_text="Where Despatch listens on this server, for example :8080."),
+    FieldDef("install_service", "Start Despatch automatically with this server", "bool", help_text="Keeps Despatch running after a restart."),
+    FieldDef("proxy_setup", "Connect Despatch to your web server", "bool", help_text="Recommended when you already use Nginx or Apache on this machine."),
+    FieldDef("proxy_server", "Web server", "choice", ("nginx", "apache2"), display_options=(("nginx", "Nginx"), ("apache2", "Apache"))),
+    FieldDef("proxy_server_name", "Public address", "text", help_text="The public address your web server should answer for."),
+    FieldDef("proxy_tls", "Use HTTPS", "bool", help_text="Turn this on to serve Despatch over a secure connection."),
+    FieldDef("proxy_cert", "HTTPS certificate file", "text", help_text="Path to the certificate file used for HTTPS."),
+    FieldDef("proxy_key", "HTTPS private key file", "text", help_text="Path to the private key that matches the certificate."),
+    FieldDef(
+        "dovecot_auth_mode",
+        "Sign-in source",
+        "choice",
+        ("pam", "sql"),
+        help_text="Choose whether people sign in with system users on this server or a mailbox database.",
+        display_options=(("pam", "System users on this server"), ("sql", "Database-backed mailbox logins")),
+    ),
+    FieldDef(
+        "dovecot_auth_db_driver",
+        "Database type",
+        "choice",
+        ("", "mysql", "pgx"),
+        help_text="Only needed when sign-ins come from a database.",
+        display_options=(("mysql", "MySQL / MariaDB"), ("pgx", "PostgreSQL")),
+    ),
+    FieldDef(
+        "dovecot_auth_db_dsn",
+        "Database connection string",
+        "text",
+        help_text="Only needed when sign-ins come from a database.",
+    ),
+    FieldDef("ufw_enable", "Adjust firewall rules", "bool", help_text="Lets the installer open the network access Despatch needs."),
+    FieldDef("ufw_open_proxy_ports", "Open standard web ports", "bool", help_text="Open ports 80 and 443 for web traffic."),
+    FieldDef("ufw_open_direct_port", "Open the app port directly", "bool", help_text="Open the internal Despatch port for direct access."),
+    FieldDef("run_diagnose", "Check everything after install", "bool", help_text="Runs a final health check when setup is done."),
+    FieldDef("auto_install_deps", "Install required packages automatically", "bool", help_text="Lets the installer add missing packages for you."),
 )
 
 UNINSTALL_FIELDS: tuple[FieldDef, ...] = (
@@ -80,15 +101,19 @@ FIELD_INDEX_INSTALL: dict[str, FieldDef] = {f.name: f for f in INSTALL_FIELDS}
 FIELD_INDEX_UNINSTALL: dict[str, FieldDef] = {f.name: f for f in UNINSTALL_FIELDS}
 
 
+def field_display_value(field: FieldDef, value: Any) -> str:
+    if field.ftype == "bool":
+        return "On" if bool(value) else "Off"
+    shown = str(value or "")
+    if field.display_options:
+        return dict(field.display_options).get(shown, shown or field.empty_text)
+    return shown or field.empty_text
+
+
 def build_review_rows(obj: Any, fields: tuple[FieldDef, ...]) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     for field in fields:
-        value = getattr(obj, field.name, "")
-        if isinstance(value, bool):
-            shown = "Enabled" if value else "Disabled"
-        else:
-            shown = str(value) or "(empty)"
-        rows.append((field.label, shown))
+        rows.append((field.label, field_display_value(field, getattr(obj, field.name, ""))))
     return rows
 
 

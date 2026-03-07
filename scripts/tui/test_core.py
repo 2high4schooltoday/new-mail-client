@@ -9,6 +9,7 @@ from scripts.tui.assistant import INSTALL_FLOW, UNINSTALL_FLOW, visible_fields
 from scripts.tui.assistant_app import (
     render_completion_preview,
     render_form_preview,
+    render_license_preview,
     render_progress_preview,
     render_review_preview,
     render_welcome_preview,
@@ -23,6 +24,9 @@ from scripts.tui.system_ops import detect_letsencrypt_cert_pair
 
 
 class InstallSpecTests(unittest.TestCase):
+    def _install_step(self, key: str):
+        return next(step for step in INSTALL_FLOW if step.key == key)
+
     def test_install_spec_validation(self) -> None:
         spec = InstallSpec(base_domain="invalid", proxy_setup=True, proxy_server_name="")
         errs = spec.validate()
@@ -36,7 +40,7 @@ class InstallSpecTests(unittest.TestCase):
 
     def test_visible_install_fields_hide_sql_and_tls_dependents(self) -> None:
         spec = InstallSpec(base_domain="example.com", proxy_setup=False, dovecot_auth_mode="pam")
-        names = visible_fields("install", INSTALL_FLOW[2], spec)
+        names = visible_fields("install", self._install_step("security"), spec)
         self.assertNotIn("dovecot_auth_db_driver", names)
         self.assertNotIn("dovecot_auth_db_dsn", names)
         self.assertNotIn("proxy_cert", names)
@@ -51,7 +55,7 @@ class InstallSpecTests(unittest.TestCase):
             dovecot_auth_db_driver="mysql",
             dovecot_auth_db_dsn="dsn",
         )
-        names = visible_fields("install", INSTALL_FLOW[2], spec)
+        names = visible_fields("install", self._install_step("security"), spec)
         self.assertIn("dovecot_auth_db_driver", names)
         self.assertIn("dovecot_auth_db_dsn", names)
         self.assertIn("proxy_cert", names)
@@ -93,6 +97,22 @@ class PreviewRenderTests(unittest.TestCase):
         self.assertIn("Welcome to the Despatch Installer", joined)
         self.assertIn("Continue", joined)
 
+    def test_license_preview_contains_license_gate_and_actions(self) -> None:
+        lines = render_license_preview(120, 34)
+        joined = "\n".join(lines)
+        self.assertIn("Software License", joined)
+        self.assertIn("Despatch Software License", joined)
+        self.assertIn("Decline", joined)
+        self.assertIn("Agree", joined)
+        self.assertIn("You must choose Agree", joined)
+
+    def test_license_preview_renders_in_ascii_mode(self) -> None:
+        lines = render_license_preview(96, 24, ascii_mode=True)
+        joined = "\n".join(lines)
+        self.assertIn("ASCII", joined)
+        self.assertIn("Decline", joined)
+        self.assertIn("Agree", joined)
+
     def test_header_hint_does_not_share_the_divider_row(self) -> None:
         lines = render_welcome_preview(120, 34)
         self.assertIn("Installer flow is guided.", lines[4])
@@ -106,6 +126,20 @@ class PreviewRenderTests(unittest.TestCase):
             self.assertIn("Back", joined)
             self.assertIn("Continue", joined)
 
+    def test_form_previews_use_plain_language_install_copy(self) -> None:
+        security = "\n".join(render_form_preview(120, 34, "security"))
+        network = "\n".join(render_form_preview(120, 34, "network"))
+        review = "\n".join(render_review_preview(120, 34))
+        joined = "\n".join([security, network, review])
+        self.assertIn("Sign-in and connection settings", security)
+        self.assertIn("Sign-in source", security)
+        self.assertIn("Website address", network)
+        self.assertIn("Use HTTPS", review)
+        self.assertIn("firewall", security.lower())
+        self.assertNotIn("Dovecot", joined)
+        self.assertNotIn("DSN", joined)
+        self.assertNotIn("systemd", joined)
+
     def test_review_preview_wraps_long_values_without_overflow(self) -> None:
         lines = render_review_preview(120, 34, long_values=True)
         joined = "\n".join(lines)
@@ -117,16 +151,17 @@ class PreviewRenderTests(unittest.TestCase):
     def test_progress_preview_can_show_log_drawer(self) -> None:
         lines = render_progress_preview(120, 34, True)
         joined = "\n".join(lines)
-        self.assertIn("Installing", joined)
+        self.assertIn("Installing Despatch", joined)
         self.assertIn("Stage timeline", joined)
         self.assertIn("Log", joined)
+        self.assertIn("What is happening now", joined)
         self.assertIn("Show Log", "\n".join(render_progress_preview(120, 34, False)))
         self.assertIn("Hide Log", joined)
 
     def test_completion_preview_can_show_log_drawer(self) -> None:
         lines = render_completion_preview(120, 34, True)
         joined = "\n".join(lines)
-        self.assertIn("Completed", joined)
+        self.assertIn("Finished", joined)
         self.assertIn("Next actions", joined)
         self.assertIn("Hide Log", joined)
 
@@ -134,7 +169,7 @@ class PreviewRenderTests(unittest.TestCase):
         lines = render_welcome_preview(96, 24)
         self.assertEqual(len(lines), 24)
         joined = "\n".join(lines)
-        self.assertIn("Install Or Upgrade Despatch", joined)
+        self.assertIn("Install or Update Despatch", joined)
         self.assertIn("Uninstall", joined)
 
     def test_ascii_preview_still_renders_clean_shell(self) -> None:
@@ -295,6 +330,10 @@ class SystemOpsTests(unittest.TestCase):
 
 
 class FlowDefinitionTests(unittest.TestCase):
+    def test_install_flow_has_license_before_scope(self) -> None:
+        keys = [step.key for step in INSTALL_FLOW]
+        self.assertEqual(keys, ["license", "scope", "network", "security", "review", "progress", "completion"])
+
     def test_uninstall_flow_has_review_progress_and_completion(self) -> None:
         keys = [step.key for step in UNINSTALL_FLOW]
         self.assertEqual(keys, ["backup", "removal", "review", "progress", "completion"])

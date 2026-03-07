@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import curses
+import re
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any
@@ -288,3 +289,131 @@ def progress_bar(
         surface.text(y, x, filled, fill_style)
     if empty:
         surface.text(y, x + len(filled), empty, empty_style)
+
+
+_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
+
+
+def markdown_to_plain_blocks(markdown: str) -> list[str]:
+    blocks: list[str] = []
+    pending: list[str] = []
+
+    def flush_pending() -> None:
+        nonlocal pending
+        if pending:
+            blocks.append(" ".join(part.strip() for part in pending if part.strip()))
+            pending = []
+
+    def clean_inline(text: str) -> str:
+        text = _LINK_RE.sub(lambda m: f"{m.group(1)} <{m.group(2)}>", text)
+        text = _BOLD_RE.sub(lambda m: m.group(1), text)
+        text = _ITALIC_RE.sub(lambda m: m.group(1), text)
+        text = text.replace("`", "")
+        return " ".join(text.split())
+
+    for raw in markdown.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            flush_pending()
+            if blocks and blocks[-1] != "":
+                blocks.append("")
+            continue
+        if set(stripped) <= {"-", "*", "_"} and len(stripped) >= 3:
+            flush_pending()
+            if blocks and blocks[-1] != "":
+                blocks.append("")
+            continue
+        if stripped.startswith("### "):
+            flush_pending()
+            blocks.append(clean_inline(stripped[4:]))
+            blocks.append("")
+            continue
+        if stripped.startswith("## "):
+            flush_pending()
+            blocks.append(clean_inline(stripped[3:]).upper())
+            blocks.append("")
+            continue
+        if stripped.startswith("# "):
+            flush_pending()
+            blocks.append(clean_inline(stripped[2:]).upper())
+            blocks.append("")
+            continue
+        if stripped.startswith(("- ", "* ")):
+            flush_pending()
+            blocks.append(f"• {clean_inline(stripped[2:])}")
+            continue
+        match = re.match(r"^(\d+)\.\s+(.+)$", stripped)
+        if match:
+            flush_pending()
+            blocks.append(f"{match.group(1)}. {clean_inline(match.group(2))}")
+            continue
+        pending.append(clean_inline(stripped))
+
+    flush_pending()
+    while blocks and not blocks[-1]:
+        blocks.pop()
+    return blocks
+
+
+def document_lines(blocks: list[str], width: int, glyphs: Glyphs | None = None) -> list[str]:
+    lines: list[str] = []
+    width = max(8, width)
+    glyphs = glyphs or current_glyphs()
+    for block in blocks:
+        if not block:
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        indent = ""
+        body = block
+        if block.startswith("• "):
+            if not glyphs.unicode:
+                block = f"* {block[2:]}"
+            indent = "  "
+            body = block
+        wrapped = textwrap.wrap(
+            body,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False,
+            subsequent_indent=indent,
+        ) or [body[:width]]
+        lines.extend(wrapped)
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def document_view(
+    surface: BufferSurface | CursesSurface,
+    y: int,
+    x: int,
+    w: int,
+    h: int,
+    lines: list[str],
+    scroll: int,
+    *,
+    glyphs: Glyphs | None = None,
+    title: str = "",
+) -> tuple[int, int]:
+    glyphs = glyphs or current_glyphs()
+    row = y
+    if title:
+        row = titled_rule(surface, row, x, w, title, glyphs, title_style="rail")
+    viewport = max(1, h - (row - y))
+    max_scroll = max(0, len(lines) - viewport)
+    scroll = max(0, min(scroll, max_scroll))
+    content_w = max(8, w - 2)
+    for idx in range(viewport):
+        line_idx = scroll + idx
+        if line_idx >= len(lines):
+            break
+        line = lines[line_idx]
+        surface.text(row + idx, x, line[:content_w], "panel" if line else "muted")
+    if max_scroll > 0 and w >= 12:
+        indicator = f"{scroll + 1}-{min(len(lines), scroll + viewport)} / {len(lines)}"
+        surface.text(y + h - 1, x + max(0, w - len(indicator)), indicator, "rail")
+    return scroll, max_scroll

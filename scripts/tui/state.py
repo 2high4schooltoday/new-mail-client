@@ -15,6 +15,7 @@ class UIState:
     log_level_mask: set[str] = field(default_factory=lambda: {"debug", "info", "warn", "error"})
     log_search: str = ""
     run_scroll: int = 0
+    document_scroll: int = 0
     spinner_tick: int = 0
     log_drawer_open: bool = False
 

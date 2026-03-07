@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .assistant import OPERATIONS, AssistantStep, Operation, field_def, operation_flow, operation_meta, visible_fields
@@ -14,9 +15,23 @@ from .glyphs import ASCII_GLYPHS, Glyphs, UNICODE_GLYPHS, braille_texture, curre
 from .logstore import LogStore
 from .modals import ConfirmModal
 from .models import DIAG_STAGE_DEFS, INSTALL_STAGE_DEFS, UNINSTALL_STAGE_DEFS, DiagnoseSpec, InstallSpec, OperationResult, RunnerError, RunState, UninstallSpec
-from .rendering import BufferSurface, CursesSurface, choose_layout, ellipsis_clip, key_value_row, progress_bar, section_heading, soft_panel, titled_rule, wrap_paragraph
+from .rendering import (
+    BufferSurface,
+    CursesSurface,
+    choose_layout,
+    document_lines,
+    document_view,
+    ellipsis_clip,
+    key_value_row,
+    markdown_to_plain_blocks,
+    progress_bar,
+    section_heading,
+    soft_panel,
+    titled_rule,
+    wrap_paragraph,
+)
 from .runner import OperationRunner
-from .screens import FIELD_INDEX_INSTALL, FIELD_INDEX_UNINSTALL, INSTALL_FIELDS, UNINSTALL_FIELDS, FieldDef, build_review_rows
+from .screens import FIELD_INDEX_INSTALL, FIELD_INDEX_UNINSTALL, INSTALL_FIELDS, UNINSTALL_FIELDS, FieldDef, build_review_rows, field_display_value
 from .state import UIState, apply_runner_event, new_run_state
 from .system_ops import AppPaths, CancelToken, detect_arch, detect_host, detect_letsencrypt_cert_pair, detect_paths, detect_proxy_candidates, detect_service_state
 from .theme import Theme
@@ -32,35 +47,35 @@ class WizardState:
 
 
 _PROGRESS_STAGE_INDEX = {
-    "install": 4,
+    "install": 5,
     "uninstall": 3,
     "diagnose": 1,
 }
 
 _COMPLETION_STAGE_INDEX = {
-    "install": 5,
+    "install": 6,
     "uninstall": 4,
     "diagnose": 2,
 }
 
 
 STAGE_META: dict[str, tuple[str, str]] = {
-    "preflight": ("Preflight", "info"),
-    "fetch_source": ("Fetch", "info"),
-    "deps": ("Dependencies", "warning"),
-    "build": ("Build", "primary"),
-    "filesystem_and_user": ("Filesystem", "info"),
-    "env_generation": ("Environment", "info"),
-    "service_install_start": ("Service", "primary"),
-    "firewall": ("Firewall", "warning"),
-    "proxy": ("Proxy", "warning"),
-    "post_checks": ("Checks", "primary"),
-    "final_summary": ("Summary", "info"),
-    "backups": ("Backups", "info"),
-    "cleanup": ("Cleanup", "warning"),
-    "service": ("Service", "warning"),
-    "summary": ("Summary", "info"),
-    "diagnostics": ("Diagnostics", "primary"),
+    "preflight": ("Preparing", "info"),
+    "fetch_source": ("Downloading files", "info"),
+    "deps": ("Checking required tools", "warning"),
+    "build": ("Building Despatch", "primary"),
+    "filesystem_and_user": ("Creating folders", "info"),
+    "env_generation": ("Saving settings", "info"),
+    "service_install_start": ("Starting Despatch", "primary"),
+    "firewall": ("Updating firewall rules", "warning"),
+    "proxy": ("Connecting your web server", "warning"),
+    "post_checks": ("Checking the setup", "primary"),
+    "final_summary": ("Finishing up", "info"),
+    "backups": ("Saving backups", "info"),
+    "cleanup": ("Removing files", "warning"),
+    "service": ("Stopping services", "warning"),
+    "summary": ("Finishing up", "info"),
+    "diagnostics": ("Checking the server", "primary"),
 }
 
 
@@ -103,6 +118,21 @@ def _seed_proxy_tls_defaults(spec: InstallSpec) -> bool:
     return changed
 
 
+def _load_license_blocks() -> list[str]:
+    license_path = Path(__file__).resolve().parents[2] / "LICENSE.md"
+    try:
+        markdown = license_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [
+            "DESPATCH SOFTWARE LICENSE",
+            "",
+            f"The license file could not be loaded: {exc}",
+            "",
+            f"Expected path: {license_path}",
+        ]
+    return markdown_to_plain_blocks(markdown)
+
+
 class DespatchTUI:
     def __init__(self, stdscr: curses.window) -> None:
         self.stdscr = stdscr
@@ -122,6 +152,8 @@ class DespatchTUI:
         self.last_result: OperationResult | None = None
         self.last_summary_payload: dict[str, Any] = {}
         self.active_operation: str = ""
+        self.install_license_accepted = False
+        self.license_blocks = _load_license_blocks()
 
         hostname = detect_host()
         default_domain = hostname if "." in hostname else "example.com"
@@ -270,12 +302,10 @@ class DespatchTUI:
             style = "heading" if active else "panel"
             if idx < current_idx:
                 style = "success"
-            surface.fill(line_y, x + 2, 1, max(0, w - 4), " ", "panel")
             surface.text(line_y, x + 2, ellipsis_clip(f"{glyph} {step.title}", max(8, w - 4), self.glyphs), style)
 
         if show_timeline:
             base = min(y + h - 9, step_y + len(flow) * step_gap + 1)
-            surface.fill(base, x + 2, 1, max(0, w - 4), " ", "panel")
             titled_rule(surface, base, x + 2, max(8, w - 4), "Stage timeline", self.glyphs, title_style="heading")
             stage_row = base + 2
             for stage_id in self.run_state.stage_order[: max(0, y + h - stage_row - 1)]:
@@ -291,7 +321,6 @@ class DespatchTUI:
                     style = "primary"
                 elif stage.status == "pending":
                     style = "muted"
-                surface.fill(stage_row, x + 2, 1, max(0, w - 4), " ", "panel")
                 surface.text(stage_row, x + 2, ellipsis_clip(f"{glyph} {label}", max(8, w - 4), self.glyphs), style)
                 stage_row += 1
                 if stage_row >= y + h - 1:
@@ -304,6 +333,9 @@ class DespatchTUI:
         step = self._current_step()
         if step.kind == "form":
             self._draw_form_step(surface, step, x, y, w, h)
+            return
+        if step.kind == "document":
+            self._draw_document_step(surface, step, x, y, w, h)
             return
         if step.kind == "review":
             self._draw_review_step(surface, x, y, w, h)
@@ -321,8 +353,8 @@ class DespatchTUI:
 
     def _draw_welcome(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
         copy = (
-            "This assistant prepares installation, removal, diagnostics, and host inspection using a guided flow. "
-            "Review the selected task, then continue to the next screen."
+            "This assistant guides you through setting up, removing, or checking Despatch one screen at a time. "
+            "Choose what you want to do, then continue."
         )
         card_y = section_heading(surface, y + 1, x + 1, w - 2, "Welcome to the Despatch Installer", copy, glyphs=self.glyphs)
         compact = h < 18
@@ -344,22 +376,23 @@ class DespatchTUI:
         self.focus.set_items(items, preferred=preferred)
 
     def _draw_card(self, surface: CursesSurface, y: int, x: int, w: int, h: int, title: str, summary: str, risk: str, selected: bool, focused: bool) -> None:
+        risk_label = "Careful" if risk == "HIGH" else ""
         if h <= 1:
             style = "focus" if focused else ("heading" if selected else "panel")
             marker = self.glyphs.card_on if selected else self.glyphs.card_off
-            available = max(8, w - len(risk) - 5)
+            available = max(8, w - len(risk_label) - 5)
             surface.text(y, x + 1, ellipsis_clip(f"{marker} {title}", available, self.glyphs), style)
-            risk_style = "warning" if risk == "HIGH" else "rail"
-            surface.text(y, x + max(2, w - len(risk) - 1), risk, risk_style)
+            if risk_label:
+                surface.text(y, x + max(2, w - len(risk_label) - 1), risk_label, "warning")
             return
-        surface.box(y, x, h, w, self.glyphs, "selection" if selected else "chrome")
+        surface.box(y, x, h, w, self.glyphs, "chrome")
         marker = self.glyphs.card_on if selected else self.glyphs.card_off
         if selected:
             surface.text(y + 1, x + 1, self.glyphs.marker, "primary")
         title_style = "focus" if focused else ("heading" if selected else "panel")
-        surface.text(y + 1, x + 2, ellipsis_clip(f"{marker} {title}", max(8, w - len(risk) - 8), self.glyphs), title_style)
-        risk_style = "warning" if risk == "HIGH" else "rail"
-        surface.text(y + 1, x + max(2, w - len(risk) - 4), risk, risk_style)
+        surface.text(y + 1, x + 2, ellipsis_clip(f"{marker} {title}", max(8, w - len(risk_label) - 8), self.glyphs), title_style)
+        if risk_label:
+            surface.text(y + 1, x + max(2, w - len(risk_label) - 4), risk_label, "warning")
         if h >= 4:
             surface.text(y + 2, x + 2, ellipsis_clip(summary, max(8, w - 4), self.glyphs), "muted")
 
@@ -376,26 +409,25 @@ class DespatchTUI:
                 x + 1,
                 w - 2,
                 [
-                    f"Host: {detect_host()}",
-                    f"Service state: {detect_service_state()}",
-                    f"Root dir: {self.paths.root_dir}",
-                    f"Scripts dir: {self.paths.scripts_dir}",
+                    f"This installer is working on: {detect_host()}",
+                    f"Current Despatch service status: {detect_service_state()}",
+                    "The installer will place Despatch in its standard system folders.",
                 ],
-                title="Host summary",
+                title="This server",
             )
         elif self.wizard.operation == "install" and step.key == "network":
             hints = [
-                f"Detected proxies: {', '.join(detect_proxy_candidates()) or 'none'}",
-                f"Suggested base domain: {self.install_spec.base_domain}",
+                f"Web servers found on this machine: {', '.join(detect_proxy_candidates()) or 'none found'}",
+                f"Suggested website address: {self.install_spec.base_domain}",
             ]
             row = self._draw_info_block(surface, row, x + 1, w - 2, hints, title="Detected")
         elif self.wizard.operation == "install" and step.key == "security":
             hints = [
-                "PAM mode is recommended for local system auth.",
-                "SQL mode requires both driver and DSN before install can start.",
-                "Proxy TLS auto-fills detected Let's Encrypt paths when possible.",
+                "Use system users on this server unless your mailbox passwords already live in a database.",
+                "If you turn on HTTPS, the installer will try to fill in common certificate paths for you.",
+                "Firewall and package setup can be left on for the easiest installation path.",
             ]
-            row = self._draw_info_block(surface, row, x + 1, w - 2, hints, title="Notes")
+            row = self._draw_info_block(surface, row, x + 1, w - 2, hints, title="Helpful notes")
         elif self.wizard.operation == "uninstall" and step.key == "backup":
             hints = [
                 "Backups are exported before destructive cleanup when enabled.",
@@ -420,6 +452,39 @@ class DespatchTUI:
         items.extend(self._footer_action_ids())
         preferred = self.focus.current if self.focus.current in items else (f"field:{names[self.wizard.field_idx]}" if names else self._footer_action_ids()[-1])
         self.focus.set_items(items, preferred=preferred)
+
+    def _draw_document_step(self, surface: CursesSurface, step: AssistantStep, x: int, y: int, w: int, h: int) -> None:
+        row = section_heading(surface, y + 1, x + 1, w - 2, step.title, step.summary, glyphs=self.glyphs)
+        row = self._draw_info_block(
+            surface,
+            row,
+            x + 1,
+            w - 2,
+            [
+                "Scroll through the full license text here in the installer.",
+                "Choose Agree to continue with installation, or Decline to return to the start screen.",
+            ],
+            title="Before you continue",
+        )
+        available = max(8, y + h - row - 3)
+        lines = document_lines(self.license_blocks, max(8, w - 3), self.glyphs)
+        scroll, max_scroll = document_view(
+            surface,
+            row,
+            x + 1,
+            w - 2,
+            available,
+            lines,
+            self.ui.document_scroll,
+            glyphs=self.glyphs,
+            title="Despatch Software License",
+        )
+        self.ui.document_scroll = scroll
+        note = "License accepted for this install session." if self.install_license_accepted else "You must choose Agree before the installer can continue."
+        note_style = "success" if self.install_license_accepted else "muted"
+        surface.text(y + h - 2, x + 1, ellipsis_clip(note, max(8, w - 2), self.glyphs), note_style)
+        _ = max_scroll
+        self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[-1])
 
     def _draw_info_block(self, surface: CursesSurface, y: int, x: int, w: int, lines: list[str], title: str = "") -> int:
         row = soft_panel(surface, y, x, w, lines, glyphs=self.glyphs, title=title)
@@ -454,14 +519,14 @@ class DespatchTUI:
     def _draw_review_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
         if self.wizard.operation == "install":
             rows = build_review_rows(self.install_spec, INSTALL_FIELDS)
-            errors = self.install_spec.validate()
-            summary = "Review the resolved install contract before starting the installer."
+            errors = self._friendly_install_errors()
+            summary = "Review your choices before Despatch starts installing on this server."
         else:
             rows = build_review_rows(self.uninstall_spec, UNINSTALL_FIELDS)
             errors = []
-            summary = "Review the selected teardown contract before starting the uninstall run."
-        row = section_heading(surface, y + 1, x + 1, w - 2, "Review", summary, glyphs=self.glyphs)
-        row = titled_rule(surface, row, x + 1, w - 2, "Resolved configuration", self.glyphs, title_style="heading")
+            summary = "Review what will be removed before the uninstall starts."
+        row = section_heading(surface, y + 1, x + 1, w - 2, self._current_step().title, summary, glyphs=self.glyphs)
+        row = titled_rule(surface, row, x + 1, w - 2, "Your choices", self.glyphs, title_style="heading")
         for label, value in rows:
             used = key_value_row(
                 surface,
@@ -480,9 +545,19 @@ class DespatchTUI:
                 break
         row += 1
         if errors:
-            soft_panel(surface, row, x + 1, w - 2, errors[:3], glyphs=self.glyphs, title="Validation", line_style="error", title_style="warning")
+            soft_panel(surface, row, x + 1, w - 2, errors[:3], glyphs=self.glyphs, title="Needs attention", line_style="error", title_style="warning")
         else:
-            surface.text(row, x + 1, "Validation: ready", "success")
+            soft_panel(
+                surface,
+                row,
+                x + 1,
+                w - 2,
+                ["Everything needed for installation is in place."],
+                glyphs=self.glyphs,
+                title="Ready to install",
+                line_style="success",
+                title_style="heading",
+            )
         preferred = self.focus.current or ("assistant:back" if errors else self._footer_action_ids()[-1])
         self.focus.set_items(self._footer_action_ids(), preferred=preferred)
 
@@ -524,7 +599,7 @@ class DespatchTUI:
 
     def _draw_progress_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int, tier: Any) -> None:
         run = self.run_state
-        row = section_heading(surface, y + 1, x + 1, w - 2, self._current_step().title, "", glyphs=self.glyphs)
+        row = section_heading(surface, y + 1, x + 1, w - 2, self._current_step().title, "Despatch is being prepared on this server.", glyphs=self.glyphs)
         if run is None:
             surface.text(row, x + 1, "No active run.", "muted")
             self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
@@ -536,40 +611,37 @@ class DespatchTUI:
             stage_ratio = min(1.0, max(0.0, active.current / active.total))
         bar_w = max(18, w - 2)
         progress_bar(surface, row, x + 1, bar_w, overall, glyphs=self.glyphs)
-        surface.text(row + 1, x + 1, f"Overall {int(overall * 100):3d}%", "panel")
+        surface.text(row + 1, x + 1, f"{int(overall * 100):3d}% complete", "panel")
         row += 3
-        row = titled_rule(surface, row, x + 1, w - 2, "Run details", self.glyphs)
-        details = [
-            ("Run ID", run.run_id),
-            ("Status", run.status),
-            ("Active stage", active.title if active else "-"),
-            ("Stage progress", f"{int(stage_ratio * 100):3d}%"),
-        ]
-        message = active.message if active and active.message else "Working"
-        for label, value in details:
-            style = "primary" if label == "Status" and run.status == "running" else "panel"
-            row += key_value_row(
-                surface,
-                row,
-                x + 1,
-                w - 2,
-                label,
-                value,
-                glyphs=self.glyphs,
-                label_w=self._label_width(w),
-                value_style=style,
-            )
+        current_label = STAGE_META.get(run.active_stage_id or "", (active.title if active else "Preparing", "info"))[0] if active else "Preparing"
+        row = titled_rule(surface, row, x + 1, w - 2, "What is happening now", self.glyphs)
         row += key_value_row(
             surface,
             row,
             x + 1,
             w - 2,
-            "Message",
-            message,
+            "Current step",
+            current_label,
             glyphs=self.glyphs,
             label_w=self._label_width(w),
-            value_style="muted",
+            label_style="muted",
+            value_style="primary",
         )
+        row += key_value_row(
+            surface,
+            row,
+            x + 1,
+            w - 2,
+            "Step progress",
+            f"{int(stage_ratio * 100):3d}%",
+            glyphs=self.glyphs,
+            label_w=self._label_width(w),
+            label_style="muted",
+            value_style="panel",
+        )
+        message = self._friendly_stage_message(active.message if active and active.message else "")
+        if message:
+            row = self._draw_info_block(surface, row, x + 1, w - 2, [message], title="Installer message")
 
         available = max(0, y + h - row - 1)
         if self.ui.log_drawer_open and available >= 5:
@@ -577,19 +649,19 @@ class DespatchTUI:
             log_y = y + h - log_h
             self._draw_log_drawer(surface, x + 1, log_y, w - 2, log_h)
         else:
-            surface.text(y + h - 2, x + 1, "Press L to show recent logs.", "muted")
+            surface.text(y + h - 2, x + 1, "Press L to open the recent log drawer if you need more detail.", "muted")
         self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
 
     def _draw_completion_step(self, surface: CursesSurface, x: int, y: int, w: int, h: int, tier: Any) -> None:
         result = self.last_result
-        title = "Completed" if result and result.status == "ok" else "Finished With Findings"
+        title = "Finished" if result and result.status == "ok" else "Needs attention"
         style = "success" if result and result.status == "ok" else "warning"
         surface.text(y + 1, x + 1, title, style)
         if result is None:
             surface.text(y + 3, x + 1, "No result available.", "muted")
             self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
             return
-        lead = "The operation completed successfully." if result.status == "ok" else "Review the reported issues before retrying."
+        lead = "Despatch finished its work successfully." if result.status == "ok" else "Something needs attention before you try again."
         row = y + 3
         for idx, line in enumerate(wrap_paragraph(lead, w - 6)):
             surface.text(row + idx, x + 1, line, "panel")
@@ -597,19 +669,19 @@ class DespatchTUI:
         surface.text(row, x + 1, ellipsis_clip(f"Log file: {self.logstore.log_path}", max(8, w - 2), self.glyphs), "muted")
         row += 2
         if result.errors:
-            row = titled_rule(surface, row, x + 1, w - 2, "Findings", self.glyphs, title_style="warning")
+            row = titled_rule(surface, row, x + 1, w - 2, "What needs attention", self.glyphs, title_style="warning")
             for err in result.errors[:3]:
                 row = soft_panel(
                     surface,
                     row,
                     x + 1,
                     w - 2,
-                    [f"{err.code}: {err.message}"] + ([err.suggested_fix] if err.suggested_fix else []),
+                    [self._friendly_runner_error(err)] + ([err.suggested_fix] if err.suggested_fix else []),
                     glyphs=self.glyphs,
                     line_style="error",
                 ) + 1
         else:
-            surface.text(row, x + 1, "No blocking findings were reported.", "success")
+            surface.text(row, x + 1, "No blocking problems were reported.", "success")
             row += 2
         if result.next_actions:
             row = self._draw_info_block(surface, row, x + 1, w - 2, result.next_actions[:3], title="Next actions")
@@ -619,7 +691,7 @@ class DespatchTUI:
             log_y = y + h - log_h
             self._draw_log_drawer(surface, x + 1, log_y, w - 2, log_h)
         else:
-            surface.text(y + h - 3, x + 1, "Press L to show the recent log drawer.", "muted")
+            surface.text(y + h - 3, x + 1, "Press L to open the recent log drawer.", "muted")
         self.focus.set_items(self._footer_action_ids(), preferred=self.focus.current or self._footer_action_ids()[0])
 
     def _draw_log_drawer(self, surface: CursesSurface, x: int, y: int, w: int, h: int) -> None:
@@ -655,6 +727,8 @@ class DespatchTUI:
             self.mouse_targets.append(rect)
             col += rect.w + 1
         key_hint = "Tab cycle  Arrows move  Enter activate  Esc back  L log  Ctrl+X cancel"
+        if self.ui.mode == "assistant" and self._current_step().kind == "document":
+            key_hint = "Tab cycle  Up/Down scroll  PgUp/PgDn scroll faster  Home/End jump  Enter activate  Esc back"
         surface.text(y + 2, x + 2, ellipsis_clip(key_hint, max(8, w - 4), self.glyphs), "rail")
 
     def _draw_action_button(self, surface: CursesSurface, y: int, x: int, label: str, action: str, style: str, focused: bool, disabled: bool) -> Rect:
@@ -695,6 +769,11 @@ class DespatchTUI:
             return [
                 (label, "assistant:toggle-log", "secondary", False),
                 ("Cancel", "assistant:cancel-run", "danger", not running),
+            ]
+        if step.kind == "document":
+            return [
+                ("Decline", "assistant:decline-license", "secondary", False),
+                ("Agree", "assistant:accept-license", "primary", False),
             ]
         if step.kind == "completion":
             label = "Hide Log" if self.ui.log_drawer_open else "Show Log"
@@ -743,11 +822,110 @@ class DespatchTUI:
     def _current_values(self) -> Any:
         return self.install_spec if self.wizard.operation == "install" else self.uninstall_spec
 
+    def _return_home(self, status: str) -> None:
+        self.ui.mode = "welcome"
+        self.ui.log_drawer_open = False
+        self.ui.document_scroll = 0
+        self.install_license_accepted = False
+        self.ui.status_line = status
+        self.focus.set_items([], preferred=None)
+
+    def _accept_license(self) -> None:
+        self.install_license_accepted = True
+        self.ui.status_line = "License accepted. Continuing with installation setup."
+        self._go_next()
+
+    def _decline_license(self) -> None:
+        self._return_home("License declined. Installation was not started.")
+
+    def _document_layout(self) -> tuple[int, int]:
+        h, w = self.stdscr.getmaxyx()
+        tier = choose_layout(w, h)
+        outer_y = 1
+        outer_h = h - 2
+        inner_y = outer_y + 1
+        inner_h = outer_h - 2
+        header_divider_y = inner_y + tier.title_h - 1
+        footer_y = outer_y + outer_h - tier.footer_h
+        footer_divider_y = footer_y - 1
+        rail_y = header_divider_y + 1
+        rail_h = max(0, footer_divider_y - rail_y)
+        inner_w = w - 6
+        main_w = inner_w - tier.rail_w - 3
+        main_h = rail_h
+        return main_w, main_h
+
+    def _license_lines(self, width: int) -> list[str]:
+        return document_lines(self.license_blocks, max(8, width), self.glyphs)
+
+    def _license_max_scroll(self) -> int:
+        main_w, main_h = self._document_layout()
+        temp = BufferSurface(main_w, main_h)
+        row = section_heading(temp, 1, 1, max(8, main_w - 2), self._current_step().title, self._current_step().summary, glyphs=self.glyphs)
+        row = soft_panel(
+            temp,
+            row,
+            1,
+            max(8, main_w - 2),
+            [
+                "Scroll through the full license text here in the installer.",
+                "Choose Agree to continue with installation, or Decline to return to the start screen.",
+            ],
+            glyphs=self.glyphs,
+            title="Before you continue",
+        ) + 1
+        available = max(8, main_h - row - 3)
+        return max(0, len(self._license_lines(main_w - 3)) - available)
+
+    def _scroll_document(self, delta: int) -> None:
+        if self._current_step().kind != "document":
+            return
+        self.ui.document_scroll = clamp(self.ui.document_scroll + delta, 0, self._license_max_scroll())
+
+    def _friendly_install_errors(self) -> list[str]:
+        mapped: list[str] = []
+        for err in self.install_spec.validate():
+            lower = err.lower()
+            if "fqdn" in lower or "base domain" in lower:
+                mapped.append("Enter a full website address, such as mail.example.com.")
+            elif "listen address" in lower:
+                mapped.append("Choose the internal port Despatch should use on this server.")
+            elif "proxy server name" in lower:
+                mapped.append("Add the public address your web server should answer for.")
+            elif "tls cert" in lower or "tls key" in lower:
+                mapped.append("Turn off HTTPS or provide both the certificate file and the private key file.")
+            elif "driver" in lower:
+                mapped.append("Choose the database type used for mailbox sign-ins.")
+            elif "dsn" in lower:
+                mapped.append("Add the database connection string for mailbox sign-ins.")
+            elif "auth mode" in lower:
+                mapped.append("Choose where Despatch should check sign-ins.")
+            else:
+                mapped.append(err)
+        return mapped
+
+    def _friendly_stage_message(self, message: str) -> str:
+        normalized = (message or "").strip()
+        if not normalized:
+            return ""
+        if normalized.lower() in {"started", "running", "working"}:
+            return "The installer is working on this step."
+        if normalized.lower() == "pending":
+            return "This step is waiting for the earlier work to finish."
+        return normalized
+
+    def _friendly_runner_error(self, err: RunnerError) -> str:
+        code = err.code.upper()
+        if code == "E_PREFLIGHT":
+            return "Installation needs administrator access before it can continue."
+        if code == "E_PROTOCOL":
+            return "The installer did not receive the completion signal it expected."
+        if code == "E_SERVICE":
+            return "Despatch did not reach a healthy running state after setup."
+        return err.message
+
     def _field_value(self, field: FieldDef, value: Any) -> str:
-        if field.ftype == "bool":
-            return "Enabled" if bool(value) else "Disabled"
-        shown = str(value or "")
-        return shown if shown else "(empty)"
+        return field_display_value(field, value)
 
     def _handle_key(self, key: object) -> None:
         if key == curses.KEY_MOUSE:
@@ -770,11 +948,25 @@ class DespatchTUI:
             self.ui.log_drawer_open = not self.ui.log_drawer_open
             self.ui.status_line = "Log drawer shown." if self.ui.log_drawer_open else "Log drawer hidden."
             return
-        if key in (curses.KEY_NPAGE,) and self.ui.mode == "assistant" and self._current_step().kind in {"progress", "completion"}:
-            self.ui.run_scroll = max(0, self.ui.run_scroll - 8)
+        if key in (curses.KEY_NPAGE,) and self.ui.mode == "assistant":
+            if self._current_step().kind == "document":
+                self._scroll_document(12)
+                return
+            if self._current_step().kind in {"progress", "completion"}:
+                self.ui.run_scroll = max(0, self.ui.run_scroll - 8)
+                return
+        if key in (curses.KEY_PPAGE,) and self.ui.mode == "assistant":
+            if self._current_step().kind == "document":
+                self._scroll_document(-12)
+                return
+            if self._current_step().kind in {"progress", "completion"}:
+                self.ui.run_scroll += 8
+                return
+        if key == curses.KEY_HOME and self.ui.mode == "assistant" and self._current_step().kind == "document":
+            self.ui.document_scroll = 0
             return
-        if key in (curses.KEY_PPAGE,) and self.ui.mode == "assistant" and self._current_step().kind in {"progress", "completion"}:
-            self.ui.run_scroll += 8
+        if key == curses.KEY_END and self.ui.mode == "assistant" and self._current_step().kind == "document":
+            self._scroll_document(10_000)
             return
         if key in (curses.KEY_UP, "k"):
             self._handle_vertical(-1)
@@ -808,6 +1000,9 @@ class DespatchTUI:
                 return
             self.wizard.field_idx = clamp(self.wizard.field_idx + delta, 0, len(names) - 1)
             self.focus.set_items(self.focus.items, preferred=f"field:{names[self.wizard.field_idx]}")
+            return
+        if step.kind == "document":
+            self._scroll_document(delta)
 
     def _handle_horizontal(self, delta: int) -> None:
         cur = self.focus.current
@@ -872,6 +1067,9 @@ class DespatchTUI:
             self.wizard = WizardState(operation=meta.key, step_idx=0, field_idx=0)
             self.ui.mode = "assistant"
             self.ui.log_drawer_open = False
+            self.ui.document_scroll = 0
+            if meta.key == "install":
+                self.install_license_accepted = False
             self.ui.status_line = f"Selected: {meta.title}"
             self.focus.set_items([], preferred=None)
 
@@ -883,13 +1081,13 @@ class DespatchTUI:
             self._toggle_field(field)
             return
         if field.ftype == "choice":
-            selected = self._select_choice(field.label, list(field.options), str(getattr(self._current_values(), field.name)))
+            selected = self._select_choice(field, list(field.options), str(getattr(self._current_values(), field.name)))
             if selected is None:
                 self.ui.status_line = f"{field.label} unchanged."
                 return
             setattr(self._current_values(), field.name, selected)
             self._after_install_mutation(field.name)
-            self.ui.status_line = f"{field.label} set to {selected}"
+            self.ui.status_line = f"{field.label} set to {field_display_value(field, selected)}."
             return
         current = str(getattr(self._current_values(), field.name))
         value = self._prompt_line(field.label, current)
@@ -907,6 +1105,12 @@ class DespatchTUI:
         if focus_id == "assistant:continue":
             self._go_next()
             return
+        if focus_id == "assistant:decline-license":
+            self._decline_license()
+            return
+        if focus_id == "assistant:accept-license":
+            self._accept_license()
+            return
         if focus_id == "assistant:run":
             self._start_run(self.wizard.operation)
             return
@@ -921,10 +1125,7 @@ class DespatchTUI:
             self._start_run(self.wizard.operation)
             return
         if focus_id == "assistant:home":
-            self.ui.mode = "welcome"
-            self.ui.log_drawer_open = False
-            self.ui.status_line = "Back to welcome."
-            self.focus.set_items([], preferred=None)
+            self._return_home("Back to welcome.")
             return
         if focus_id == "assistant:diagnose":
             self.wizard = WizardState(operation="diagnose", step_idx=0, field_idx=0)
@@ -937,25 +1138,26 @@ class DespatchTUI:
             return
         step = self._current_step()
         if step.kind in {"completion", "status"}:
-            self.ui.mode = "welcome"
-            self.ui.log_drawer_open = False
-            self.ui.status_line = "Back to welcome."
-            self.focus.set_items([], preferred=None)
+            self._return_home("Back to welcome.")
             return
         if self.wizard.step_idx <= 0:
-            self.ui.mode = "welcome"
-            self.ui.status_line = "Back to welcome."
-            self.focus.set_items([], preferred=None)
+            self._return_home("Back to welcome.")
             return
         self.wizard.step_idx -= 1
         self.wizard.field_idx = 0
+        if self._current_step().kind == "document":
+            self.ui.document_scroll = 0
         self.ui.status_line = f"Back to {self._current_step().title}."
         self.focus.set_items([], preferred=None)
 
     def _go_next(self) -> None:
+        if self._current_step().kind == "document" and not self.install_license_accepted:
+            self.ui.status_line = "Please read the license and choose Agree before continuing."
+            return
         flow = operation_flow(self.wizard.operation)
         self.wizard.step_idx = clamp(self.wizard.step_idx + 1, 0, len(flow) - 1)
         self.wizard.field_idx = 0
+        self.ui.document_scroll = 0
         self.ui.status_line = self._current_step().title
         self.focus.set_items([], preferred=None)
 
@@ -964,12 +1166,13 @@ class DespatchTUI:
         current = bool(getattr(obj, field.name))
         next_value = not current
         if field.name in {"install_service", "proxy_setup"} and not next_value:
+            detail = "Despatch will not start by itself after the server restarts." if field.name == "install_service" else "People may not be able to open Despatch through your web server."
             confirmed = self._confirm_dialog(
                 ConfirmModal(
-                    title=f"Disable {field.label}?",
-                    detail="This may prevent service startup or external access.",
-                    cancel_label="Keep Enabled",
-                    confirm_label="Disable",
+                    title=f"Turn off {field.label}?",
+                    detail=detail,
+                    cancel_label="Keep On",
+                    confirm_label="Turn Off",
                 )
             )
             if not confirmed:
@@ -977,7 +1180,7 @@ class DespatchTUI:
                 return
         setattr(obj, field.name, next_value)
         self._after_install_mutation(field.name)
-        self.ui.status_line = f"{field.label} set to {'Enabled' if next_value else 'Disabled'}"
+        self.ui.status_line = f"{field.label} set to {'On' if next_value else 'Off'}."
 
     def _cycle_choice(self, field: FieldDef, delta: int) -> None:
         options = list(field.options)
@@ -989,7 +1192,7 @@ class DespatchTUI:
         idx = clamp(idx + delta, 0, len(options) - 1)
         setattr(obj, field.name, options[idx])
         self._after_install_mutation(field.name)
-        self.ui.status_line = f"{field.label} set to {options[idx]}"
+        self.ui.status_line = f"{field.label} set to {field_display_value(field, options[idx])}."
 
     def _after_install_mutation(self, field_name: str) -> None:
         if self.wizard.operation != "install":
@@ -1074,12 +1277,14 @@ class DespatchTUI:
             self.stdscr.timeout(120)
             curses.curs_set(0)
 
-    def _select_choice(self, label: str, options: list[str], current: str) -> str | None:
+    def _select_choice(self, field: FieldDef, options: list[str], current: str) -> str | None:
         if not options:
             return None
         h, w = self.stdscr.getmaxyx()
+        label = field.label
+        shown_options = [field_display_value(field, option) for option in options]
         win_h = min(max(10, len(options) + 5), h - 2)
-        win_w = min(max(44, len(label) + 14), w - 4)
+        win_w = min(max(44, max(len(label), max(len(opt) for opt in shown_options)) + 14), w - 4)
         y = max(1, (h - win_h) // 2)
         x = max(2, (w - win_w) // 2)
         idx = options.index(current) if current in options else 0
@@ -1101,7 +1306,7 @@ class DespatchTUI:
                     surface.fill(ly, x + 2, 1, win_w - 4, " ", "panel")
                     if opt_i >= len(options):
                         continue
-                    opt = options[opt_i]
+                    opt = shown_options[opt_i]
                     style = "focus" if opt_i == idx else "panel"
                     surface.text(ly, x + 2, opt[: win_w - 5], style)
                 surface.text(y + win_h - 2, x + 2, "Arrows move  ·  Enter select  ·  Esc cancel", "muted")
@@ -1173,6 +1378,9 @@ class DespatchTUI:
         if self.run_thread and self.run_thread.is_alive():
             self.ui.status_line = "A run is already in progress."
             return
+        if operation == "install" and not self.install_license_accepted:
+            self.ui.status_line = "Please accept the license before starting installation."
+            return
         stage_defs = INSTALL_STAGE_DEFS
         if operation == "uninstall":
             stage_defs = UNINSTALL_STAGE_DEFS
@@ -1204,8 +1412,8 @@ class DespatchTUI:
                     errors=[preflight_error],
                     artifacts={"full_log": str(self.logstore.log_path)},
                     next_actions=[
-                        "Run as root, or pre-authorize sudo: sudo -v",
-                        "Then restart despatch.py and run install again.",
+                        "Run this installer as root, or refresh sudo access first with: sudo -v",
+                        "Then start the installer again and retry the setup.",
                     ],
                 )
                 self.last_summary_payload = self._build_summary_payload(operation, self.last_result)
@@ -1246,9 +1454,11 @@ class DespatchTUI:
                 continue
             etype = evt.get("type", "")
             if etype == "log":
-                msg = str(evt.get("message", ""))
-                if msg:
-                    self.ui.status_line = msg[:120]
+                level = str(evt.get("level", "info"))
+                if level == "error":
+                    self.ui.status_line = "An error was reported. Open the log drawer for details."
+                elif level == "warn":
+                    self.ui.status_line = "A warning was reported. Open the log drawer for details."
                 continue
             apply_runner_event(self.run_state, evt)
             if etype == "run_result":
@@ -1267,9 +1477,9 @@ class DespatchTUI:
         if not self._command_exists("sudo"):
             return RunnerError(
                 code="E_PREFLIGHT",
-                message="Install requires root privileges or sudo, but sudo is unavailable.",
+                message="Installation needs administrator access, and sudo is not available on this machine.",
                 stage_id="preflight",
-                suggested_fix="Run the TUI as root.",
+                suggested_fix="Run the installer as root.",
             )
         probe = None
         try:
@@ -1277,15 +1487,15 @@ class DespatchTUI:
         except Exception as exc:
             return RunnerError(
                 code="E_PREFLIGHT",
-                message=f"Failed privilege preflight: {exc}",
+                message=f"Administrator access could not be checked: {exc}",
                 stage_id="preflight",
-                suggested_fix="Run as root or refresh sudo credentials.",
+                suggested_fix="Run as root or refresh sudo access first.",
             )
         if probe and probe.returncode == 0:
             return None
         return RunnerError(
             code="E_PREFLIGHT",
-            message="Install requires root privileges. sudo -n failed (no cached credentials).",
+            message="Installation needs administrator access before it can continue.",
             stage_id="preflight",
             suggested_fix="Run 'sudo -v' first, or launch despatch.py as root.",
         )
@@ -1381,6 +1591,15 @@ def render_form_preview(width: int, height: int, step_key: str, ascii_mode: bool
     return _render_preview(tui, width, height)
 
 
+def render_license_preview(width: int, height: int, ascii_mode: bool = False, *, accepted: bool = False) -> list[str]:
+    tui = _preview_tui(width, height, ascii_mode=ascii_mode)
+    tui.ui.mode = "assistant"
+    tui.wizard = WizardState(operation="install", step_idx=_step_index("install", "license"), field_idx=0)
+    tui.install_license_accepted = accepted
+    tui.focus.set_items(tui._footer_action_ids(), preferred="assistant:accept-license")
+    return _render_preview(tui, width, height)
+
+
 def render_review_preview(width: int, height: int, ascii_mode: bool = False, *, long_values: bool = False) -> list[str]:
     tui = _preview_tui(width, height, ascii_mode=ascii_mode)
     tui.ui.mode = "assistant"
@@ -1418,7 +1637,8 @@ def render_progress_preview(width: int, height: int, log_open: bool = False, asc
     apply_runner_event(tui.run_state, {"type": "stage_result", "stage_id": "fetch_source", "status": "ok", "error_code": ""})
     apply_runner_event(tui.run_state, {"type": "stage_start", "stage_id": "build", "message": "started"})
     apply_runner_event(tui.run_state, {"type": "stage_progress", "stage_id": "build", "current": "0", "total": "1", "message": "started"})
-    tui.ui.status_line = "warning: function `request_queue_path` is never used"
+    tui.install_license_accepted = True
+    tui.ui.status_line = "Preparing installation..."
     tui.logstore.append("info", "system", "stage running", category="system")
     return _render_preview(tui, width, height)
 
