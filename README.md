@@ -94,9 +94,9 @@ Interactive, prompt-driven installer (no CLI arguments). Validated for Ubuntu Se
 Run:
 - `./scripts/auto_install.sh`
 
-Terminal dashboard (Homebrew-style split pane):
+Terminal installer assistant (guided wizard):
 - `./scripts/tui.sh`
-- keyboard: `j/k` move, `Tab` switch tabs, `/` search, `Enter` run action, `Ctrl+X` terminate running action
+- keyboard: `Tab` cycle controls, arrows move within cards/fields/actions, `Enter` activate, `Esc` go back, `L` toggle logs during progress/completion, `Ctrl+X` cancel active run
 - if `python3` is missing, `./scripts/tui.sh` auto-falls back to a plain Bash console menu (no extra deps)
 
 Plain console-only menu (Bash, dependency-free):

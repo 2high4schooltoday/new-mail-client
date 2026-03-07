@@ -7,6 +7,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ThemeAttrs:
     panel: int
+    chrome: int
+    rail: int
+    titlebar: int
     heading: int
     muted: int
     primary: int
@@ -14,6 +17,7 @@ class ThemeAttrs:
     error: int
     info: int
     success: int
+    selection: int
     focus: int
     button: int
     button_primary: int
@@ -26,6 +30,9 @@ class Theme:
         self.has_color = has_color
         self.attrs = ThemeAttrs(
             panel=0,
+            chrome=0,
+            rail=0,
+            titlebar=curses.A_BOLD,
             heading=curses.A_BOLD,
             muted=curses.A_DIM,
             primary=curses.A_BOLD,
@@ -33,6 +40,7 @@ class Theme:
             error=curses.A_BOLD,
             info=0,
             success=curses.A_BOLD,
+            selection=curses.A_BOLD,
             focus=curses.A_REVERSE,
             button=0,
             button_primary=curses.A_BOLD,
@@ -58,9 +66,14 @@ class Theme:
         curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # focused
         curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_RED)     # primary btn
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_WHITE)   # button base
+        curses.init_pair(8, curses.COLOR_WHITE, -1)                   # chrome
+        curses.init_pair(9, curses.COLOR_YELLOW, -1)                  # selection
 
         theme.attrs = ThemeAttrs(
             panel=curses.color_pair(1),
+            chrome=curses.color_pair(8),
+            rail=curses.color_pair(8) | curses.A_DIM,
+            titlebar=curses.color_pair(8) | curses.A_BOLD,
             heading=curses.color_pair(2) | curses.A_BOLD,
             muted=curses.A_DIM,
             primary=curses.color_pair(3) | curses.A_BOLD,
@@ -68,6 +81,7 @@ class Theme:
             error=curses.color_pair(3) | curses.A_BOLD,
             info=curses.color_pair(4),
             success=curses.color_pair(1) | curses.A_BOLD,
+            selection=curses.color_pair(9) | curses.A_BOLD,
             focus=curses.color_pair(5) | curses.A_BOLD,
             button=curses.color_pair(7),
             button_primary=curses.color_pair(6) | curses.A_BOLD,

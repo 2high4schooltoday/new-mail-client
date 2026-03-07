@@ -16,6 +16,7 @@ class UIState:
     log_search: str = ""
     run_scroll: int = 0
     spinner_tick: int = 0
+    log_drawer_open: bool = False
 
 
 def new_run_state(operation: str, run_id: str, stage_defs: tuple[StageDef, ...]) -> RunState:

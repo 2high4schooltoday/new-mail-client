@@ -33,8 +33,12 @@ def _bootstrap_tui_modules() -> None:
     module_dir.mkdir(parents=True, exist_ok=True)
     files = [
         "__init__.py",
+        "assistant.py",
+        "assistant_app.py",
+        "glyphs.py",
         "models.py",
         "state.py",
+        "rendering.py",
         "runner.py",
         "system_ops.py",
         "views.py",
@@ -64,6 +68,7 @@ from tui.focus import FocusState
 from tui.keys import is_backspace, is_enter
 from tui.logstore import LogStore
 from tui.modals import ConfirmModal
+from tui.assistant_app import run_curses_main
 from tui.models import (
     DIAG_STAGE_DEFS,
     INSTALL_STAGE_DEFS,
@@ -1589,6 +1594,6 @@ if __name__ == "__main__":
     if "--plain" in sys.argv:
         raise SystemExit(run_plain_console())
     try:
-        curses.wrapper(_main)
+        curses.wrapper(run_curses_main)
     except KeyboardInterrupt:
         pass

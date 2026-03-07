@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts.tui.assistant import INSTALL_FLOW, UNINSTALL_FLOW, visible_fields
+from scripts.tui.assistant_app import render_progress_preview, render_welcome_preview
+from scripts.tui.glyphs import ASCII_GLYPHS, UNICODE_GLYPHS, smooth_bar
 from scripts.tui.models import INSTALL_STAGE_DEFS, InstallSpec
 from scripts.tui.logstore import LogStore
 from scripts.tui.models import AppPaths
@@ -25,6 +28,29 @@ class InstallSpecTests(unittest.TestCase):
         self.assertTrue(any("driver" in e.lower() for e in errs))
         self.assertTrue(any("dsn" in e.lower() for e in errs))
 
+    def test_visible_install_fields_hide_sql_and_tls_dependents(self) -> None:
+        spec = InstallSpec(base_domain="example.com", proxy_setup=False, dovecot_auth_mode="pam")
+        names = visible_fields("install", INSTALL_FLOW[2], spec)
+        self.assertNotIn("dovecot_auth_db_driver", names)
+        self.assertNotIn("dovecot_auth_db_dsn", names)
+        self.assertNotIn("proxy_cert", names)
+        self.assertNotIn("proxy_key", names)
+
+    def test_visible_install_fields_include_sql_and_tls_dependents(self) -> None:
+        spec = InstallSpec(
+            base_domain="example.com",
+            proxy_setup=True,
+            proxy_tls=True,
+            dovecot_auth_mode="sql",
+            dovecot_auth_db_driver="mysql",
+            dovecot_auth_db_dsn="dsn",
+        )
+        names = visible_fields("install", INSTALL_FLOW[2], spec)
+        self.assertIn("dovecot_auth_db_driver", names)
+        self.assertIn("dovecot_auth_db_dsn", names)
+        self.assertIn("proxy_cert", names)
+        self.assertIn("proxy_key", names)
+
 
 class StateReducerTests(unittest.TestCase):
     def test_progress_aggregation(self) -> None:
@@ -39,6 +65,41 @@ class StateReducerTests(unittest.TestCase):
         apply_runner_event(run, {"type": "run_result", "status": "failed", "failed_stage": "deps", "exit_code": "1"})
         self.assertEqual(run.status, "failed")
         self.assertEqual(run.failed_stage, "deps")
+
+
+class GlyphTests(unittest.TestCase):
+    def test_unicode_bar_uses_partial_blocks(self) -> None:
+        out = smooth_bar(10, 0.35, UNICODE_GLYPHS)
+        self.assertEqual(len(out), 10)
+        self.assertTrue(any(ch in out for ch in "▏▎▍▌▋▊▉█"))
+
+    def test_ascii_bar_uses_bracket_fallback(self) -> None:
+        out = smooth_bar(10, 0.35, ASCII_GLYPHS)
+        self.assertTrue(out.startswith("["))
+        self.assertTrue(out.endswith("]"))
+
+
+class PreviewRenderTests(unittest.TestCase):
+    def test_welcome_preview_contains_installer_shell(self) -> None:
+        lines = render_welcome_preview(120, 34)
+        joined = "\n".join(lines)
+        self.assertIn("Despatch Installer Assistant", joined)
+        self.assertIn("Welcome to the Despatch Installer", joined)
+        self.assertIn("Continue", joined)
+
+    def test_progress_preview_can_show_log_drawer(self) -> None:
+        lines = render_progress_preview(120, 34, True)
+        joined = "\n".join(lines)
+        self.assertIn("Installing", joined)
+        self.assertIn("Stage timeline", joined)
+        self.assertIn("Log", joined)
+
+    def test_compact_preview_still_renders_shell(self) -> None:
+        lines = render_welcome_preview(96, 24)
+        self.assertEqual(len(lines), 24)
+        joined = "\n".join(lines)
+        self.assertIn("Install Or Upgrade Despatch", joined)
+        self.assertIn("Uninstall", joined)
 
 
 class LogStoreTests(unittest.TestCase):
@@ -188,6 +249,12 @@ class SystemOpsTests(unittest.TestCase):
             cert, key = detect_letsencrypt_cert_pair("mail.example.com", live)
             self.assertEqual(cert, str(parent / "fullchain.pem"))
             self.assertEqual(key, str(parent / "privkey.pem"))
+
+
+class FlowDefinitionTests(unittest.TestCase):
+    def test_uninstall_flow_has_review_progress_and_completion(self) -> None:
+        keys = [step.key for step in UNINSTALL_FLOW]
+        self.assertEqual(keys, ["backup", "removal", "review", "progress", "completion"])
 
 
 if __name__ == "__main__":
