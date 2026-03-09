@@ -1592,3 +1592,43 @@ func TestVerifyChecksumSignature(t *testing.T) {
 		t.Fatalf("expected base64 signature verification success, got: %v", err)
 	}
 }
+
+func TestNormalizeRuntimeTreePermissionsMakesDeployedTreeReadable(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	lockedDir := filepath.Join(root, "migrations")
+	nestedDir := filepath.Join(lockedDir, "nested")
+	if err := os.MkdirAll(nestedDir, 0o750); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	plainFile := filepath.Join(nestedDir, "001_init.sql")
+	if err := os.WriteFile(plainFile, []byte("select 1;\n"), 0o640); err != nil {
+		t.Fatalf("write plain file: %v", err)
+	}
+	execFile := filepath.Join(root, "tool.sh")
+	if err := os.WriteFile(execFile, []byte("#!/bin/sh\nexit 0\n"), 0o750); err != nil {
+		t.Fatalf("write exec file: %v", err)
+	}
+
+	if err := normalizeRuntimeTreePermissions(root); err != nil {
+		t.Fatalf("normalizeRuntimeTreePermissions: %v", err)
+	}
+
+	assertMode := func(path string, want os.FileMode) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("mode for %s = %#o want %#o", path, got, want)
+		}
+	}
+
+	assertMode(root, 0o755)
+	assertMode(lockedDir, 0o755)
+	assertMode(nestedDir, 0o755)
+	assertMode(plainFile, 0o644)
+	assertMode(execFile, 0o755)
+}

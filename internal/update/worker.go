@@ -460,6 +460,14 @@ func (m *Manager) applyRelease(ctx context.Context, req ApplyRequest) (string, b
 		mailSecSwapped = true
 	}
 	swapped = true
+	for _, runtimeTree := range []string{currentWeb, currentMig, currentDeploy} {
+		if err := normalizeRuntimeTreePermissions(runtimeTree); err != nil {
+			if rbErr := rollback(); rbErr != nil {
+				return "", false, fmt.Errorf("runtime permission normalization failed for %s: %v; rollback failed: %v", runtimeTree, err, rbErr)
+			}
+			return "", true, fmt.Errorf("runtime permission normalization failed for %s: %v", runtimeTree, err)
+		}
+	}
 
 	mailSecUnitSource := filepath.Join(currentDeploy, "despatch-mailsec.service")
 	mailSecUnitDst := filepath.Join(m.cfg.UpdateSystemdUnitDir, "despatch-mailsec.service")
@@ -1103,6 +1111,32 @@ func copyDir(src, dst string) error {
 			return os.MkdirAll(target, info.Mode())
 		}
 		return copyFile(path, target, info.Mode())
+	})
+}
+
+func normalizeRuntimeTreePermissions(root string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.Chmod(path, 0o755)
+		case info.Mode().IsRegular():
+			if info.Mode().Perm()&0o111 != 0 {
+				return os.Chmod(path, 0o755)
+			}
+			return os.Chmod(path, 0o644)
+		default:
+			return nil
+		}
 	})
 }
 

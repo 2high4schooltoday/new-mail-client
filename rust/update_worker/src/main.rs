@@ -902,6 +902,15 @@ fn apply_release(cfg: &Config, req: &ApplyRequest) -> Result<ApplyResult, Worker
         return Err(err);
     }
     swapped.push((current_deploy.clone(), prev_deploy.clone()));
+    for runtime_tree in [&current_web, &current_mig, &current_deploy] {
+        if let Err(err) = normalize_runtime_tree_permissions(runtime_tree) {
+            rollback_paths(&swapped)?;
+            return Err(WorkerError::Message(format!(
+                "runtime permission normalization failed for {}: {err}",
+                runtime_tree.display()
+            )));
+        }
+    }
 
     let updater_service_src = current_deploy.join("despatch-updater.service");
     let updater_path_src = current_deploy.join("despatch-updater.path");
@@ -1609,6 +1618,29 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), WorkerError> {
             .permissions()
             .mode();
         copy_file(entry.path(), &target, mode)?;
+    }
+    Ok(())
+}
+
+fn normalize_runtime_tree_permissions(root: &Path) -> Result<(), WorkerError> {
+    for entry in WalkDir::new(root) {
+        let entry = entry.map_err(|e| WorkerError::Message(e.to_string()))?;
+        if entry.file_type().is_symlink() {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755))?;
+            continue;
+        }
+        if entry.file_type().is_file() {
+            let mode = entry
+                .metadata()
+                .map_err(|e| WorkerError::Message(e.to_string()))?
+                .permissions()
+                .mode();
+            let normalized = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(normalized))?;
+        }
     }
     Ok(())
 }
@@ -2408,6 +2440,62 @@ mod tests {
 
         let migrated = migrate_legacy_password_reset_env(&env_path).expect("migrate env");
         assert!(!migrated);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn normalize_runtime_tree_permissions_makes_tree_world_readable() {
+        let unique = format!(
+            "despatch-update-worker-runtime-perms-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let nested = base.join("migrations").join("nested");
+        fs::create_dir_all(&nested).expect("mkdir nested");
+        fs::set_permissions(base.join("migrations"), fs::Permissions::from_mode(0o750))
+            .expect("chmod migrations");
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o750)).expect("chmod nested");
+
+        let plain = nested.join("001_init.sql");
+        fs::write(&plain, b"select 1;\n").expect("write sql");
+        fs::set_permissions(&plain, fs::Permissions::from_mode(0o640)).expect("chmod sql");
+
+        let exec = base.join("tool.sh");
+        fs::write(&exec, b"#!/bin/sh\nexit 0\n").expect("write tool");
+        fs::set_permissions(&exec, fs::Permissions::from_mode(0o750)).expect("chmod tool");
+
+        normalize_runtime_tree_permissions(&base).expect("normalize runtime permissions");
+
+        assert_eq!(
+            fs::metadata(&base).expect("stat base").permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(base.join("migrations"))
+                .expect("stat migrations")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&nested)
+                .expect("stat nested")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&plain).expect("stat sql").permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(&exec).expect("stat tool").permissions().mode() & 0o777,
+            0o755
+        );
 
         let _ = fs::remove_dir_all(base);
     }
