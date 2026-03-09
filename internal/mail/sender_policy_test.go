@@ -41,8 +41,11 @@ func TestSendWithSenderFallbackRetriesWithAuthIdentity(t *testing.T) {
 	}
 
 	req := SendRequest{
-		From: "webmaster@example.com",
-		To:   []string{"alice@example.com"},
+		HeaderFromName:  "Alias Sender",
+		HeaderFromEmail: "webmaster@example.com",
+		EnvelopeFrom:    "webmaster@example.com",
+		From:            "webmaster@example.com",
+		To:              []string{"alice@example.com"},
 	}
 	err := c.sendWithSenderFallback(context.Background(), "webmaster", "secret", req, []byte("raw"), sendFn)
 	if err != nil {
@@ -65,8 +68,10 @@ func TestSendWithSenderFallbackReturnsTypedErrorWhenRejected(t *testing.T) {
 	}
 
 	req := SendRequest{
-		From: "webmaster@example.com",
-		To:   []string{"alice@example.com"},
+		HeaderFromEmail: "webmaster@example.com",
+		EnvelopeFrom:    "webmaster@example.com",
+		From:            "webmaster@example.com",
+		To:              []string{"alice@example.com"},
 	}
 	err := c.sendWithSenderFallback(context.Background(), "webmaster", "secret", req, []byte("raw"), sendFn)
 	if !errors.Is(err, ErrSMTPSenderRejected) {
@@ -86,8 +91,10 @@ func TestSendWithSenderFallbackNoRetryOnTransportError(t *testing.T) {
 	}
 
 	req := SendRequest{
-		From: "webmaster@example.com",
-		To:   []string{"alice@example.com"},
+		HeaderFromEmail: "webmaster@example.com",
+		EnvelopeFrom:    "webmaster@example.com",
+		From:            "webmaster@example.com",
+		To:              []string{"alice@example.com"},
 	}
 	err := c.sendWithSenderFallback(context.Background(), "webmaster", "secret", req, []byte("raw"), sendFn)
 	if err == nil {

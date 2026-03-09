@@ -16,6 +16,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/despatch
+ReadWritePaths=/var/lib/despatch/update
 ReadWritePaths=/var/lib/despatch/update/request
 ReadWritePaths=/var/lib/despatch/update/status
 ReadWritePaths=/var/lib/despatch/update/lock

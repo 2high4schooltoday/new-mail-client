@@ -91,6 +91,47 @@ func TestBuildRFC822IncludesMessageIDReplyHeadersAndReferences(t *testing.T) {
 	}
 }
 
+func TestBuildRFC822IncludesDisplayNameAndReplyToHeader(t *testing.T) {
+	raw, err := buildRFC822(SendRequest{
+		HeaderFromName:  "Admin Sender",
+		HeaderFromEmail: "sender@example.com",
+		ReplyTo:         "reply@example.com",
+		To:              []string{"to@example.com"},
+		Subject:         "Headers",
+		Body:            "Body",
+	})
+	if err != nil {
+		t.Fatalf("buildRFC822: %v", err)
+	}
+	msg := string(raw)
+	if !strings.Contains(msg, "From: ") || !strings.Contains(msg, "Admin Sender") || !strings.Contains(msg, "<sender@example.com>") {
+		t.Fatalf("expected readable display-name From header, got=%q", msg)
+	}
+	if !strings.Contains(msg, "Reply-To: reply@example.com") {
+		t.Fatalf("expected Reply-To header, got=%q", msg)
+	}
+}
+
+func TestBuildRFC822EncodesNonASCIIDisplayName(t *testing.T) {
+	raw, err := buildRFC822(SendRequest{
+		HeaderFromName:  "Иван Петров",
+		HeaderFromEmail: "sender@example.com",
+		To:              []string{"to@example.com"},
+		Subject:         "Headers",
+		Body:            "Body",
+	})
+	if err != nil {
+		t.Fatalf("buildRFC822: %v", err)
+	}
+	msg := string(raw)
+	if !strings.Contains(msg, "From: =?utf-8?") {
+		t.Fatalf("expected RFC 2047 encoded display name, got=%q", msg)
+	}
+	if !strings.Contains(msg, "<sender@example.com>") {
+		t.Fatalf("expected sender email in encoded From header, got=%q", msg)
+	}
+}
+
 func TestSendWithSenderFallbackUsesToCcBccRecipients(t *testing.T) {
 	c := &IMAPSMTPClient{}
 	var captured []string

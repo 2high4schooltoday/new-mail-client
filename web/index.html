@@ -135,6 +135,7 @@
             </label>
             <div id="settings-search-results" class="settings-search-results hidden"></div>
             <button id="settings-nav-signin" class="settings-nav-btn is-active" type="button">Sign-In</button>
+            <button id="settings-nav-mail" class="settings-nav-btn" type="button">Mail</button>
             <button id="settings-nav-devices" class="settings-nav-btn" type="button">Devices</button>
             <button id="settings-nav-sessions" class="settings-nav-btn" type="button">Sessions</button>
           </aside>
@@ -155,6 +156,174 @@
                 <div class="actions setting-actions">
                   <button id="btn-passkeys-add" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Add Passkey</button>
                   <button id="btn-passkeys-refresh" class="cmd-btn cmd-btn--dense" type="button">Refresh</button>
+                </div>
+              </section>
+            </section>
+
+            <section id="settings-section-mail" class="panel settings-section hidden">
+              <header class="settings-page-head">
+                <h3>Mail</h3>
+                <p class="hint">Manage sender identities, Reply-To, and the signature inserted into new mail, replies, and forwards.</p>
+              </header>
+              <p id="settings-mail-note" class="hint">Sender settings are loading.</p>
+
+              <section class="setting-section">
+                <header class="setting-section-head">
+                  <h4>Session Sender</h4>
+                  <p class="hint">Used when sending through the currently authenticated mailbox.</p>
+                </header>
+                <div class="mail-settings-form-grid">
+                  <label class="mail-settings-field">
+                    <span>Display Name</span>
+                    <input id="settings-mail-session-display-name" type="text" autocomplete="name" placeholder="Full Name">
+                  </label>
+                  <label class="mail-settings-field">
+                    <span>From Email</span>
+                    <input id="settings-mail-session-from-email" type="email" autocomplete="email" disabled>
+                  </label>
+                  <label class="mail-settings-field mail-settings-field--full">
+                    <span>Reply-To</span>
+                    <input id="settings-mail-session-reply-to" type="email" autocomplete="email" placeholder="reply-to@example.com">
+                  </label>
+                </div>
+                <div class="mail-signature-card">
+                  <div class="mail-signature-head">
+                    <strong>Signature</strong>
+                    <span class="hint">The `-- ` delimiter is added automatically when composing.</span>
+                  </div>
+                  <div id="settings-mail-session-toolbar" class="mail-signature-toolbar" role="group" aria-label="Session signature formatting">
+                    <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="bold">Bold</button>
+                    <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="italic">Italic</button>
+                    <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="createLink">Link</button>
+                    <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="removeFormat">Clear</button>
+                  </div>
+                  <div id="settings-mail-session-signature" class="mail-signature-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write a signature for your session mailbox"></div>
+                </div>
+                <div class="actions setting-actions">
+                  <button id="btn-settings-mail-session-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Session Sender</button>
+                </div>
+              </section>
+
+              <section class="setting-section">
+                <header class="setting-section-head">
+                  <h4>Accounts</h4>
+                  <p class="hint">SMTP/IMAP accounts and their default routing.</p>
+                </header>
+                <div class="mail-settings-columns">
+                  <div class="mail-settings-column">
+                    <div class="actions setting-actions">
+                      <button id="btn-settings-mail-account-new" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">New Account</button>
+                    </div>
+                    <div id="settings-mail-account-list" class="settings-list"></div>
+                  </div>
+                  <form id="settings-mail-account-form" class="mail-settings-form" novalidate>
+                    <div class="mail-settings-form-grid">
+                      <label class="mail-settings-field">
+                        <span>Display Name</span>
+                        <input id="settings-mail-account-display-name" type="text" autocomplete="organization" placeholder="Work Mail">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>Login</span>
+                        <input id="settings-mail-account-login" type="email" autocomplete="email" placeholder="mailbox@example.com">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>Password</span>
+                        <input id="settings-mail-account-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>Default</span>
+                        <input id="settings-mail-account-default" type="checkbox">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>IMAP Host</span>
+                        <input id="settings-mail-account-imap-host" type="text" placeholder="imap.example.com">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>IMAP Port</span>
+                        <input id="settings-mail-account-imap-port" type="number" min="1" step="1" placeholder="993">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>IMAP TLS</span>
+                        <input id="settings-mail-account-imap-tls" type="checkbox" checked>
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>IMAP STARTTLS</span>
+                        <input id="settings-mail-account-imap-starttls" type="checkbox">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>SMTP Host</span>
+                        <input id="settings-mail-account-smtp-host" type="text" placeholder="smtp.example.com">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>SMTP Port</span>
+                        <input id="settings-mail-account-smtp-port" type="number" min="1" step="1" placeholder="587">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>SMTP TLS</span>
+                        <input id="settings-mail-account-smtp-tls" type="checkbox">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>SMTP STARTTLS</span>
+                        <input id="settings-mail-account-smtp-starttls" type="checkbox" checked>
+                      </label>
+                    </div>
+                    <div class="actions setting-actions">
+                      <button id="btn-settings-mail-account-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Account</button>
+                      <button id="btn-settings-mail-account-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Account</button>
+                    </div>
+                  </form>
+                </div>
+              </section>
+
+              <section class="setting-section">
+                <header class="setting-section-head">
+                  <h4>Identities</h4>
+                  <p class="hint">Choose the sender name, visible From address, Reply-To, and signature per account.</p>
+                </header>
+                <div class="mail-settings-columns">
+                  <div class="mail-settings-column">
+                    <div class="actions setting-actions">
+                      <button id="btn-settings-mail-identity-new" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">New Identity</button>
+                    </div>
+                    <div id="settings-mail-identity-list" class="settings-list"></div>
+                  </div>
+                  <form id="settings-mail-identity-form" class="mail-settings-form" novalidate>
+                    <div class="mail-settings-form-grid">
+                      <label class="mail-settings-field">
+                        <span>Display Name</span>
+                        <input id="settings-mail-identity-display-name" type="text" autocomplete="name" placeholder="Full Name">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>From Email</span>
+                        <input id="settings-mail-identity-from-email" type="email" autocomplete="email" placeholder="alias@example.com">
+                      </label>
+                      <label class="mail-settings-field mail-settings-field--full">
+                        <span>Reply-To</span>
+                        <input id="settings-mail-identity-reply-to" type="email" autocomplete="email" placeholder="reply-to@example.com">
+                      </label>
+                      <label class="mail-settings-field">
+                        <span>Default Identity</span>
+                        <input id="settings-mail-identity-default" type="checkbox">
+                      </label>
+                    </div>
+                    <div class="mail-signature-card">
+                      <div class="mail-signature-head">
+                        <strong>Signature</strong>
+                        <span class="hint">Used for new mail, replies, and forwards when this identity is selected.</span>
+                      </div>
+                      <div id="settings-mail-identity-toolbar" class="mail-signature-toolbar" role="group" aria-label="Identity signature formatting">
+                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="bold">Bold</button>
+                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="italic">Italic</button>
+                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="createLink">Link</button>
+                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="removeFormat">Clear</button>
+                      </div>
+                      <div id="settings-mail-identity-signature" class="mail-signature-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write a signature for this identity"></div>
+                    </div>
+                    <div class="actions setting-actions">
+                      <button id="btn-settings-mail-identity-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Identity</button>
+                      <button id="btn-settings-mail-identity-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Identity</button>
+                    </div>
+                  </form>
                 </div>
               </section>
             </section>

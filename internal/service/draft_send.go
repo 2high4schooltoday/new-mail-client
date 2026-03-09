@@ -30,42 +30,17 @@ func (s *Service) BuildDraftSendRequest(ctx context.Context, u models.User, logi
 		return mail.SendRequest{}, "", false, err
 	}
 	req.Attachments = attachments
-
-	switch strings.ToLower(strings.TrimSpace(draft.FromMode)) {
-	case "", "default":
-		req.From = strings.TrimSpace(u.Email)
-	case "manual":
-		manualSender := strings.TrimSpace(draft.FromManual)
-		if manualSender == "" {
-			manualSender = strings.TrimSpace(u.Email)
-		}
-		if !strings.EqualFold(manualSender, strings.TrimSpace(u.Email)) {
-			return mail.SendRequest{}, "", false, fmt.Errorf("manual sender must match authenticated account email")
-		}
-		req.From = strings.TrimSpace(u.Email)
-	case "identity":
-		if strings.TrimSpace(draft.IdentityID) == "" {
-			return mail.SendRequest{}, "", false, fmt.Errorf("identity_id is required when from_mode=identity")
-		}
-		identity, err := s.st.GetMailIdentityByID(ctx, strings.TrimSpace(draft.IdentityID))
-		if err != nil {
-			return mail.SendRequest{}, "", false, err
-		}
-		account, err := s.st.GetMailAccountByID(ctx, u.ID, identity.AccountID)
-		if err != nil {
-			return mail.SendRequest{}, "", false, err
-		}
-		fromEmail := strings.TrimSpace(identity.FromEmail)
-		if fromEmail == "" {
-			return mail.SendRequest{}, "", false, fmt.Errorf("selected identity is missing from_email")
-		}
-		req.From = fromEmail
-		sendAccountID = account.ID
-	default:
-		return mail.SendRequest{}, "", false, fmt.Errorf("unsupported from_mode")
+	sender, err := s.ResolveComposeSender(ctx, u, draft.FromMode, draft.IdentityID, draft.FromManual)
+	if err != nil {
+		return mail.SendRequest{}, "", false, err
 	}
-	if req.From == "" {
-		req.From = strings.TrimSpace(u.Email)
+	req.HeaderFromName = sender.HeaderFromName
+	req.HeaderFromEmail = sender.HeaderFromEmail
+	req.EnvelopeFrom = sender.EnvelopeFrom
+	req.ReplyTo = sender.ReplyTo
+	req.From = sender.HeaderFromEmail
+	if sender.AccountID != "" {
+		sendAccountID = sender.AccountID
 	}
 	if strings.ToLower(strings.TrimSpace(draft.ComposeMode)) != "reply" || strings.TrimSpace(draft.ContextMessageID) == "" {
 		return req, sendAccountID, false, nil

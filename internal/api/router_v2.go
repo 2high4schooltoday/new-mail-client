@@ -914,6 +914,14 @@ func (h *Handlers) V2CreateIdentity(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, r, err)
 		return
 	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.FromEmail = strings.TrimSpace(req.FromEmail)
+	req.ReplyTo = strings.TrimSpace(req.ReplyTo)
+	req.SignatureHTML, req.SignatureText = normalizeSignatureFields(req.SignatureHTML, req.SignatureText)
+	if req.FromEmail == "" {
+		util.WriteError(w, 400, "create_identity_failed", "from_email is required", middleware.RequestID(r.Context()))
+		return
+	}
 	req.ID = uuid.NewString()
 	req.AccountID = accountID
 	out, err := h.svc.Store().CreateMailIdentity(r.Context(), req)
@@ -945,6 +953,10 @@ func (h *Handlers) V2UpdateIdentity(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, r, err)
 		return
 	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.FromEmail = strings.TrimSpace(req.FromEmail)
+	req.ReplyTo = strings.TrimSpace(req.ReplyTo)
+	req.SignatureHTML, req.SignatureText = normalizeSignatureFields(req.SignatureHTML, req.SignatureText)
 	req.ID = id
 	req.AccountID = current.AccountID
 	if strings.TrimSpace(req.ID) == "" {
@@ -3129,9 +3141,10 @@ func (h *Handlers) V2GetQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) v2SendWithAccount(ctx context.Context, u models.User, accountID string, req mail.SendRequest) (mail.SendResult, error) {
-	if strings.TrimSpace(req.From) == "" {
-		req.From = u.Email
-	}
+	authIdentity := strings.TrimSpace(service.MailIdentity(u))
+	req.HeaderFromEmail = firstNonEmpty(req.HeaderFromEmail, req.From, authIdentity)
+	req.EnvelopeFrom = firstNonEmpty(req.EnvelopeFrom, req.HeaderFromEmail, authIdentity)
+	req.From = req.HeaderFromEmail
 	if strings.TrimSpace(accountID) == "" {
 		pass, err := h.sessionMailPasswordFromContext(ctx)
 		if err != nil {

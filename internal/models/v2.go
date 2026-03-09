@@ -178,6 +178,18 @@ type DraftAttachment struct {
 	Data        []byte    `json:"-"`
 }
 
+type SessionMailProfile struct {
+	ID            string    `json:"id"`
+	UserID        string    `json:"user_id"`
+	FromEmail     string    `json:"from_email"`
+	DisplayName   string    `json:"display_name"`
+	ReplyTo       string    `json:"reply_to"`
+	SignatureText string    `json:"signature_text"`
+	SignatureHTML string    `json:"signature_html"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type SieveScript struct {
 	ID          string    `json:"id"`
 	AccountID   string    `json:"account_id"`

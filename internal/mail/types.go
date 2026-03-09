@@ -67,18 +67,22 @@ type SendAttachment struct {
 }
 
 type SendRequest struct {
-	From        string           `json:"from"`
-	To          []string         `json:"to"`
-	CC          []string         `json:"cc,omitempty"`
-	BCC         []string         `json:"bcc,omitempty"`
-	Subject     string           `json:"subject"`
-	Body        string           `json:"body"`
-	BodyHTML    string           `json:"body_html,omitempty"`
-	InReplyToID string           `json:"in_reply_to_id,omitempty"`
-	References  []string         `json:"-"`
-	MessageID   string           `json:"-"`
-	Attachments []SendAttachment `json:"-"`
-	SentMailbox string           `json:"-"`
+	From            string           `json:"from,omitempty"`
+	HeaderFromName  string           `json:"-"`
+	HeaderFromEmail string           `json:"-"`
+	EnvelopeFrom    string           `json:"-"`
+	ReplyTo         string           `json:"-"`
+	To              []string         `json:"to"`
+	CC              []string         `json:"cc,omitempty"`
+	BCC             []string         `json:"bcc,omitempty"`
+	Subject         string           `json:"subject"`
+	Body            string           `json:"body"`
+	BodyHTML        string           `json:"body_html,omitempty"`
+	InReplyToID     string           `json:"in_reply_to_id,omitempty"`
+	References      []string         `json:"-"`
+	MessageID       string           `json:"-"`
+	Attachments     []SendAttachment `json:"-"`
+	SentMailbox     string           `json:"-"`
 }
 
 type SendResult struct {

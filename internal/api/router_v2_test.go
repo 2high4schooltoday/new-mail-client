@@ -93,6 +93,7 @@ func newV2RouterWithMailClientAndStoreDB(t *testing.T, despatch mail.Client, mut
 		filepath.Join("..", "..", "migrations", "022_draft_compose_context.sql"),
 		filepath.Join("..", "..", "migrations", "023_drafts_nullable_account.sql"),
 		filepath.Join("..", "..", "migrations", "024_draft_attachments_and_send_errors.sql"),
+		filepath.Join("..", "..", "migrations", "025_session_mail_profiles.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -1442,6 +1443,178 @@ func TestRegularUserMFAIsOptionalByDefault(t *testing.T) {
 	}
 }
 
+func TestV2SessionMailProfilePersistsDisplayNameReplyToAndSignature(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	get := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/mail/session-profile", nil, sess, csrf)
+	if get.Code != http.StatusOK {
+		t.Fatalf("expected session profile get 200, got %d body=%s", get.Code, get.Body.String())
+	}
+	var initial models.SessionMailProfile
+	if err := json.Unmarshal(get.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("decode initial session profile: %v", err)
+	}
+	if initial.FromEmail != "admin@example.com" {
+		t.Fatalf("expected session profile from_email admin@example.com, got %+v", initial)
+	}
+
+	update := doV2AuthedJSON(t, router, http.MethodPatch, "/api/v2/mail/session-profile", map[string]any{
+		"from_email":     "spoof@example.net",
+		"display_name":   "Admin Sender",
+		"reply_to":       "reply@example.com",
+		"signature_html": "<p>Regards</p>",
+		"signature_text": "",
+	}, sess, csrf)
+	if update.Code != http.StatusOK {
+		t.Fatalf("expected session profile patch 200, got %d body=%s", update.Code, update.Body.String())
+	}
+	var saved models.SessionMailProfile
+	if err := json.Unmarshal(update.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode saved session profile: %v", err)
+	}
+	if saved.FromEmail != "admin@example.com" {
+		t.Fatalf("expected from_email to remain authenticated session address, got %+v", saved)
+	}
+	if saved.DisplayName != "Admin Sender" || saved.ReplyTo != "reply@example.com" {
+		t.Fatalf("unexpected saved session profile: %+v", saved)
+	}
+	if saved.SignatureHTML != "<p>Regards</p>" {
+		t.Fatalf("expected signature_html to persist, got %+v", saved)
+	}
+	if saved.SignatureText != "-- \nRegards" {
+		t.Fatalf("expected generated signature_text, got %q", saved.SignatureText)
+	}
+
+	getAgain := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/mail/session-profile", nil, sess, csrf)
+	if getAgain.Code != http.StatusOK {
+		t.Fatalf("expected session profile re-get 200, got %d body=%s", getAgain.Code, getAgain.Body.String())
+	}
+	var fetched models.SessionMailProfile
+	if err := json.Unmarshal(getAgain.Body.Bytes(), &fetched); err != nil {
+		t.Fatalf("decode fetched session profile: %v", err)
+	}
+	if fetched.DisplayName != saved.DisplayName || fetched.ReplyTo != saved.ReplyTo || fetched.SignatureText != saved.SignatureText {
+		t.Fatalf("expected session profile fields to round-trip, got %+v", fetched)
+	}
+}
+
+func TestComposeIdentitiesIncludesSessionProfileAndAccountIdentityMetadata(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	updateProfile := doV2AuthedJSON(t, router, http.MethodPatch, "/api/v2/mail/session-profile", map[string]any{
+		"display_name":   "Admin Session",
+		"reply_to":       "session-reply@example.com",
+		"signature_html": "<p>Session Signature</p>",
+	}, sess, csrf)
+	if updateProfile.Code != http.StatusOK {
+		t.Fatalf("expected session profile patch 200, got %d body=%s", updateProfile.Code, updateProfile.Body.String())
+	}
+
+	createAccount := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts", map[string]any{
+		"display_name": "Primary Mail",
+		"login":        "mailbox@example.com",
+		"password":     "mailbox-secret",
+		"imap_host":    "imap.example.com",
+		"imap_port":    993,
+		"smtp_host":    "smtp.example.com",
+		"smtp_port":    587,
+	}, sess, csrf)
+	if createAccount.Code != http.StatusCreated {
+		t.Fatalf("expected account create 201, got %d body=%s", createAccount.Code, createAccount.Body.String())
+	}
+	var account models.MailAccount
+	if err := json.Unmarshal(createAccount.Body.Bytes(), &account); err != nil {
+		t.Fatalf("decode account response: %v", err)
+	}
+
+	createIdentity := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts/"+account.ID+"/identities", map[string]any{
+		"display_name":   "Primary Alias",
+		"from_email":     "alias@example.com",
+		"reply_to":       "alias-reply@example.com",
+		"signature_html": "<p>Account Signature</p>",
+		"is_default":     true,
+	}, sess, csrf)
+	if createIdentity.Code != http.StatusCreated {
+		t.Fatalf("expected identity create 201, got %d body=%s", createIdentity.Code, createIdentity.Body.String())
+	}
+	var identity models.MailIdentity
+	if err := json.Unmarshal(createIdentity.Body.Bytes(), &identity); err != nil {
+		t.Fatalf("decode identity response: %v", err)
+	}
+
+	compose := doV1AuthedJSON(t, router, http.MethodGet, "/api/v1/compose/identities", nil, sess, csrf)
+	if compose.Code != http.StatusOK {
+		t.Fatalf("expected compose identities 200, got %d body=%s", compose.Code, compose.Body.String())
+	}
+	var payload struct {
+		AuthEmail string `json:"auth_email"`
+		Items     []struct {
+			AccountID       string `json:"account_id"`
+			AccountDisplay  string `json:"account_display_name"`
+			AccountLogin    string `json:"account_login"`
+			IdentityID      string `json:"identity_id"`
+			IdentityDisplay string `json:"identity_display_name"`
+			FromEmail       string `json:"from_email"`
+			ReplyTo         string `json:"reply_to"`
+			SignatureText   string `json:"signature_text"`
+			SignatureHTML   string `json:"signature_html"`
+			IsDefault       bool   `json:"is_default"`
+			IsSession       bool   `json:"is_session"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(compose.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode compose identities payload: %v body=%s", err, compose.Body.String())
+	}
+	if payload.AuthEmail != "admin@example.com" {
+		t.Fatalf("expected auth_email admin@example.com, got %+v", payload)
+	}
+	var sessionItem, identityItem *struct {
+		AccountID       string `json:"account_id"`
+		AccountDisplay  string `json:"account_display_name"`
+		AccountLogin    string `json:"account_login"`
+		IdentityID      string `json:"identity_id"`
+		IdentityDisplay string `json:"identity_display_name"`
+		FromEmail       string `json:"from_email"`
+		ReplyTo         string `json:"reply_to"`
+		SignatureText   string `json:"signature_text"`
+		SignatureHTML   string `json:"signature_html"`
+		IsDefault       bool   `json:"is_default"`
+		IsSession       bool   `json:"is_session"`
+	}
+	for i := range payload.Items {
+		item := &payload.Items[i]
+		if item.IsSession {
+			sessionItem = item
+		}
+		if item.IdentityID == identity.ID {
+			identityItem = item
+		}
+	}
+	if sessionItem == nil {
+		t.Fatalf("expected session compose identity in payload: %+v", payload.Items)
+	}
+	if sessionItem.AccountID != "" || sessionItem.IdentityDisplay != "Admin Session" || sessionItem.FromEmail != "admin@example.com" || sessionItem.ReplyTo != "session-reply@example.com" {
+		t.Fatalf("unexpected session compose identity: %+v", *sessionItem)
+	}
+	if sessionItem.SignatureHTML != "<p>Session Signature</p>" || sessionItem.SignatureText != "-- \nSession Signature" {
+		t.Fatalf("expected session signature metadata, got %+v", *sessionItem)
+	}
+	if identityItem == nil {
+		t.Fatalf("expected account identity in compose identities payload: %+v", payload.Items)
+	}
+	if identityItem.AccountID != account.ID || identityItem.AccountDisplay != "Primary Mail" || identityItem.AccountLogin != "mailbox@example.com" {
+		t.Fatalf("unexpected account metadata in compose identity: %+v", *identityItem)
+	}
+	if identityItem.IdentityDisplay != "Primary Alias" || identityItem.FromEmail != "alias@example.com" || identityItem.ReplyTo != "alias-reply@example.com" || identityItem.SignatureHTML != "<p>Account Signature</p>" {
+		t.Fatalf("unexpected compose identity metadata: %+v", *identityItem)
+	}
+	if !identityItem.IsDefault {
+		t.Fatalf("expected created identity to be surfaced as default")
+	}
+}
+
 func TestV2SendDraftSchedulesFutureDraft(t *testing.T) {
 	router := newV2Router(t)
 	sess, csrf := loginV2(t, router)
@@ -1586,6 +1759,124 @@ func TestV2SendDraftWithoutAccountMarksDraftSent(t *testing.T) {
 	}
 }
 
+func TestV2SendDraftUsesSessionProfileSenderHeaders(t *testing.T) {
+	despatch := &sendTestDespatch{}
+	router := newV2RouterWithMailClient(t, despatch, nil)
+	sess, csrf := loginV2(t, router)
+
+	updateProfile := doV2AuthedJSON(t, router, http.MethodPatch, "/api/v2/mail/session-profile", map[string]any{
+		"display_name":   "Admin Session",
+		"reply_to":       "reply@example.com",
+		"signature_html": "<p>Regards</p>",
+	}, sess, csrf)
+	if updateProfile.Code != http.StatusOK {
+		t.Fatalf("expected session profile patch 200, got %d body=%s", updateProfile.Code, updateProfile.Body.String())
+	}
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"account_id":   "",
+		"to":           "someone@example.com",
+		"subject":      "Send me",
+		"body_text":    "Hello",
+		"compose_mode": "send",
+		"from_mode":    "default",
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", create.Code, create.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(create.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+
+	send := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts/"+draft.ID+"/send", nil, sess, csrf)
+	if send.Code != http.StatusOK {
+		t.Fatalf("expected draft send 200, got %d body=%s", send.Code, send.Body.String())
+	}
+
+	_, req := despatch.snapshot()
+	if req.HeaderFromName != "Admin Session" || req.HeaderFromEmail != "admin@example.com" {
+		t.Fatalf("expected session profile sender headers, got %#v", req)
+	}
+	if req.EnvelopeFrom != "admin@example.com" || req.ReplyTo != "reply@example.com" || req.From != "admin@example.com" {
+		t.Fatalf("expected session profile reply/envelope headers, got %#v", req)
+	}
+}
+
+func TestV2SendDraftIdentityModeUsesAccountIdentityHeaders(t *testing.T) {
+	accountClient := &sendTestDespatch{}
+	withMailClientFactory(t, func(cfg config.Config) mail.Client {
+		return accountClient
+	})
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	createAccount := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts", map[string]any{
+		"display_name": "Primary Mail",
+		"login":        "mailbox@example.com",
+		"password":     "mailbox-secret",
+		"imap_host":    "imap.example.com",
+		"imap_port":    993,
+		"smtp_host":    "smtp.example.com",
+		"smtp_port":    587,
+	}, sess, csrf)
+	if createAccount.Code != http.StatusCreated {
+		t.Fatalf("expected account create 201, got %d body=%s", createAccount.Code, createAccount.Body.String())
+	}
+	var account models.MailAccount
+	if err := json.Unmarshal(createAccount.Body.Bytes(), &account); err != nil {
+		t.Fatalf("decode account response: %v", err)
+	}
+
+	createIdentity := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts/"+account.ID+"/identities", map[string]any{
+		"display_name":   "Primary Alias",
+		"from_email":     "alias@example.com",
+		"reply_to":       "alias-reply@example.com",
+		"signature_html": "<p>Account Signature</p>",
+		"is_default":     true,
+	}, sess, csrf)
+	if createIdentity.Code != http.StatusCreated {
+		t.Fatalf("expected identity create 201, got %d body=%s", createIdentity.Code, createIdentity.Body.String())
+	}
+	var identity models.MailIdentity
+	if err := json.Unmarshal(createIdentity.Body.Bytes(), &identity); err != nil {
+		t.Fatalf("decode identity response: %v", err)
+	}
+
+	createDraft := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"account_id":   account.ID,
+		"identity_id":  identity.ID,
+		"from_mode":    "identity",
+		"to":           "someone@example.com",
+		"subject":      "Alias send",
+		"body_text":    "Hello",
+		"compose_mode": "send",
+	}, sess, csrf)
+	if createDraft.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", createDraft.Code, createDraft.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(createDraft.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+
+	send := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts/"+draft.ID+"/send", nil, sess, csrf)
+	if send.Code != http.StatusOK {
+		t.Fatalf("expected draft send 200, got %d body=%s", send.Code, send.Body.String())
+	}
+
+	user, req := accountClient.snapshot()
+	if user != "mailbox@example.com" {
+		t.Fatalf("expected account login mailbox@example.com, got %q", user)
+	}
+	if req.HeaderFromName != "Primary Alias" || req.HeaderFromEmail != "alias@example.com" {
+		t.Fatalf("expected identity sender headers, got %#v", req)
+	}
+	if req.EnvelopeFrom != "alias@example.com" || req.ReplyTo != "alias-reply@example.com" || req.From != "alias@example.com" {
+		t.Fatalf("expected identity envelope/reply headers, got %#v", req)
+	}
+}
+
 func TestV2DraftAttachmentUploadRoundTripsAndSendUsesStoredMedia(t *testing.T) {
 	despatch := &sendTestDespatch{}
 	router := newV2RouterWithMailClient(t, despatch, nil)
@@ -1632,7 +1923,7 @@ func TestV2DraftAttachmentUploadRoundTripsAndSendUsesStoredMedia(t *testing.T) {
 		t.Fatalf("expected attachment upload 201, got %d body=%s", upload.Code, upload.Body.String())
 	}
 	var uploadPayload struct {
-		Draft    models.Draft            `json:"draft"`
+		Draft    models.Draft             `json:"draft"`
 		Items    []models.DraftAttachment `json:"items"`
 		Uploaded []models.DraftAttachment `json:"uploaded"`
 	}

@@ -188,6 +188,77 @@ function composeReliabilityFixture() {
   };
 }
 
+function mailIdentityFixture() {
+  return {
+    user: {
+      email: 'admin@example.com',
+      role: 'admin',
+      recovery_email: 'recovery@example.net',
+      needs_recovery_email: false,
+      auth_stage: 'authenticated',
+      mail_secret_required: false,
+    },
+    sessionProfile: {
+      id: 'session-admin',
+      user_id: 'user-admin',
+      from_email: 'admin@example.com',
+      display_name: 'Admin Session',
+      reply_to: 'session-reply@example.com',
+      signature_text: '-- \nSession Signature',
+      signature_html: '<p>Session Signature</p>',
+      created_at: '2026-03-09T09:00:00.000Z',
+      updated_at: '2026-03-09T09:00:00.000Z',
+    },
+    accounts: [
+      {
+        id: 'acct-support',
+        user_id: 'user-admin',
+        display_name: 'Support Account',
+        login: 'support-login@example.com',
+        imap_host: 'imap.example.com',
+        imap_port: 993,
+        imap_tls: true,
+        imap_starttls: false,
+        smtp_host: 'smtp.example.com',
+        smtp_port: 587,
+        smtp_tls: false,
+        smtp_starttls: true,
+        is_default: false,
+      },
+    ],
+    identities: {
+      'acct-support': [
+        {
+          id: 'ident-support',
+          account_id: 'acct-support',
+          display_name: 'Support Team',
+          from_email: 'support@example.com',
+          reply_to: 'support-reply@example.com',
+          signature_text: '-- \nSupport Signature',
+          signature_html: '<p>Support Signature</p>',
+          is_default: true,
+        },
+      ],
+    },
+    inboxMessage: {
+      id: 'm-ident-1',
+      mailbox: 'INBOX',
+      from: 'alice@example.com',
+      to: ['admin@example.com'],
+      subject: 'Identity workflow check',
+      date: '2026-03-09T12:00:00.000Z',
+      seen: false,
+      flagged: false,
+      answered: false,
+      preview: 'Please reply from the right team alias.',
+      body: 'Please reply from the right team alias.',
+      body_html: '',
+      attachments: [],
+      thread_id: 'thread-ident-1',
+    },
+  };
+}
+
 function reliableMailboxStateFixture() {
   const original = {
     id: 'm-live-1',
@@ -552,6 +623,261 @@ async function mockComposeReliabilityScenario(page) {
       const message = fixture.messageDetails[messageID];
       if (message) return ok(message);
     }
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: path }),
+    });
+  });
+}
+
+async function mockMailIdentityScenario(page) {
+  const fixture = mailIdentityFixture();
+  const drafts = new Map();
+  const sentMessages = [];
+  let draftSeq = 1;
+  let sentSeq = 1;
+
+  const composeIdentityItems = () => {
+    const items = [{
+      account_id: '',
+      account_display_name: 'Session sender',
+      account_login: fixture.sessionProfile.from_email,
+      account_is_default: true,
+      identity_id: fixture.sessionProfile.id,
+      identity_display_name: fixture.sessionProfile.display_name,
+      from_email: fixture.sessionProfile.from_email,
+      reply_to: fixture.sessionProfile.reply_to,
+      signature_text: fixture.sessionProfile.signature_text,
+      signature_html: fixture.sessionProfile.signature_html,
+      identity_is_default: true,
+      is_default: true,
+      is_session: true,
+    }];
+    for (const account of fixture.accounts) {
+      for (const identity of fixture.identities[account.id] || []) {
+        items.push({
+          account_id: account.id,
+          account_display_name: account.display_name,
+          account_login: account.login,
+          account_is_default: !!account.is_default,
+          identity_id: identity.id,
+          identity_display_name: identity.display_name,
+          from_email: identity.from_email,
+          reply_to: identity.reply_to,
+          signature_text: identity.signature_text,
+          signature_html: identity.signature_html,
+          identity_is_default: !!identity.is_default,
+          is_default: !!identity.is_default,
+          is_session: false,
+        });
+      }
+    }
+    return items;
+  };
+
+  const draftList = () => Array
+    .from(drafts.values())
+    .filter((item) => String(item.status || '').toLowerCase() !== 'sent')
+    .sort((a, b) => new Date(b.updated_at || b.created_at || 0).getTime() - new Date(a.updated_at || a.created_at || 0).getTime());
+
+  const mailboxItems = (mailbox) => {
+    if (mailbox === 'Sent') return [...sentMessages];
+    if (mailbox === 'Drafts') return [];
+    if (!mailbox || mailbox === 'INBOX') return [fixture.inboxMessage];
+    return [];
+  };
+
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const ok = async (body, extra = {}) => {
+      await route.fulfill({
+        status: extra.status || 200,
+        contentType: extra.contentType || 'application/json',
+        body: extra.rawBody ?? JSON.stringify(body),
+      });
+    };
+
+    if (path === '/api/v1/public/captcha/config') return ok({ enabled: false });
+    if (path === '/api/v1/public/password-reset/capabilities') return ok({ enabled: false, reason: 'disabled' });
+    if (path === '/api/v1/public/auth/capabilities') {
+      return ok({
+        passkey_mfa_available: false,
+        passkey_passwordless_available: false,
+        passkey_usernameless_enabled: true,
+        reason: 'disabled',
+      });
+    }
+    if (path === '/api/v1/setup/status') {
+      return ok({
+        required: false,
+        base_domain: 'example.com',
+        default_admin_email: 'webmaster@example.com',
+        auth_mode: 'sql',
+        password_min_length: 12,
+        password_max_length: 128,
+        password_class_min: 3,
+        automatic_updates_enabled: true,
+        passkey_primary_sign_in_enabled: true,
+      });
+    }
+    if (path === '/api/v1/me') return ok(fixture.user);
+    if (path === '/api/v2/security/mfa/webauthn') return ok({ items: [] });
+    if (path === '/api/v2/security/mfa/trusted-devices') return ok({ items: [] });
+    if (path === '/api/v2/security/sessions') return ok({ items: [] });
+    if (path === '/api/v2/mail/session-profile') {
+      if (route.request().method() === 'GET') return ok(fixture.sessionProfile);
+      if (route.request().method() === 'PATCH') {
+        const payload = route.request().postDataJSON();
+        fixture.sessionProfile = {
+          ...fixture.sessionProfile,
+          display_name: payload.display_name ?? fixture.sessionProfile.display_name,
+          reply_to: payload.reply_to ?? fixture.sessionProfile.reply_to,
+          signature_html: payload.signature_html ?? fixture.sessionProfile.signature_html,
+          signature_text: payload.signature_text ?? fixture.sessionProfile.signature_text,
+          updated_at: new Date().toISOString(),
+        };
+        if (!payload.signature_text && payload.signature_html) {
+          const plain = String(payload.signature_html).replace(/<[^>]+>/g, '').trim();
+          fixture.sessionProfile.signature_text = plain ? `-- \n${plain}` : '';
+        }
+        return ok(fixture.sessionProfile);
+      }
+    }
+    if (path === '/api/v2/accounts') {
+      if (route.request().method() === 'GET') return ok({ items: fixture.accounts });
+    }
+    const accountIdentities = path.match(/^\/api\/v2\/accounts\/([^/]+)\/identities$/);
+    if (accountIdentities) {
+      const accountID = decodeURIComponent(accountIdentities[1]);
+      if (route.request().method() === 'GET') {
+        return ok({ items: fixture.identities[accountID] || [] });
+      }
+    }
+    if (path === '/api/v1/compose/identities') {
+      return ok({
+        auth_email: fixture.user.email,
+        manual_fallback_required: false,
+        items: composeIdentityItems(),
+      });
+    }
+    if (path === '/api/v1/mailboxes') {
+      return ok([
+        { name: 'INBOX', role: 'inbox', unread: fixture.inboxMessage.seen ? 0 : 1, messages: 1 },
+        { name: 'Sent', role: 'sent', unread: 0, messages: sentMessages.length },
+        { name: 'Drafts', role: 'drafts', unread: 0, messages: draftList().length },
+      ]);
+    }
+    if (path === '/api/v1/messages') {
+      const mailbox = url.searchParams.get('mailbox') || 'INBOX';
+      return ok({ items: mailboxItems(mailbox) });
+    }
+    if (path === '/api/v1/threads/thread-ident-1/messages') {
+      return ok({
+        thread_id: 'thread-ident-1',
+        mailbox: 'INBOX',
+        scope: 'conversation',
+        truncated: false,
+        items: [fixture.inboxMessage, ...sentMessages.filter((item) => item.thread_id === 'thread-ident-1')],
+      });
+    }
+    const messageMatch = path.match(/^\/api\/v1\/messages\/([^/]+)$/);
+    if (messageMatch) {
+      const messageID = decodeURIComponent(messageMatch[1]);
+      const message = [fixture.inboxMessage, ...sentMessages].find((item) => item.id === messageID);
+      if (message) return ok(message);
+    }
+    const messageFlagsMatch = path.match(/^\/api\/v1\/messages\/([^/]+)\/flags$/);
+    if (messageFlagsMatch && route.request().method() === 'POST') {
+      const messageID = decodeURIComponent(messageFlagsMatch[1]);
+      const payload = route.request().postDataJSON() || {};
+      if (messageID === fixture.inboxMessage.id) {
+        const add = Array.isArray(payload.add) ? payload.add : [];
+        const remove = Array.isArray(payload.remove) ? payload.remove : [];
+        if (add.includes('\\Seen')) fixture.inboxMessage.seen = true;
+        if (remove.includes('\\Seen')) fixture.inboxMessage.seen = false;
+      }
+      return ok({ status: 'ok' });
+    }
+    if (path === '/api/v2/drafts') {
+      if (route.request().method() === 'GET') {
+        return ok({ items: draftList(), page: 1, page_size: 100, total: draftList().length });
+      }
+      if (route.request().method() === 'POST') {
+        const payload = route.request().postDataJSON();
+        const draft = {
+          id: `draft-ident-${draftSeq++}`,
+          account_id: payload.account_id || '',
+          identity_id: payload.identity_id || '',
+          compose_mode: payload.compose_mode || 'send',
+          context_message_id: payload.context_message_id || '',
+          from_mode: payload.from_mode || 'default',
+          from_manual: payload.from_manual || '',
+          client_state_json: payload.client_state_json || '',
+          to: payload.to || '',
+          cc: payload.cc || '',
+          bcc: payload.bcc || '',
+          subject: payload.subject || '',
+          body_text: payload.body_text || '',
+          body_html: payload.body_html || '',
+          attachments_json: '[]',
+          status: payload.status || 'active',
+          last_send_error: '',
+          created_at: '2026-03-09T12:30:00.000Z',
+          updated_at: new Date().toISOString(),
+        };
+        drafts.set(draft.id, draft);
+        return ok(draft, { status: 201 });
+      }
+    }
+    const draftMatch = path.match(/^\/api\/v2\/drafts\/([^/]+)$/);
+    if (draftMatch) {
+      const draftID = decodeURIComponent(draftMatch[1]);
+      const draft = drafts.get(draftID);
+      if (!draft) return ok({ error: 'draft_not_found' }, { status: 404 });
+      if (route.request().method() === 'GET') return ok(draft);
+      if (route.request().method() === 'PATCH') {
+        const payload = route.request().postDataJSON();
+        Object.assign(draft, payload, { updated_at: new Date().toISOString(), status: 'active', last_send_error: '' });
+        drafts.set(draftID, draft);
+        return ok(draft);
+      }
+      if (route.request().method() === 'DELETE') {
+        drafts.delete(draftID);
+        return ok({ status: 'deleted' });
+      }
+    }
+    const draftSendMatch = path.match(/^\/api\/v2\/drafts\/([^/]+)\/send$/);
+    if (draftSendMatch) {
+      const draftID = decodeURIComponent(draftSendMatch[1]);
+      const draft = drafts.get(draftID);
+      if (!draft) return ok({ error: 'draft_not_found' }, { status: 404 });
+      const sender = composeIdentityItems().find((item) => item.identity_id === draft.identity_id)
+        || composeIdentityItems().find((item) => item.is_session)
+        || composeIdentityItems()[0];
+      sentMessages.unshift({
+        id: `sent-ident-${sentSeq++}`,
+        mailbox: 'Sent',
+        from: sender.identity_display_name ? `${sender.identity_display_name} <${sender.from_email}>` : sender.from_email,
+        to: String(draft.to || '').split(',').map((item) => item.trim()).filter(Boolean),
+        subject: draft.subject || '(no subject)',
+        date: new Date().toISOString(),
+        seen: true,
+        flagged: false,
+        answered: draft.compose_mode === 'reply',
+        preview: String(draft.body_text || '').trim() || 'Sent message.',
+        body: String(draft.body_text || '').trim() || 'Sent message.',
+        body_html: draft.body_html || '',
+        attachments: [],
+        thread_id: draft.context_message_id ? fixture.inboxMessage.thread_id : `thread-sent-${sentSeq}`,
+      });
+      draft.status = 'sent';
+      draft.updated_at = new Date().toISOString();
+      drafts.set(draftID, draft);
+      return ok({ status: 'sent', saved_copy: true, saved_copy_mailbox: 'Sent' });
+    }
+
     await route.fulfill({
       status: 404,
       contentType: 'application/json',
@@ -1269,6 +1595,21 @@ test('reader conversation rail supports direct thread navigation on desktop', as
   await expect(page.locator('#thread-list .thread-row')).toHaveCount(4);
   await expect(page.locator('#thread-list .thread-row-mailbox')).toHaveCount(2);
   await expect(page.locator('#thread-list .thread-row.active')).toHaveCount(1);
+  const railMetrics = await page.locator('#thread-list .thread-row-btn').first().evaluate((node) => {
+    const rowRect = node.getBoundingClientRect();
+    const from = node.querySelector('.thread-row-from');
+    const subject = node.querySelector('.thread-row-subject');
+    const preview = node.querySelector('.thread-row-preview');
+    return {
+      rowHeight: Math.round(rowRect.height),
+      fromTop: Math.round((from?.getBoundingClientRect().top || 0) - rowRect.top),
+      subjectTop: Math.round((subject?.getBoundingClientRect().top || 0) - rowRect.top),
+      previewTop: Math.round((preview?.getBoundingClientRect().top || 0) - rowRect.top),
+    };
+  });
+  expect(railMetrics.rowHeight).toBeGreaterThanOrEqual(74);
+  expect(railMetrics.subjectTop).toBeGreaterThan(railMetrics.fromTop + 10);
+  expect(railMetrics.previewTop).toBeGreaterThan(railMetrics.subjectTop + 6);
 
   await page.click('#btn-thread-next');
   await expect(page.locator('#message-subject-anchor')).toHaveText(/Re: Updates to OpenAI Privacy Policy/i);
@@ -1398,6 +1739,95 @@ test('compose drafts keep media and retry send after temporary failure', async (
   await expect(page.locator('.message-row-btn')).toHaveCount(0);
 });
 
+test('mail identities and signatures stay editable, replace untouched inserts, and reopen without duplication', async ({ page }) => {
+  await mockMailIdentityScenario(page);
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
+
+  await page.click('#tab-settings');
+  await page.click('#settings-nav-mail');
+  await expect(page.locator('#settings-section-mail')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#settings-mail-session-display-name')).toHaveValue('Admin Session');
+  await expect(page.locator('#settings-mail-account-list')).toContainText('Support Account');
+  await expect(page.locator('#settings-mail-identity-list')).toContainText('Support Team');
+
+  await page.fill('#settings-mail-session-display-name', 'Webmaster Admin');
+  await page.locator('#settings-mail-session-signature').evaluate((node) => {
+    node.innerHTML = '<p>Warm regards</p>';
+  });
+  await page.click('#btn-settings-mail-session-save');
+  await expect(page.locator('#settings-mail-note')).toContainText(/Session sender saved/i);
+
+  await page.click('#tab-mail');
+  await page.click('#btn-compose-open');
+  await expect(page.locator('#compose-overlay')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#compose-from-row')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#compose-from-select')).toContainText('Webmaster Admin <admin@example.com>');
+  await expect(page.locator('#compose-from-select')).toContainText('Support Team <support@example.com>');
+  await expect(page.locator('.compose-signature-block')).toHaveCount(1);
+  await expect(page.locator('.compose-signature-body')).toContainText('Warm regards');
+
+  await page.selectOption('#compose-from-select', 'ident-support');
+  await expect(page.locator('.compose-signature-body')).toContainText('Support Signature');
+
+  await page.locator('.compose-signature-body').evaluate((node) => {
+    node.innerHTML = '<p>Custom Signature</p>';
+  });
+  await page.selectOption('#compose-from-select', 'session-admin');
+  await expect(page.locator('.compose-signature-body')).toContainText('Custom Signature');
+
+  await page.click('#btn-compose-discard');
+  await expect(page.locator('#compose-overlay')).toHaveClass(/hidden/);
+
+  await page.locator('.message-row-btn').first().click();
+  await page.click('#btn-reply');
+  await expect(page.locator('#compose-title')).toHaveText(/Reply/i);
+  await expect(page.locator('.compose-signature-block')).toHaveCount(1);
+  await expect(page.locator('.compose-quoted-block[data-compose-quoted="reply"]')).toHaveCount(1);
+  const replyOrder = await page.locator('#compose-editor').evaluate((node) => {
+    const signature = node.querySelector('.compose-signature-block');
+    const quoted = node.querySelector('.compose-quoted-block[data-compose-quoted="reply"]');
+    if (!(signature instanceof HTMLElement) || !(quoted instanceof HTMLElement)) return null;
+    return {
+      signatureTop: signature.offsetTop,
+      quotedTop: quoted.offsetTop,
+    };
+  });
+  expect(replyOrder).not.toBeNull();
+  expect(replyOrder.signatureTop).toBeLessThan(replyOrder.quotedTop);
+
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(1200);
+  await page.locator('#mailboxes .mailbox-row button', { hasText: /^Drafts/i }).click();
+  await expect(page.locator('.message-row-btn')).toHaveCount(1);
+  await page.locator('.message-row-btn').first().click();
+  await expect(page.locator('#compose-title')).toHaveText(/Reply/i);
+  await expect(page.locator('.compose-signature-block')).toHaveCount(1);
+  await expect(page.locator('.compose-quoted-block[data-compose-quoted="reply"]')).toHaveCount(1);
+  await expect(page.locator('.compose-signature-body')).toContainText('Warm regards');
+  await page.click('#btn-compose-discard');
+  await expect(page.locator('#compose-overlay')).toHaveClass(/hidden/);
+
+  await page.locator('#mailboxes .mailbox-row button', { hasText: /^Inbox/i }).click();
+  await page.locator('.message-row-btn').first().click();
+  await page.click('#btn-forward');
+  await expect(page.locator('#compose-title')).toHaveText(/Forward/i);
+  await expect(page.locator('.compose-signature-block')).toHaveCount(1);
+  await expect(page.locator('.compose-quoted-block[data-compose-quoted="forward"]')).toHaveCount(1);
+  const forwardOrder = await page.locator('#compose-editor').evaluate((node) => {
+    const signature = node.querySelector('.compose-signature-block');
+    const quoted = node.querySelector('.compose-quoted-block[data-compose-quoted="forward"]');
+    if (!(signature instanceof HTMLElement) || !(quoted instanceof HTMLElement)) return null;
+    return {
+      signatureTop: signature.offsetTop,
+      quotedTop: quoted.offsetTop,
+    };
+  });
+  expect(forwardOrder).not.toBeNull();
+  expect(forwardOrder.signatureTop).toBeLessThan(forwardOrder.quotedTop);
+  await page.click('#btn-compose-discard');
+});
+
 test('mailbox state resolves Sent on first send, updates thread context, and inserts sent rows immediately', async ({ page }) => {
   await mockReliableMailboxStateScenario(page);
   await page.setViewportSize({ width: 1366, height: 900 });
@@ -1451,8 +1881,23 @@ test('mailbox core actions use row selection, create archive or trash folders on
   const inboxButton = page.locator('#mailboxes .mailbox-row button', { hasText: /^Inbox/i });
   await expect(inboxButton).toContainText('(1)');
 
+  const rowMetrics = await page.locator('.message-row-btn').first().evaluate((node) => {
+    const rowRect = node.getBoundingClientRect();
+    const from = node.querySelector('.message-from');
+    const subject = node.querySelector('.message-subject');
+    const preview = node.querySelector('.message-preview');
+    return {
+      rowHeight: Math.round(rowRect.height),
+      fromTop: Math.round((from?.getBoundingClientRect().top || 0) - rowRect.top),
+      subjectTop: Math.round((subject?.getBoundingClientRect().top || 0) - rowRect.top),
+      previewTop: Math.round((preview?.getBoundingClientRect().top || 0) - rowRect.top),
+    };
+  });
+  expect(rowMetrics.rowHeight).toBeGreaterThanOrEqual(74);
+  expect(rowMetrics.subjectTop).toBeGreaterThan(rowMetrics.fromTop + 10);
+  expect(rowMetrics.previewTop).toBeGreaterThan(rowMetrics.subjectTop + 6);
   const heights = await page.locator('.message-row-btn').evaluateAll((nodes) => nodes.slice(0, 3).map((node) => Math.round(node.getBoundingClientRect().height)));
-  expect(new Set(heights).size).toBe(1);
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(2);
 
   await page.locator('.message-row[data-message-id="m3"] .message-row-btn').click();
   await expect(inboxButton).not.toContainText('(1)');
@@ -1528,6 +1973,38 @@ test('mailbox core actions use row selection, create archive or trash folders on
   await expect(page.locator('#messages .message-row-btn')).toHaveCount(0);
   await page.locator('#mailboxes .mailbox-row button', { hasText: /^Trash/ }).click();
   await expect(page.locator('#messages .message-row-btn')).toHaveCount(1);
+});
+
+test('mailbox rows switch to compact layout when the message pane narrows', async ({ page }) => {
+  await mockMailActionScenario(page);
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
+
+  await expect(page.locator('#view-mail')).toBeVisible();
+  await page.evaluate(() => {
+    const layout = document.querySelector('.mail-layout');
+    if (layout instanceof HTMLElement) {
+      layout.style.width = '948px';
+    }
+  });
+  await expect(page.locator('.message-row-btn')).toHaveCount(4);
+  const compactMetrics = await page.locator('.message-row-btn').first().evaluate((node) => {
+    const rowRect = node.getBoundingClientRect();
+    const from = node.querySelector('.message-from');
+    const subject = node.querySelector('.message-subject');
+    const preview = node.querySelector('.message-preview');
+    const pane = node.closest('.mail-pane--messages');
+    return {
+      paneWidth: Math.round(pane?.getBoundingClientRect().width || 0),
+      rowHeight: Math.round(rowRect.height),
+      fromTop: Math.round((from?.getBoundingClientRect().top || 0) - rowRect.top),
+      subjectTop: Math.round((subject?.getBoundingClientRect().top || 0) - rowRect.top),
+      previewTop: Math.round((preview?.getBoundingClientRect().top || 0) - rowRect.top),
+    };
+  });
+  expect(compactMetrics.paneWidth).toBeLessThan(360);
+  expect(compactMetrics.subjectTop).toBeGreaterThan(compactMetrics.fromTop + 10);
+  expect(Math.abs(compactMetrics.previewTop - compactMetrics.subjectTop)).toBeLessThanOrEqual(4);
 });
 
 test('mailbox live refresh updates counts and rows without losing the open thread context', async ({ page }) => {

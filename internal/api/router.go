@@ -255,6 +255,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
 				r.Get("/accounts", h.V2ListAccounts)
 				r.Get("/accounts/{id}/identities", h.V2ListIdentities)
+				r.Get("/mail/session-profile", h.V2GetSessionMailProfile)
 				r.Get("/mailboxes", h.V2ListMailboxMappings)
 				r.Get("/threads", h.V2ListThreads)
 				r.Get("/threads/{id}", h.V2GetThread)
@@ -284,6 +285,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.Post("/accounts/{id}/identities", h.V2CreateIdentity)
 					r.Patch("/identities/{id}", h.V2UpdateIdentity)
 					r.Delete("/identities/{id}", h.V2DeleteIdentity)
+					r.Patch("/mail/session-profile", h.V2UpdateSessionMailProfile)
 
 					r.Post("/mailboxes", h.V2UpsertMailboxMapping)
 					r.Patch("/mailboxes/{id}", h.V2UpsertMailboxMapping)
@@ -1144,6 +1146,11 @@ func (h *Handlers) ForwardMessage(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) ComposeIdentities(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
+	sessionProfile, err := h.svc.EnsureSessionMailProfile(r.Context(), u)
+	if err != nil {
+		util.WriteError(w, 500, "compose_identities_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
 	accounts, err := h.svc.Store().ListMailAccounts(r.Context(), u.ID)
 	if err != nil {
 		util.WriteError(w, 500, "compose_identities_failed", err.Error(), middleware.RequestID(r.Context()))
@@ -1158,9 +1165,28 @@ func (h *Handlers) ComposeIdentities(w http.ResponseWriter, r *http.Request) {
 		IdentityID        string `json:"identity_id"`
 		IdentityDisplay   string `json:"identity_display_name"`
 		IdentityFromEmail string `json:"from_email"`
+		ReplyTo           string `json:"reply_to"`
+		SignatureText     string `json:"signature_text"`
+		SignatureHTML     string `json:"signature_html"`
 		IdentityIsDefault bool   `json:"identity_is_default"`
+		IsDefault         bool   `json:"is_default"`
+		IsSession         bool   `json:"is_session"`
 	}
-	items := make([]composeIdentityItem, 0, len(accounts))
+	items := []composeIdentityItem{{
+		AccountID:         "",
+		AccountDisplay:    "Session sender",
+		AccountLogin:      strings.TrimSpace(sessionProfile.FromEmail),
+		AccountIsDefault:  true,
+		IdentityID:        sessionProfile.ID,
+		IdentityDisplay:   strings.TrimSpace(sessionProfile.DisplayName),
+		IdentityFromEmail: strings.TrimSpace(sessionProfile.FromEmail),
+		ReplyTo:           strings.TrimSpace(sessionProfile.ReplyTo),
+		SignatureText:     strings.TrimSpace(sessionProfile.SignatureText),
+		SignatureHTML:     strings.TrimSpace(sessionProfile.SignatureHTML),
+		IdentityIsDefault: true,
+		IsDefault:         true,
+		IsSession:         true,
+	}}
 	for _, account := range accounts {
 		identities, err := h.svc.Store().ListMailIdentities(r.Context(), account.ID)
 		if err != nil {
@@ -1180,13 +1206,17 @@ func (h *Handlers) ComposeIdentities(w http.ResponseWriter, r *http.Request) {
 				IdentityID:        identity.ID,
 				IdentityDisplay:   strings.TrimSpace(identity.DisplayName),
 				IdentityFromEmail: fromEmail,
+				ReplyTo:           strings.TrimSpace(identity.ReplyTo),
+				SignatureText:     strings.TrimSpace(identity.SignatureText),
+				SignatureHTML:     strings.TrimSpace(identity.SignatureHTML),
 				IdentityIsDefault: identity.IsDefault,
+				IsDefault:         identity.IsDefault || account.IsDefault,
 			})
 		}
 	}
 
 	util.WriteJSON(w, 200, map[string]any{
-		"auth_email":               strings.TrimSpace(u.Email),
+		"auth_email":               strings.TrimSpace(service.MailIdentity(u)),
 		"manual_fallback_required": len(items) == 0,
 		"items":                    items,
 	})
@@ -1224,53 +1254,33 @@ func (h *Handlers) handleSend(w http.ResponseWriter, r *http.Request, inReply st
 	}
 
 	sendAccountID := ""
-	switch decoded.FromMode {
-	case "", "default":
-		req.From = strings.TrimSpace(u.Email)
-	case "manual":
-		manualSender := strings.TrimSpace(decoded.FromManual)
-		if manualSender == "" {
-			manualSender = strings.TrimSpace(u.Email)
+	sender, err := h.svc.ResolveComposeSender(r.Context(), u, decoded.FromMode, decoded.IdentityID, decoded.FromManual)
+	if err != nil {
+		status := 400
+		code := "send_failed"
+		switch {
+		case strings.Contains(err.Error(), "identity_id is required"):
+			code = "sender_identity_required"
+		case strings.Contains(err.Error(), "manual sender must match authenticated account email"):
+			code = "invalid_sender_manual"
+		case strings.Contains(err.Error(), "selected identity is missing from_email"):
+			code = "sender_identity_invalid"
+		case errors.Is(err, store.ErrNotFound):
+			code = "sender_identity_not_found"
+			status = 404
+		default:
+			code = "sender_identity_lookup_failed"
+			status = 500
 		}
-		if !strings.EqualFold(manualSender, strings.TrimSpace(u.Email)) {
-			util.WriteError(w, 400, "invalid_sender_manual", "manual sender must match authenticated account email", middleware.RequestID(r.Context()))
-			return
-		}
-		req.From = strings.TrimSpace(u.Email)
-	case "identity":
-		if strings.TrimSpace(decoded.IdentityID) == "" {
-			util.WriteError(w, 400, "sender_identity_required", "identity_id is required when from_mode=identity", middleware.RequestID(r.Context()))
-			return
-		}
-		identity, err := h.svc.Store().GetMailIdentityByID(r.Context(), strings.TrimSpace(decoded.IdentityID))
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				util.WriteError(w, 404, "sender_identity_not_found", "identity not found", middleware.RequestID(r.Context()))
-				return
-			}
-			util.WriteError(w, 500, "sender_identity_lookup_failed", err.Error(), middleware.RequestID(r.Context()))
-			return
-		}
-		account, err := h.svc.Store().GetMailAccountByID(r.Context(), u.ID, identity.AccountID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				util.WriteError(w, 403, "sender_identity_forbidden", "identity does not belong to current user", middleware.RequestID(r.Context()))
-				return
-			}
-			util.WriteError(w, 500, "sender_identity_lookup_failed", err.Error(), middleware.RequestID(r.Context()))
-			return
-		}
-		fromEmail := strings.TrimSpace(identity.FromEmail)
-		if fromEmail == "" {
-			util.WriteError(w, 400, "sender_identity_invalid", "selected identity is missing from_email", middleware.RequestID(r.Context()))
-			return
-		}
-		req.From = fromEmail
-		sendAccountID = strings.TrimSpace(account.ID)
-	default:
-		util.WriteError(w, 400, "invalid_from_mode", "from_mode must be one of default, manual, identity", middleware.RequestID(r.Context()))
+		util.WriteError(w, status, code, err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
+	req.HeaderFromName = sender.HeaderFromName
+	req.HeaderFromEmail = sender.HeaderFromEmail
+	req.EnvelopeFrom = sender.EnvelopeFrom
+	req.ReplyTo = sender.ReplyTo
+	req.From = sender.HeaderFromEmail
+	sendAccountID = sender.AccountID
 
 	if sendAccountID == "" && strings.TrimSpace(decoded.AccountID) != "" {
 		accountID := strings.TrimSpace(decoded.AccountID)

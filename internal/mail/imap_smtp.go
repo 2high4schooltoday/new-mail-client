@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
+	stdmail "net/mail"
 	"net/textproto"
 	"regexp"
 	"sort"
@@ -308,9 +309,8 @@ func (c *IMAPSMTPClient) Send(ctx context.Context, user, pass string, req SendRe
 	if len(mergeRecipients(req.To, req.CC, req.BCC)) == 0 {
 		return SendResult{}, fmt.Errorf("at least one recipient is required")
 	}
-	if req.From == "" {
-		req.From = user
-	}
+	req.HeaderFromEmail = firstNonEmptyTrimmed(req.HeaderFromEmail, req.From, user)
+	req.EnvelopeFrom = firstNonEmptyTrimmed(req.EnvelopeFrom, req.HeaderFromEmail, user)
 
 	msg, err := buildRFC822(req)
 	if err != nil {
@@ -335,9 +335,9 @@ func (c *IMAPSMTPClient) sendWithSenderFallback(
 	if len(allRecipients) == 0 {
 		return fmt.Errorf("at least one recipient is required")
 	}
-	envelopeFrom := strings.TrimSpace(req.From)
+	envelopeFrom := strings.TrimSpace(req.EnvelopeFrom)
 	if envelopeFrom == "" {
-		envelopeFrom = strings.TrimSpace(user)
+		envelopeFrom = firstNonEmptyTrimmed(req.HeaderFromEmail, req.From, user)
 	}
 	err := sendFunc(ctx, user, pass, envelopeFrom, allRecipients, raw)
 	if err == nil {
@@ -613,11 +613,18 @@ func buildRFC822(req SendRequest) ([]byte, error) {
 	mixed := multipart.NewWriter(&buf)
 	boundary := mixed.Boundary()
 	messageID := strings.TrimSpace(req.MessageID)
+	headerFromEmail := firstNonEmptyTrimmed(req.HeaderFromEmail, req.From)
+	if headerFromEmail == "" {
+		return nil, fmt.Errorf("from email is required")
+	}
 	if messageID == "" {
-		messageID = generateMessageID(req.From)
+		messageID = generateMessageID(headerFromEmail)
 	}
 
-	fmt.Fprintf(&buf, "From: %s\r\n", req.From)
+	fmt.Fprintf(&buf, "From: %s\r\n", encodeHeaderAddress(req.HeaderFromName, headerFromEmail))
+	if replyTo := strings.TrimSpace(req.ReplyTo); replyTo != "" {
+		fmt.Fprintf(&buf, "Reply-To: %s\r\n", encodeHeaderAddress("", replyTo))
+	}
 	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(to, ", "))
 	if len(cc) > 0 {
 		fmt.Fprintf(&buf, "Cc: %s\r\n", strings.Join(cc, ", "))
@@ -761,6 +768,31 @@ func writeAttachmentPart(writer *multipart.Writer, a SendAttachment, treatInline
 	return enc.Close()
 }
 
+func encodeHeaderAddress(name, email string) string {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return ""
+	}
+	if strings.TrimSpace(name) == "" {
+		return email
+	}
+	addr := &stdmail.Address{
+		Name:    strings.TrimSpace(name),
+		Address: email,
+	}
+	return addr.String()
+}
+
+func firstNonEmptyTrimmed(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func normalizeContentID(v string) string {
 	v = strings.TrimSpace(v)
 	v = strings.TrimPrefix(v, "<")
@@ -889,6 +921,10 @@ func plainTextFromHTML(rawHTML string) string {
 		normalized = append(normalized, line)
 	}
 	return strings.TrimSpace(strings.Join(normalized, "\n"))
+}
+
+func PlainTextFromHTML(rawHTML string) string {
+	return plainTextFromHTML(rawHTML)
 }
 
 type base64LineEncoder struct {

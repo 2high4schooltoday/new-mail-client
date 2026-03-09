@@ -135,6 +135,7 @@ func newSendRouterWithStore(t *testing.T, despatch mail.Client, mailLogin string
 		filepath.Join("..", "..", "migrations", "005_admin_query_indexes.sql"),
 		filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql"),
 		filepath.Join("..", "..", "migrations", "007_mail_accounts.sql"),
+		filepath.Join("..", "..", "migrations", "025_session_mail_profiles.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -271,8 +272,8 @@ func TestSendSMTPPolicyErrorMappedTo422(t *testing.T) {
 	if user != "webmaster" {
 		t.Fatalf("expected SMTP auth user to use mail_login, got %q", user)
 	}
-	if req.From != "admin@example.com" {
-		t.Fatalf("expected forced From header admin@example.com, got %q", req.From)
+	if req.HeaderFromEmail != "webmaster" || req.EnvelopeFrom != "webmaster" || req.From != "webmaster" {
+		t.Fatalf("expected resolved session sender webmaster, got %#v", req)
 	}
 }
 
@@ -321,8 +322,8 @@ func TestSendIgnoresClientFromField(t *testing.T) {
 	if user != "admin@example.com" {
 		t.Fatalf("expected SMTP auth user to default to account email, got %q", user)
 	}
-	if req.From != "admin@example.com" {
-		t.Fatalf("expected forced From header admin@example.com, got %q", req.From)
+	if req.HeaderFromEmail != "admin@example.com" || req.EnvelopeFrom != "admin@example.com" || req.From != "admin@example.com" {
+		t.Fatalf("expected resolved default sender admin@example.com, got %#v", req)
 	}
 }
 
@@ -486,8 +487,8 @@ func TestSendManualFromRequiresAuthenticatedEmail(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", okRec.Code, okRec.Body.String())
 	}
 	_, req := despatch.snapshot()
-	if req.From != "admin@example.com" {
-		t.Fatalf("expected forced manual sender admin@example.com, got %q", req.From)
+	if req.HeaderFromEmail != "admin@example.com" || req.EnvelopeFrom != "admin@example.com" || req.From != "admin@example.com" {
+		t.Fatalf("expected resolved manual sender admin@example.com, got %#v", req)
 	}
 
 	autoBody, _ := json.Marshal(map[string]any{
@@ -501,8 +502,48 @@ func TestSendManualFromRequiresAuthenticatedEmail(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", autoRec.Code, autoRec.Body.String())
 	}
 	_, autoReq := despatch.snapshot()
-	if autoReq.From != "admin@example.com" {
-		t.Fatalf("expected auto-manual sender fallback admin@example.com, got %q", autoReq.From)
+	if autoReq.HeaderFromEmail != "admin@example.com" || autoReq.EnvelopeFrom != "admin@example.com" || autoReq.From != "admin@example.com" {
+		t.Fatalf("expected auto-manual sender fallback admin@example.com, got %#v", autoReq)
+	}
+}
+
+func TestSendUsesSessionProfileDisplayNameAndReplyTo(t *testing.T) {
+	despatch := &sendTestDespatch{}
+	router, st, _ := newSendRouterWithStore(t, despatch, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	adminUser, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	if _, err := st.UpsertSessionMailProfile(context.Background(), models.SessionMailProfile{
+		ID:            "session-admin",
+		UserID:        adminUser.ID,
+		FromEmail:     "admin@example.com",
+		DisplayName:   "Admin Sender",
+		ReplyTo:       "reply@example.com",
+		SignatureText: "-- \nRegards",
+		SignatureHTML: "<p>Regards</p>",
+	}); err != nil {
+		t.Fatalf("upsert session profile: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"to":      []string{"alice@example.com"},
+		"subject": "profile sender",
+		"body":    "body",
+	})
+	rec := postSendJSON(t, router, sessionCookie, csrfCookie, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, req := despatch.snapshot()
+	if req.HeaderFromName != "Admin Sender" || req.HeaderFromEmail != "admin@example.com" {
+		t.Fatalf("expected session profile sender headers, got %#v", req)
+	}
+	if req.EnvelopeFrom != "admin@example.com" || req.ReplyTo != "reply@example.com" || req.From != "admin@example.com" {
+		t.Fatalf("expected session profile reply/envelope headers, got %#v", req)
 	}
 }
 
@@ -553,6 +594,7 @@ func TestSendIdentityModeUsesAccountIdentity(t *testing.T) {
 		AccountID:   account.ID,
 		DisplayName: "Alias",
 		FromEmail:   "alias@example.com",
+		ReplyTo:     "alias-reply@example.com",
 		IsDefault:   true,
 	})
 	if err != nil {
@@ -572,7 +614,7 @@ func TestSendIdentityModeUsesAccountIdentity(t *testing.T) {
 	}
 
 	smtpCapture.wait(t)
-	from, rcpt, _, authUser := smtpCapture.snapshot()
+	from, rcpt, raw, authUser := smtpCapture.snapshot()
 	if !strings.Contains(strings.ToLower(from), "alias@example.com") {
 		t.Fatalf("expected smtp from to use identity sender, got %q", from)
 	}
@@ -581,6 +623,12 @@ func TestSendIdentityModeUsesAccountIdentity(t *testing.T) {
 	}
 	if authUser != "mailbox@example.com" {
 		t.Fatalf("expected smtp auth to use mailbox login, got %q", authUser)
+	}
+	if !strings.Contains(raw, "From: ") || !strings.Contains(raw, "Alias") || !strings.Contains(raw, "<alias@example.com>") {
+		t.Fatalf("expected display-name From header in raw message, got %q", raw)
+	}
+	if !strings.Contains(raw, "Reply-To: alias-reply@example.com") {
+		t.Fatalf("expected Reply-To header in raw message, got %q", raw)
 	}
 }
 
@@ -777,7 +825,7 @@ func TestSendAccountFallsBackToDetectedSentMailbox(t *testing.T) {
 	}
 }
 
-func TestSendIdentityModeRejectsForeignIdentity(t *testing.T) {
+func TestSendIdentityModeHidesForeignIdentity(t *testing.T) {
 	despatch := &sendTestDespatch{}
 	router, st, cfg := newSendRouterWithStore(t, despatch, "")
 	sessionCookie, csrfCookie := loginForSend(t, router)
@@ -833,15 +881,15 @@ func TestSendIdentityModeRejectsForeignIdentity(t *testing.T) {
 		"identity_id": identity.ID,
 	})
 	rec := postSendJSON(t, router, sessionCookie, csrfCookie, body)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var apiErr util.APIError
 	if err := json.Unmarshal(rec.Body.Bytes(), &apiErr); err != nil {
 		t.Fatalf("decode api error: %v body=%s", err, rec.Body.String())
 	}
-	if apiErr.Code != "sender_identity_forbidden" {
-		t.Fatalf("expected sender_identity_forbidden, got %q", apiErr.Code)
+	if apiErr.Code != "sender_identity_not_found" {
+		t.Fatalf("expected sender_identity_not_found, got %q", apiErr.Code)
 	}
 }
 

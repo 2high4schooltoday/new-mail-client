@@ -113,6 +113,9 @@ const state = {
     draftLastSavedAt: "",
     draftSaveTimer: 0,
     draftBaselineJSON: "",
+    draftSessionToken: 0,
+    draftSavePromise: null,
+    draftSaveSessionToken: 0,
   },
   ui: {
     activeAuthTask: "login",
@@ -143,6 +146,13 @@ const state = {
     passkeys: {
       items: [],
       detailId: "",
+    },
+    mail: {
+      sessionProfile: null,
+      accounts: [],
+      selectedAccountID: "",
+      identities: [],
+      selectedIdentityID: "",
     },
     devices: {
       items: [],
@@ -337,11 +347,48 @@ const el = {
   settingsSearchInput: document.getElementById("settings-search-input"),
   settingsSearchResults: document.getElementById("settings-search-results"),
   settingsNavSignIn: document.getElementById("settings-nav-signin"),
+  settingsNavMail: document.getElementById("settings-nav-mail"),
   settingsNavDevices: document.getElementById("settings-nav-devices"),
   settingsNavSessions: document.getElementById("settings-nav-sessions"),
   settingsSectionSignIn: document.getElementById("settings-section-signin"),
+  settingsSectionMail: document.getElementById("settings-section-mail"),
   settingsSectionDevices: document.getElementById("settings-section-devices"),
   settingsSectionSessions: document.getElementById("settings-section-sessions"),
+  settingsMailNote: document.getElementById("settings-mail-note"),
+  settingsMailSessionDisplayName: document.getElementById("settings-mail-session-display-name"),
+  settingsMailSessionFromEmail: document.getElementById("settings-mail-session-from-email"),
+  settingsMailSessionReplyTo: document.getElementById("settings-mail-session-reply-to"),
+  settingsMailSessionToolbar: document.getElementById("settings-mail-session-toolbar"),
+  settingsMailSessionSignature: document.getElementById("settings-mail-session-signature"),
+  btnSettingsMailSessionSave: document.getElementById("btn-settings-mail-session-save"),
+  settingsMailAccountList: document.getElementById("settings-mail-account-list"),
+  btnSettingsMailAccountNew: document.getElementById("btn-settings-mail-account-new"),
+  settingsMailAccountForm: document.getElementById("settings-mail-account-form"),
+  settingsMailAccountDisplayName: document.getElementById("settings-mail-account-display-name"),
+  settingsMailAccountLogin: document.getElementById("settings-mail-account-login"),
+  settingsMailAccountPassword: document.getElementById("settings-mail-account-password"),
+  settingsMailAccountDefault: document.getElementById("settings-mail-account-default"),
+  settingsMailAccountIMAPHost: document.getElementById("settings-mail-account-imap-host"),
+  settingsMailAccountIMAPPort: document.getElementById("settings-mail-account-imap-port"),
+  settingsMailAccountIMAPTLS: document.getElementById("settings-mail-account-imap-tls"),
+  settingsMailAccountIMAPStartTLS: document.getElementById("settings-mail-account-imap-starttls"),
+  settingsMailAccountSMTPHost: document.getElementById("settings-mail-account-smtp-host"),
+  settingsMailAccountSMTPPort: document.getElementById("settings-mail-account-smtp-port"),
+  settingsMailAccountSMTPTLS: document.getElementById("settings-mail-account-smtp-tls"),
+  settingsMailAccountSMTPStartTLS: document.getElementById("settings-mail-account-smtp-starttls"),
+  btnSettingsMailAccountSave: document.getElementById("btn-settings-mail-account-save"),
+  btnSettingsMailAccountDelete: document.getElementById("btn-settings-mail-account-delete"),
+  settingsMailIdentityList: document.getElementById("settings-mail-identity-list"),
+  btnSettingsMailIdentityNew: document.getElementById("btn-settings-mail-identity-new"),
+  settingsMailIdentityForm: document.getElementById("settings-mail-identity-form"),
+  settingsMailIdentityDisplayName: document.getElementById("settings-mail-identity-display-name"),
+  settingsMailIdentityFromEmail: document.getElementById("settings-mail-identity-from-email"),
+  settingsMailIdentityReplyTo: document.getElementById("settings-mail-identity-reply-to"),
+  settingsMailIdentityDefault: document.getElementById("settings-mail-identity-default"),
+  settingsMailIdentityToolbar: document.getElementById("settings-mail-identity-toolbar"),
+  settingsMailIdentitySignature: document.getElementById("settings-mail-identity-signature"),
+  btnSettingsMailIdentitySave: document.getElementById("btn-settings-mail-identity-save"),
+  btnSettingsMailIdentityDelete: document.getElementById("btn-settings-mail-identity-delete"),
   passkeysNote: document.getElementById("passkeys-note"),
   passkeysList: document.getElementById("passkeys-list"),
   settingsPasskeyDetail: document.getElementById("settings-passkey-detail"),
@@ -902,13 +949,19 @@ function composeCurrentDraftPayload() {
 
 function composeDraftHasMeaningfulContent(raw = {}) {
   const payload = composeComparableDraftPayload(raw);
+  const normalizedHTML = stripComposeSignatureMarkup(payload.body_html);
+  const normalizedText = String(payload.body_text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/(?:^|\n)-- ?\n[\s\S]*$/, "")
+    .trim();
   return [
     payload.to,
     payload.cc,
     payload.bcc,
     payload.subject,
-    payload.body_text,
-    payload.body_html,
+    normalizedText,
+    normalizedHTML.text,
+    normalizedHTML.hasMedia ? "media" : "",
   ].some((value) => String(value || "").trim() !== "");
 }
 
@@ -1517,6 +1570,21 @@ function clearComposeDraft() {
   clearComposeCrashBuffer();
 }
 
+async function cleanupStaleComposeDraftRecord(draft) {
+  const draftID = String(draft?.id || "").trim();
+  if (!draftID) return;
+  clearComposeCrashBuffer(draftID);
+  removeLocalDraft(draftID);
+  try {
+    await api(`/api/v2/drafts/${encodeURIComponent(draftID)}`, {
+      method: "DELETE",
+      logErrors: false,
+    });
+  } catch {
+    // Best effort cleanup for stale in-flight draft creates.
+  }
+}
+
 function applyComposeDraftPayload(payload, opts = {}) {
   const draft = composeComparableDraftPayload(payload);
   let clientState = {};
@@ -1696,7 +1764,17 @@ function composeDraftStatusText() {
 
 async function flushComposeDraft(options = {}) {
   if (!el.composeForm) return null;
+  if (!state.ui.composeOpen && options.allowWhileClosed !== true) return null;
   if (state.compose.submitInFlight && options.allowWhileSubmitting !== true) return null;
+  const sessionToken = Number(state.compose.draftSessionToken || 0);
+  if (state.compose.draftSavePromise && Number(state.compose.draftSaveSessionToken || 0) === sessionToken) {
+    try {
+      await state.compose.draftSavePromise;
+    } catch {
+      // The active session will surface the latest save failure below if it still applies.
+    }
+    if (state.compose.submitInFlight && options.allowWhileSubmitting !== true) return null;
+  }
   clearComposeDraftSaveTimer();
   syncComposeDraftFields();
   const payload = composeCurrentDraftPayload();
@@ -1718,19 +1796,38 @@ async function flushComposeDraft(options = {}) {
   state.compose.draftDirty = true;
   state.compose.draftError = "";
   updateComposeSubmitState();
+  const request = (async () => {
+    try {
+      const saved = state.compose.draftID
+        ? await updateServerDraft(state.compose.draftID, payload)
+        : await createServerDraft(payload);
+      if (sessionToken !== Number(state.compose.draftSessionToken || 0)) {
+        await cleanupStaleComposeDraftRecord(saved);
+        return null;
+      }
+      syncComposeServerDraftState(saved || payload);
+      updateComposeSubmitState();
+      return saved || payload;
+    } catch (err) {
+      if (sessionToken !== Number(state.compose.draftSessionToken || 0)) {
+        return null;
+      }
+      state.compose.draftSaving = false;
+      state.compose.draftDirty = true;
+      state.compose.draftError = formatAPIError(err, "Draft save failed.");
+      updateComposeSubmitState();
+      return null;
+    }
+  })();
+  state.compose.draftSavePromise = request;
+  state.compose.draftSaveSessionToken = sessionToken;
   try {
-    const saved = state.compose.draftID
-      ? await updateServerDraft(state.compose.draftID, payload)
-      : await createServerDraft(payload);
-    syncComposeServerDraftState(saved || payload);
-    updateComposeSubmitState();
-    return saved || payload;
-  } catch (err) {
-    state.compose.draftSaving = false;
-    state.compose.draftDirty = true;
-    state.compose.draftError = formatAPIError(err, "Draft save failed.");
-    updateComposeSubmitState();
-    return null;
+    return await request;
+  } finally {
+    if (state.compose.draftSavePromise === request) {
+      state.compose.draftSavePromise = null;
+      state.compose.draftSaveSessionToken = 0;
+    }
   }
 }
 
@@ -2277,20 +2374,21 @@ function clearComposeAssets(options = {}) {
 
 async function ensureComposeServerDraft() {
   if (String(state.compose.draftID || "").trim()) return state.compose.draftID;
-  state.compose.draftSaving = true;
-  state.compose.draftError = "";
-  updateComposeSubmitState();
-  try {
-    const saved = await createServerDraft(composeCurrentDraftPayload());
-    syncComposeServerDraftState(saved);
-    updateComposeSubmitState();
-    return state.compose.draftID;
-  } catch (err) {
-    state.compose.draftSaving = false;
-    state.compose.draftError = formatAPIError(err, "Draft save failed.");
-    updateComposeSubmitState();
-    throw err;
+  const sessionToken = Number(state.compose.draftSessionToken || 0);
+  if (state.compose.draftSavePromise && Number(state.compose.draftSaveSessionToken || 0) === sessionToken) {
+    try {
+      await state.compose.draftSavePromise;
+    } catch {
+      // Fall through and let the explicit create attempt surface an error if needed.
+    }
+    if (String(state.compose.draftID || "").trim()) return state.compose.draftID;
   }
+  const saved = await flushComposeDraft({ immediate: true, forceCreate: true });
+  const draftID = String(state.compose.draftID || saved?.id || "").trim();
+  if (!draftID) {
+    throw new Error("Draft save failed.");
+  }
+  return draftID;
 }
 
 async function uploadComposeAsset(assetID) {
@@ -2500,22 +2598,19 @@ function renderComposeFromControls() {
 
   el.composeFromSelect.disabled = false;
   for (const item of items) {
-    const label = [String(item.identity_display_name || "").trim(), String(item.from_email || "").trim()]
-      .filter(Boolean)
-      .join(" - ");
-    const accountLabel = String(item.account_display_name || item.account_login || "").trim();
     const opt = document.createElement("option");
     opt.value = String(item.identity_id || "");
-    opt.textContent = accountLabel ? `${accountLabel}: ${label}` : label;
+    opt.textContent = composeIdentityLabel(item);
     opt.dataset.accountId = String(item.account_id || "");
     opt.dataset.fromEmail = String(item.from_email || "");
-    if (item.identity_is_default || item.account_is_default) opt.selected = true;
+    opt.dataset.isSession = item.is_session ? "true" : "false";
+    if (item.is_default || item.identity_is_default || item.account_is_default) opt.selected = true;
     el.composeFromSelect.appendChild(opt);
   }
 
   const chosen = state.compose.selectedIdentityID
     ? items.find((item) => String(item.identity_id) === state.compose.selectedIdentityID)
-    : items.find((item) => item.identity_is_default || item.account_is_default) || items[0];
+    : items.find((item) => item.is_default || item.identity_is_default || item.account_is_default || item.is_session) || items[0];
 
   if (chosen) {
     el.composeFromSelect.value = String(chosen.identity_id || "");
@@ -2526,6 +2621,167 @@ function renderComposeFromControls() {
   setComposeFromNote("");
   updateComposeFromRowVisibility();
   updateComposeFromFields();
+}
+
+function composeIdentityByID(identityID) {
+  const key = String(identityID || "").trim();
+  if (!key) return null;
+  return (Array.isArray(state.compose.identities) ? state.compose.identities : [])
+    .find((item) => String(item?.identity_id || "") === key) || null;
+}
+
+function composeSelectedIdentityItem() {
+  const items = Array.isArray(state.compose.identities) ? state.compose.identities : [];
+  if (items.length === 0) return null;
+  const selected = composeIdentityByID(state.compose.selectedIdentityID);
+  if (selected) return selected;
+  return items.find((item) => item.is_default || item.identity_is_default || item.account_is_default || item.is_session) || items[0] || null;
+}
+
+function composeIdentityCoreLabel(item) {
+  const displayName = String(item?.identity_display_name || "").trim();
+  const fromEmail = String(item?.from_email || "").trim();
+  if (displayName && fromEmail) return `${displayName} <${fromEmail}>`;
+  return fromEmail || displayName || "Sender";
+}
+
+function composeIdentitySourceLabel(item) {
+  if (!item) return "";
+  if (item.is_session) return "Session sender";
+  return String(item.account_display_name || item.account_login || "").trim();
+}
+
+function composeIdentityLabel(item) {
+  const core = composeIdentityCoreLabel(item);
+  const source = composeIdentitySourceLabel(item);
+  return source ? `${core} | ${source}` : core;
+}
+
+function composeIdentitySignatureHTML(item) {
+  if (!item || typeof item !== "object") return "";
+  return signatureEditorHTMLFromStored(item.signature_html, item.signature_text);
+}
+
+function composeSignatureHash(value) {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `sig-${(hash >>> 0).toString(16)}`;
+}
+
+function composeSignatureNode() {
+  return el.composeEditor?.querySelector('[data-compose-signature="true"]') || null;
+}
+
+function composeSignatureInnerHTMLForIdentity(item) {
+  const bodyHTML = String(composeIdentitySignatureHTML(item) || "").trim();
+  if (!bodyHTML) return "";
+  return `<p class="compose-signature-delimiter">-- </p><div class="compose-signature-body">${bodyHTML}</div>`;
+}
+
+function updateComposeSignatureNodeMetadata(node, identityItem) {
+  if (!node) return;
+  node.dataset.composeSignature = "true";
+  node.dataset.composeSignatureSource = String(identityItem?.identity_id || "");
+  node.dataset.composeSignatureHash = composeSignatureHash(String(node.innerHTML || "").trim());
+}
+
+function composeSignatureNodeUntouched(node) {
+  if (!node) return false;
+  const stored = String(node.dataset.composeSignatureHash || "").trim();
+  if (!stored) return false;
+  return stored === composeSignatureHash(String(node.innerHTML || "").trim());
+}
+
+function composeQuotedAnchorNode() {
+  return el.composeEditor?.querySelector("[data-compose-quoted]") || null;
+}
+
+function ensureComposeEditingLead() {
+  if (!el.composeEditor) return null;
+  const anchor = composeSignatureNode() || composeQuotedAnchorNode();
+  if (!anchor) return null;
+  let previous = anchor.previousElementSibling;
+  if (!previous || previous.hasAttribute("data-compose-signature") || previous.hasAttribute("data-compose-quoted")) {
+    const paragraph = document.createElement("p");
+    paragraph.innerHTML = "<br>";
+    el.composeEditor.insertBefore(paragraph, anchor);
+    previous = paragraph;
+  }
+  return previous;
+}
+
+function focusComposeEditorForComposeStart() {
+  if (!el.composeEditor) return;
+  const lead = ensureComposeEditingLead();
+  if (!lead) {
+    focusComposeEditorAtEnd();
+    return;
+  }
+  el.composeEditor.focus();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(lead);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertComposeSignatureNode(identityItem) {
+  if (!el.composeEditor) return null;
+  const innerHTML = composeSignatureInnerHTMLForIdentity(identityItem);
+  if (!innerHTML) return null;
+  const node = document.createElement("div");
+  node.className = "compose-signature-block";
+  node.innerHTML = innerHTML;
+  updateComposeSignatureNodeMetadata(node, identityItem);
+  const anchor = composeQuotedAnchorNode();
+  if (anchor) {
+    el.composeEditor.insertBefore(node, anchor);
+  } else {
+    el.composeEditor.appendChild(node);
+  }
+  return node;
+}
+
+function applyComposeIdentitySignature(identityItem, opts = {}) {
+  const replaceUntouched = opts.replaceUntouched === true;
+  const signatureNode = composeSignatureNode();
+  const nextInnerHTML = composeSignatureInnerHTMLForIdentity(identityItem);
+  if (!signatureNode) {
+    if (replaceUntouched || !nextInnerHTML) return null;
+    return insertComposeSignatureNode(identityItem);
+  }
+  if (!replaceUntouched) {
+    return signatureNode;
+  }
+  if (!composeSignatureNodeUntouched(signatureNode)) {
+    return signatureNode;
+  }
+  if (!nextInnerHTML) {
+    signatureNode.remove();
+    return null;
+  }
+  signatureNode.innerHTML = nextInnerHTML;
+  updateComposeSignatureNodeMetadata(signatureNode, identityItem);
+  return signatureNode;
+}
+
+function stripComposeSignatureMarkup(rawHTML) {
+  const root = document.createElement("div");
+  root.innerHTML = String(rawHTML || "");
+  for (const node of root.querySelectorAll('[data-compose-signature="true"]')) {
+    node.remove();
+  }
+  return {
+    html: String(root.innerHTML || "").trim(),
+    text: String(root.textContent || "").replace(/\u00a0/g, " ").trim(),
+    hasMedia: root.querySelector("img") !== null,
+  };
 }
 
 async function loadComposeIdentities() {
@@ -2549,6 +2805,7 @@ async function loadComposeIdentities() {
 function resetComposeDraftSession(options = {}) {
   const keepCrash = options.keepCrash === true;
   clearComposeDraftSaveTimer();
+  state.compose.draftSessionToken = Number(state.compose.draftSessionToken || 0) + 1;
   state.compose.submitInFlight = false;
   state.compose.draftID = "";
   state.compose.draftLoaded = false;
@@ -2687,6 +2944,7 @@ function applyComposePrefill(prefill = {}) {
   const bcc = String(prefill.bcc || "").trim();
   const subject = String(prefill.subject || "").trim();
   const bodyText = String(prefill.bodyText || "");
+  const bodyHTML = String(prefill.bodyHTML || "").trim();
 
   state.compose.recipients.to = [];
   state.compose.recipients.cc = [];
@@ -2705,9 +2963,13 @@ function applyComposePrefill(prefill = {}) {
   if (el.composeBccInput) el.composeBccInput.value = "";
   if (el.composeSubjectInput) el.composeSubjectInput.value = subject;
   if (el.composeEditor) {
-    const normalized = bodyText.replace(/\r\n/g, "\n");
-    const lines = normalized.split("\n");
-    el.composeEditor.innerHTML = lines.map((line) => `<p>${escapeHtml(line || "")}</p>`).join("");
+    if (bodyHTML) {
+      el.composeEditor.innerHTML = bodyHTML;
+    } else {
+      const normalized = bodyText.replace(/\r\n/g, "\n");
+      const lines = normalized.split("\n");
+      el.composeEditor.innerHTML = lines.map((line) => `<p>${escapeHtml(line || "")}</p>`).join("");
+    }
   }
 }
 
@@ -2749,6 +3011,8 @@ async function openComposeOverlay(trigger = null, opts = {}) {
   setComposeDraftState("Draft", "muted");
   if (el.composeEditor) el.composeEditor.innerHTML = "";
   await loadComposeIdentities();
+  let shouldAutoInsertSignature = false;
+  let preferComposeStartFocus = false;
   if (draftID) {
     const draft = await loadComposeDraftByID(draftID);
     applyComposeDraftPayload(draft, { normalizeDraftMedia: false });
@@ -2766,19 +3030,33 @@ async function openComposeOverlay(trigger = null, opts = {}) {
   } else if (prefill) {
     applyComposePrefill(prefill);
     state.compose.draftBaselineJSON = composeDraftPayloadJSON(composeCurrentDraftPayload());
+    shouldAutoInsertSignature = true;
+    preferComposeStartFocus = true;
   } else if (useDraft) {
     const restored = restoreComposeDraft(el.composeForm);
     state.compose.draftBaselineJSON = composeDraftPayloadJSON(restored ? {} : composeCurrentDraftPayload());
+    shouldAutoInsertSignature = !restored;
+    preferComposeStartFocus = !restored;
   } else {
     state.compose.draftBaselineJSON = composeDraftPayloadJSON(composeCurrentDraftPayload());
+    shouldAutoInsertSignature = true;
+    preferComposeStartFocus = true;
   }
   if (!draftID) {
     setComposeSendContext(sendContext.mode, sendContext.messageID);
+    if (shouldAutoInsertSignature) {
+      applyComposeIdentitySignature(composeSelectedIdentityItem(), { replaceUntouched: false });
+      state.compose.draftBaselineJSON = composeDraftPayloadJSON(composeCurrentDraftPayload());
+    }
   }
   applyComposeSendFailurePresentation();
   syncComposeDraftFields();
   updateComposeSubmitState();
-  focusComposeEditorAtEnd();
+  if (preferComposeStartFocus) {
+    focusComposeEditorForComposeStart();
+  } else {
+    focusComposeEditorAtEnd();
+  }
 }
 
 function closeComposeOverlay(options = true) {
@@ -2794,7 +3072,7 @@ function closeComposeOverlay(options = true) {
   state.ui.composeOpen = false;
   if (persistDraft) {
     writeComposeCrashBuffer(state.compose.draftID || "");
-    void flushComposeDraft({ immediate: true });
+    void flushComposeDraft({ immediate: true, allowWhileClosed: true });
   } else {
     clearComposeDraftSaveTimer();
   }
@@ -4753,18 +5031,20 @@ function renderToggleItem(opts = {}) {
 }
 
 function setActiveSettingsSection(name) {
-  const next = ["signin", "devices", "sessions"].includes(String(name || "")) ? String(name) : "signin";
+  const next = ["signin", "mail", "devices", "sessions"].includes(String(name || "")) ? String(name) : "signin";
   state.ui.activeSettingsSection = next;
   state.ui.settingsNav.domain = next;
   state.ui.settingsNav.page = "list";
   state.ui.settingsNav.detailId = "";
   const sections = {
     signin: el.settingsSectionSignIn,
+    mail: el.settingsSectionMail,
     devices: el.settingsSectionDevices,
     sessions: el.settingsSectionSessions,
   };
   const nav = {
     signin: el.settingsNavSignIn,
+    mail: el.settingsNavMail,
     devices: el.settingsNavDevices,
     sessions: el.settingsNavSessions,
   };
@@ -5109,6 +5389,357 @@ async function loadSessions() {
   }
 }
 
+function setMailSettingsNote(message = "", tone = "info") {
+  if (!el.settingsMailNote) return;
+  el.settingsMailNote.textContent = String(message || "").trim();
+  el.settingsMailNote.dataset.tone = tone;
+}
+
+function stripStoredSignatureText(raw) {
+  return String(raw || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/^-- \n/, "")
+    .replace(/^--\n/, "")
+    .replace(/^-- /, "")
+    .trim();
+}
+
+function signatureEditorHTMLFromStored(signatureHTML, signatureText) {
+  const html = String(signatureHTML || "").trim();
+  if (html) return html;
+  const body = stripStoredSignatureText(signatureText);
+  if (!body) return "";
+  return body
+    .split("\n")
+    .map((line) => `<p>${escapeHtml(line || "")}</p>`)
+    .join("");
+}
+
+function setRichEditorHTML(editor, rawHTML) {
+  if (!editor) return;
+  editor.innerHTML = String(rawHTML || "").trim();
+}
+
+function richEditorHTML(editor) {
+  return String(editor?.innerHTML || "").trim();
+}
+
+async function runRichEditorCommand(editor, command, trigger = null) {
+  if (!editor) return;
+  editor.focus();
+  if (command === "createLink") {
+    const url = String(await showPromptModal({
+      title: "Insert Link",
+      body: "Enter a URL to attach to selected signature text.",
+      label: "URL",
+      inputType: "url",
+      defaultValue: "https://",
+      confirmText: "Insert",
+      cancelText: "Cancel",
+      trigger,
+    }) || "").trim();
+    if (!url) return;
+    document.execCommand("createLink", false, url);
+    return;
+  }
+  document.execCommand(command, false, null);
+  if (command === "removeFormat") {
+    document.execCommand("unlink", false, null);
+  }
+}
+
+function bindRichEditorToolbar(toolbar, editor) {
+  if (!toolbar || !editor) return;
+  toolbar.addEventListener("mousedown", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-signature-command]") : null;
+    if (button) {
+      event.preventDefault();
+    }
+  });
+  toolbar.addEventListener("click", async (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-signature-command]") : null;
+    if (!button) return;
+    const command = String(button.getAttribute("data-signature-command") || "").trim();
+    if (!command) return;
+    await runRichEditorCommand(editor, command, button);
+  });
+}
+
+function selectedMailSettingsAccount() {
+  const id = String(state.settings.mail.selectedAccountID || "").trim();
+  return state.settings.mail.accounts.find((item) => String(item?.id || "") === id) || null;
+}
+
+function selectedMailSettingsIdentity() {
+  const id = String(state.settings.mail.selectedIdentityID || "").trim();
+  return state.settings.mail.identities.find((item) => String(item?.id || "") === id) || null;
+}
+
+function fillMailSettingsSessionForm(profile) {
+  const item = profile || {};
+  if (el.settingsMailSessionDisplayName) el.settingsMailSessionDisplayName.value = String(item.display_name || item.displayName || "").trim();
+  if (el.settingsMailSessionFromEmail) el.settingsMailSessionFromEmail.value = String(item.from_email || item.fromEmail || "").trim();
+  if (el.settingsMailSessionReplyTo) el.settingsMailSessionReplyTo.value = String(item.reply_to || item.replyTo || "").trim();
+  setRichEditorHTML(el.settingsMailSessionSignature, signatureEditorHTMLFromStored(item.signature_html, item.signature_text));
+}
+
+function fillMailSettingsAccountForm(account = null) {
+  if (!el.settingsMailAccountForm) return;
+  const item = account || {};
+  if (el.settingsMailAccountDisplayName) el.settingsMailAccountDisplayName.value = String(item.display_name || item.displayName || "").trim();
+  if (el.settingsMailAccountLogin) el.settingsMailAccountLogin.value = String(item.login || "").trim();
+  if (el.settingsMailAccountPassword) el.settingsMailAccountPassword.value = "";
+  if (el.settingsMailAccountDefault) el.settingsMailAccountDefault.checked = !!item.is_default;
+  if (el.settingsMailAccountIMAPHost) el.settingsMailAccountIMAPHost.value = String(item.imap_host || item.imapHost || "").trim();
+  if (el.settingsMailAccountIMAPPort) el.settingsMailAccountIMAPPort.value = String(item.imap_port || item.imapPort || "");
+  if (el.settingsMailAccountIMAPTLS) el.settingsMailAccountIMAPTLS.checked = item.imap_tls ?? item.imapTLS ?? true;
+  if (el.settingsMailAccountIMAPStartTLS) el.settingsMailAccountIMAPStartTLS.checked = item.imap_starttls ?? item.imapStartTLS ?? false;
+  if (el.settingsMailAccountSMTPHost) el.settingsMailAccountSMTPHost.value = String(item.smtp_host || item.smtpHost || "").trim();
+  if (el.settingsMailAccountSMTPPort) el.settingsMailAccountSMTPPort.value = String(item.smtp_port || item.smtpPort || "");
+  if (el.settingsMailAccountSMTPTLS) el.settingsMailAccountSMTPTLS.checked = item.smtp_tls ?? item.smtpTLS ?? false;
+  if (el.settingsMailAccountSMTPStartTLS) el.settingsMailAccountSMTPStartTLS.checked = item.smtp_starttls ?? item.smtpStartTLS ?? true;
+  if (el.btnSettingsMailAccountDelete) el.btnSettingsMailAccountDelete.disabled = !account;
+}
+
+function fillMailSettingsIdentityForm(identity = null) {
+  const item = identity || {};
+  const account = selectedMailSettingsAccount();
+  if (el.settingsMailIdentityDisplayName) el.settingsMailIdentityDisplayName.value = String(item.display_name || item.displayName || "").trim();
+  if (el.settingsMailIdentityFromEmail) {
+    const fallbackEmail = account ? String(account.login || "").trim() : "";
+    el.settingsMailIdentityFromEmail.value = String(item.from_email || item.fromEmail || fallbackEmail).trim();
+  }
+  if (el.settingsMailIdentityReplyTo) el.settingsMailIdentityReplyTo.value = String(item.reply_to || item.replyTo || "").trim();
+  if (el.settingsMailIdentityDefault) el.settingsMailIdentityDefault.checked = !!item.is_default;
+  setRichEditorHTML(el.settingsMailIdentitySignature, signatureEditorHTMLFromStored(item.signature_html, item.signature_text));
+  const disabled = !account;
+  if (el.settingsMailIdentityForm) {
+    el.settingsMailIdentityForm.classList.toggle("is-disabled", disabled);
+  }
+  if (el.btnSettingsMailIdentityNew) {
+    el.btnSettingsMailIdentityNew.disabled = disabled;
+  }
+  for (const node of el.settingsMailIdentityForm?.querySelectorAll("input, button, [contenteditable='true']") || []) {
+    if (node === el.btnSettingsMailIdentityNew) continue;
+    if (node instanceof HTMLInputElement || node instanceof HTMLButtonElement) {
+      if (node.id === "btn-settings-mail-identity-new") continue;
+      node.disabled = disabled;
+    } else if (node instanceof HTMLElement) {
+      node.setAttribute("contenteditable", disabled ? "false" : "true");
+    }
+  }
+  if (el.btnSettingsMailIdentityDelete) el.btnSettingsMailIdentityDelete.disabled = disabled || !identity;
+}
+
+function renderMailSettingsAccountList() {
+  if (!el.settingsMailAccountList) return;
+  const items = Array.isArray(state.settings.mail.accounts) ? state.settings.mail.accounts : [];
+  el.settingsMailAccountList.replaceChildren();
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "settings-list-empty";
+    empty.textContent = "No mail accounts configured.";
+    el.settingsMailAccountList.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const accountID = String(item.id || "");
+    const row = renderListItem({
+      active: accountID === state.settings.mail.selectedAccountID,
+      markerClass: item.is_default ? "status-chip status-chip--ok" : "status-chip status-chip--info",
+      markerText: item.is_default ? "Default" : "Account",
+      title: String(item.display_name || item.displayName || item.login || "Mail account"),
+      meta: [String(item.login || "").trim(), String(item.smtp_host || item.smtpHost || "").trim()].filter(Boolean).join(" | "),
+      onSelect: async () => {
+        state.settings.mail.selectedAccountID = accountID;
+        state.settings.mail.selectedIdentityID = "";
+        fillMailSettingsAccountForm(item);
+        await loadMailSettingsIdentities(accountID);
+      },
+    });
+    el.settingsMailAccountList.appendChild(row);
+  }
+}
+
+function renderMailSettingsIdentityList() {
+  if (!el.settingsMailIdentityList) return;
+  const account = selectedMailSettingsAccount();
+  const items = Array.isArray(state.settings.mail.identities) ? state.settings.mail.identities : [];
+  el.settingsMailIdentityList.replaceChildren();
+  if (!account) {
+    const empty = document.createElement("p");
+    empty.className = "settings-list-empty";
+    empty.textContent = "Select an account before creating identities.";
+    el.settingsMailIdentityList.appendChild(empty);
+    return;
+  }
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "settings-list-empty";
+    empty.textContent = "No identities configured for this account.";
+    el.settingsMailIdentityList.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const identityID = String(item.id || "");
+    const label = String(item.display_name || item.displayName || item.from_email || item.fromEmail || "Identity").trim();
+    const row = renderListItem({
+      active: identityID === state.settings.mail.selectedIdentityID,
+      markerClass: item.is_default ? "status-chip status-chip--ok" : "status-chip status-chip--info",
+      markerText: item.is_default ? "Default" : "Identity",
+      title: label,
+      meta: [String(item.from_email || item.fromEmail || "").trim(), String(item.reply_to || item.replyTo || "").trim()].filter(Boolean).join(" | "),
+      onSelect: () => {
+        state.settings.mail.selectedIdentityID = identityID;
+        fillMailSettingsIdentityForm(item);
+        renderMailSettingsIdentityList();
+      },
+    });
+    el.settingsMailIdentityList.appendChild(row);
+  }
+}
+
+async function loadMailSettingsIdentities(accountID) {
+  const nextAccountID = String(accountID || "").trim();
+  if (!nextAccountID) {
+    state.settings.mail.identities = [];
+    state.settings.mail.selectedIdentityID = "";
+    renderMailSettingsIdentityList();
+    fillMailSettingsIdentityForm(null);
+    return;
+  }
+  const payload = await api(`/api/v2/accounts/${encodeURIComponent(nextAccountID)}/identities`, { logErrors: false });
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  state.settings.mail.identities = items;
+  if (!items.some((item) => String(item.id || "") === state.settings.mail.selectedIdentityID)) {
+    state.settings.mail.selectedIdentityID = String(items[0]?.id || "");
+  }
+  renderMailSettingsIdentityList();
+  fillMailSettingsIdentityForm(selectedMailSettingsIdentity());
+}
+
+async function loadMailSettingsSection() {
+  const [sessionProfile, accountsPayload] = await Promise.all([
+    api("/api/v2/mail/session-profile", { logErrors: false }),
+    api("/api/v2/accounts", { logErrors: false }),
+  ]);
+  state.settings.mail.sessionProfile = sessionProfile || null;
+  state.settings.mail.accounts = Array.isArray(accountsPayload.items) ? accountsPayload.items : [];
+  if (!state.settings.mail.accounts.some((item) => String(item.id || "") === state.settings.mail.selectedAccountID)) {
+    state.settings.mail.selectedAccountID = String(state.settings.mail.accounts[0]?.id || "");
+  }
+  fillMailSettingsSessionForm(state.settings.mail.sessionProfile);
+  renderMailSettingsAccountList();
+  fillMailSettingsAccountForm(selectedMailSettingsAccount());
+  await loadMailSettingsIdentities(state.settings.mail.selectedAccountID);
+  setMailSettingsNote("Manage sender profiles, account routing, and signatures.", "info");
+}
+
+async function saveSessionMailSettings() {
+  const payload = await api("/api/v2/mail/session-profile", {
+    method: "PATCH",
+    json: {
+      display_name: String(el.settingsMailSessionDisplayName?.value || "").trim(),
+      reply_to: String(el.settingsMailSessionReplyTo?.value || "").trim(),
+      signature_html: richEditorHTML(el.settingsMailSessionSignature),
+    },
+    logErrors: false,
+  });
+  state.settings.mail.sessionProfile = payload || null;
+  fillMailSettingsSessionForm(state.settings.mail.sessionProfile);
+  setMailSettingsNote("Session sender saved.", "ok");
+}
+
+async function saveMailSettingsAccount() {
+  const payload = {
+    display_name: String(el.settingsMailAccountDisplayName?.value || "").trim(),
+    login: String(el.settingsMailAccountLogin?.value || "").trim(),
+    imap_host: String(el.settingsMailAccountIMAPHost?.value || "").trim(),
+    imap_port: Number.parseInt(String(el.settingsMailAccountIMAPPort?.value || "0"), 10) || 0,
+    imap_tls: !!el.settingsMailAccountIMAPTLS?.checked,
+    imap_starttls: !!el.settingsMailAccountIMAPStartTLS?.checked,
+    smtp_host: String(el.settingsMailAccountSMTPHost?.value || "").trim(),
+    smtp_port: Number.parseInt(String(el.settingsMailAccountSMTPPort?.value || "0"), 10) || 0,
+    smtp_tls: !!el.settingsMailAccountSMTPTLS?.checked,
+    smtp_starttls: !!el.settingsMailAccountSMTPStartTLS?.checked,
+    is_default: !!el.settingsMailAccountDefault?.checked,
+  };
+  const password = String(el.settingsMailAccountPassword?.value || "");
+  if (password.trim() !== "") payload.password = password;
+  const current = selectedMailSettingsAccount();
+  const saved = current
+    ? await api(`/api/v2/accounts/${encodeURIComponent(String(current.id || ""))}`, { method: "PATCH", json: payload, logErrors: false })
+    : await api("/api/v2/accounts", { method: "POST", json: { ...payload, password }, logErrors: false });
+  state.settings.mail.selectedAccountID = String(saved?.id || "");
+  state.settings.mail.selectedIdentityID = "";
+  await loadMailSettingsSection();
+  setMailSettingsNote(current ? "Mail account updated." : "Mail account created.", "ok");
+}
+
+async function deleteMailSettingsAccount() {
+  const current = selectedMailSettingsAccount();
+  if (!current) return;
+  const confirmed = await showConfirmModal({
+    title: "Delete mail account?",
+    body: "The account and its stored identities will be removed from this client.",
+    confirmText: "Delete",
+    cancelText: "Cancel",
+    trigger: el.btnSettingsMailAccountDelete,
+  });
+  if (!confirmed) return;
+  await api(`/api/v2/accounts/${encodeURIComponent(String(current.id || ""))}`, {
+    method: "DELETE",
+    json: {},
+    logErrors: false,
+  });
+  state.settings.mail.selectedAccountID = "";
+  state.settings.mail.selectedIdentityID = "";
+  await loadMailSettingsSection();
+  setMailSettingsNote("Mail account deleted.", "ok");
+}
+
+async function saveMailSettingsIdentity() {
+  const account = selectedMailSettingsAccount();
+  if (!account) {
+    throw new Error("Select an account before saving an identity.");
+  }
+  const payload = {
+    display_name: String(el.settingsMailIdentityDisplayName?.value || "").trim(),
+    from_email: String(el.settingsMailIdentityFromEmail?.value || "").trim(),
+    reply_to: String(el.settingsMailIdentityReplyTo?.value || "").trim(),
+    signature_html: richEditorHTML(el.settingsMailIdentitySignature),
+    is_default: !!el.settingsMailIdentityDefault?.checked,
+  };
+  const current = selectedMailSettingsIdentity();
+  const saved = current
+    ? await api(`/api/v2/identities/${encodeURIComponent(String(current.id || ""))}`, { method: "PATCH", json: payload, logErrors: false })
+    : await api(`/api/v2/accounts/${encodeURIComponent(String(account.id || ""))}/identities`, { method: "POST", json: payload, logErrors: false });
+  state.settings.mail.selectedIdentityID = String(saved?.id || "");
+  await loadMailSettingsSection();
+  setMailSettingsNote(current ? "Identity updated." : "Identity created.", "ok");
+}
+
+async function deleteMailSettingsIdentity() {
+  const current = selectedMailSettingsIdentity();
+  if (!current) return;
+  const confirmed = await showConfirmModal({
+    title: "Delete identity?",
+    body: "This sender identity will be removed from the selected account.",
+    confirmText: "Delete",
+    cancelText: "Cancel",
+    trigger: el.btnSettingsMailIdentityDelete,
+  });
+  if (!confirmed) return;
+  await api(`/api/v2/identities/${encodeURIComponent(String(current.id || ""))}`, {
+    method: "DELETE",
+    json: {},
+    logErrors: false,
+  });
+  state.settings.mail.selectedIdentityID = "";
+  await loadMailSettingsSection();
+  setMailSettingsNote("Identity deleted.", "ok");
+}
+
 function formatDateTimeOrNA(raw) {
   const value = String(raw || "").trim();
   if (!value) return "n/a";
@@ -5180,6 +5811,30 @@ function settingsSearchEntries() {
       target: { domain: "signin" },
     },
     {
+      label: "Mail",
+      subtitle: "Settings domain",
+      keywords: ["mail", "identities", "signature", "reply-to", "sender"],
+      target: { domain: "mail" },
+    },
+    {
+      label: "Session Sender",
+      subtitle: "Mail",
+      keywords: ["session sender", "display name", "reply-to", "signature"],
+      target: { domain: "mail" },
+    },
+    {
+      label: "Accounts",
+      subtitle: "Mail",
+      keywords: ["mail accounts", "imap", "smtp", "default account"],
+      target: { domain: "mail" },
+    },
+    {
+      label: "Identities",
+      subtitle: "Mail",
+      keywords: ["identities", "from email", "signature", "reply-to", "sender"],
+      target: { domain: "mail" },
+    },
+    {
       label: "Devices",
       subtitle: "Settings domain",
       keywords: ["settings", "trusted devices", "mfa"],
@@ -5204,6 +5859,48 @@ function settingsSearchEntries() {
       target: { domain: "sessions" },
     },
   ];
+  if (state.settings.mail.sessionProfile) {
+    entries.push({
+      label: String(state.settings.mail.sessionProfile.display_name || state.settings.mail.sessionProfile.from_email || "Session sender"),
+      subtitle: "Session sender",
+      keywords: [
+        "session sender",
+        String(state.settings.mail.sessionProfile.from_email || ""),
+        String(state.settings.mail.sessionProfile.reply_to || ""),
+      ],
+      target: { domain: "mail" },
+    });
+  }
+  for (const item of state.settings.mail.accounts) {
+    const id = String(item.id || "").trim();
+    if (!id) continue;
+    entries.push({
+      label: String(item.display_name || item.login || "Mail account"),
+      subtitle: "Mail account",
+      keywords: [
+        "mail account",
+        String(item.login || ""),
+        String(item.imap_host || ""),
+        String(item.smtp_host || ""),
+      ],
+      target: { domain: "mail", type: "mail-account", detailId: id },
+    });
+  }
+  for (const item of state.settings.mail.identities) {
+    const id = String(item.id || "").trim();
+    if (!id) continue;
+    entries.push({
+      label: String(item.display_name || item.from_email || "Identity"),
+      subtitle: "Sender identity",
+      keywords: [
+        "identity",
+        "sender",
+        String(item.from_email || ""),
+        String(item.reply_to || ""),
+      ],
+      target: { domain: "mail", type: "mail-identity", detailId: id, accountId: item.account_id || state.settings.mail.selectedAccountID || "" },
+    });
+  }
   for (const item of state.settings.passkeys.items) {
     const id = String(item.id || "").trim();
     if (!id) continue;
@@ -5320,6 +6017,10 @@ function adminSearchEntries() {
 }
 
 async function loadActiveSettingsSection() {
+  if (state.ui.activeSettingsSection === "mail") {
+    await loadMailSettingsSection();
+    return;
+  }
   if (state.ui.activeSettingsSection === "devices") {
     await loadTrustedDevices();
     return;
@@ -5343,6 +6044,21 @@ async function navigateSettingsTarget(target) {
     state.ui.settingsNav.page = "detail";
     state.ui.settingsNav.detailId = state.settings.passkeys.detailId;
     renderPasskeyCredentials(state.settings.passkeys.items);
+    return;
+  }
+  if (target.type === "mail-account") {
+    state.settings.mail.selectedAccountID = String(target.detailId || "");
+    fillMailSettingsAccountForm(selectedMailSettingsAccount());
+    await loadMailSettingsIdentities(state.settings.mail.selectedAccountID);
+    return;
+  }
+  if (target.type === "mail-identity") {
+    state.settings.mail.selectedAccountID = String(target.accountId || state.settings.mail.selectedAccountID || "");
+    fillMailSettingsAccountForm(selectedMailSettingsAccount());
+    await loadMailSettingsIdentities(state.settings.mail.selectedAccountID);
+    state.settings.mail.selectedIdentityID = String(target.detailId || "");
+    renderMailSettingsIdentityList();
+    fillMailSettingsIdentityForm(selectedMailSettingsIdentity());
     return;
   }
   if (target.type === "device") {
@@ -6609,9 +7325,8 @@ function composeSenderForSummary() {
     return composeResolvedManualSender();
   }
   if (state.compose.fromMode === "identity") {
-    const match = (Array.isArray(state.compose.identities) ? state.compose.identities : [])
-      .find((item) => String(item?.identity_id || "") === String(state.compose.selectedIdentityID || ""));
-    return String(match?.from_email || composeAuthEmailValue()).trim();
+    const match = composeSelectedIdentityItem();
+    return match ? composeIdentityCoreLabel(match) : composeAuthEmailValue();
   }
   return composeAuthEmailValue();
 }
@@ -6672,6 +7387,49 @@ function applyLocalMessagePatch(messageID, patch) {
   }
 }
 
+function applyMailSummaryRowStateClasses(row, item, options = {}) {
+  if (!row?.classList) return;
+  row.classList.toggle("is-unread", !item?.seen);
+  row.classList.toggle("is-flagged", !!item?.flagged);
+  row.classList.toggle("is-answered", !!item?.answered);
+  row.classList.toggle("is-draft", options.includeDraft === true && !!item?.isDraft);
+}
+
+function renderMailSummaryBody({
+  structPrefix,
+  senderClass,
+  dateClass,
+  subjectClass,
+  previewClass,
+  previewSepClass,
+  sender,
+  subject,
+  previewText,
+  dateText,
+  senderAfterHTML = "",
+  subjectAfterHTML = "",
+}) {
+  const preview = String(previewText || "").trim();
+  const subjectLabel = String(subject || "").trim() || "(no subject)";
+  const copyClasses = ["mail-row-copy", `${structPrefix}-copy`];
+  if (!preview) {
+    copyClasses.push("mail-row-copy--no-preview", `${structPrefix}-copy--no-preview`);
+  }
+  const previewLine = preview
+    ? `<span class="mail-row-previewline ${structPrefix}-previewline"><span class="${previewSepClass}" aria-hidden="true">—</span><span class="${previewClass}">${escapeHtml(preview)}</span></span>`
+    : "";
+  return `<span class="mail-row-main ${structPrefix}-main">
+    <span class="mail-row-top ${structPrefix}-top">
+      <span class="mail-row-fromline ${structPrefix}-fromline"><span class="${senderClass}">${escapeHtml(sender)}</span>${senderAfterHTML}</span>
+      <span class="${dateClass}">${escapeHtml(dateText)}</span>
+    </span>
+    <span class="${copyClasses.join(" ")}">
+      <span class="mail-row-subjectline ${structPrefix}-subjectline"><span class="${subjectClass}">${escapeHtml(subjectLabel)}</span>${subjectAfterHTML}</span>
+      ${previewLine}
+    </span>
+  </span>`;
+}
+
 function renderMessages(items) {
   el.messages.innerHTML = "";
   state.messages = Array.isArray(items) ? items : [];
@@ -6699,10 +7457,7 @@ function renderMessages(items) {
     li.className = "message-row";
     if (isActive) li.classList.add("active");
     if (checked) li.classList.add("is-selected");
-    if (!m.seen) li.classList.add("is-unread");
-    if (m.flagged) li.classList.add("is-flagged");
-    if (m.answered) li.classList.add("is-answered");
-    if (m.isDraft) li.classList.add("is-draft");
+    applyMailSummaryRowStateClasses(li, m, { includeDraft: true });
 
     const btn = document.createElement("button");
     btn.type = "button";
@@ -6719,12 +7474,19 @@ function renderMessages(items) {
       ? `<span class="message-context-badge">${escapeHtml(m.context_badge)}</span>`
       : "";
     btn.innerHTML = `<span class="message-mark" aria-hidden="true"></span>
-      <span class="message-from">${escapeHtml(sender)}</span>
-      <span class="message-content">
-        <span class="message-subject">${escapeHtml(m.subject || "(no subject)")}${contextBadge}</span>
-        ${previewText ? `<span class="message-preview-sep" aria-hidden="true">—</span><span class="message-preview">${escapeHtml(previewText)}</span>` : ""}
-      </span>
-      <span class="message-date">${escapeHtml(formatListDate(m.date))}</span>`;
+      ${renderMailSummaryBody({
+        structPrefix: "message-row",
+        senderClass: "message-from",
+        dateClass: "message-date",
+        subjectClass: "message-subject",
+        previewClass: "message-preview",
+        previewSepClass: "message-preview-sep",
+        sender,
+        subject: m.subject,
+        previewText,
+        dateText: formatListDate(m.date),
+        subjectAfterHTML: contextBadge,
+      })}`;
     const cancelLongPress = () => {
       if (state.mail.rowLongPressTimer) {
         window.clearTimeout(state.mail.rowLongPressTimer);
@@ -7099,9 +7861,7 @@ function renderThreadList() {
   for (const item of items) {
     const row = document.createElement("li");
     row.className = "thread-row";
-    if (!item?.seen) row.classList.add("is-unread");
-    if (item?.flagged) row.classList.add("is-flagged");
-    if (item?.answered) row.classList.add("is-answered");
+    applyMailSummaryRowStateClasses(row, item);
 
     const btn = document.createElement("button");
     btn.type = "button";
@@ -7117,14 +7877,19 @@ function renderThreadList() {
       ? `<span class="thread-row-mailbox">${escapeHtml(mailboxLabel)}</span>`
       : "";
     btn.innerHTML = `<span class="thread-row-mark" aria-hidden="true"></span>
-      <span class="thread-row-main">
-        <span class="thread-row-top">
-          <span class="thread-row-topline"><span class="thread-row-from">${escapeHtml(sender)}</span>${mailboxChip}</span>
-          <span class="thread-row-date">${escapeHtml(formatListDate(item?.date))}</span>
-        </span>
-        <span class="thread-row-subject">${escapeHtml(item?.subject || "(no subject)")}</span>
-        <span class="${previewClass}">${previewText ? escapeHtml(previewText) : "No preview available."}</span>
-      </span>`;
+      ${renderMailSummaryBody({
+        structPrefix: "thread-row",
+        senderClass: "thread-row-from",
+        dateClass: "thread-row-date",
+        subjectClass: "thread-row-subject",
+        previewClass,
+        previewSepClass: "thread-row-preview-sep",
+        sender,
+        subject: item?.subject,
+        previewText: previewText || "No preview available.",
+        dateText: formatListDate(item?.date),
+        senderAfterHTML: mailboxChip,
+      })}`;
     btn.addEventListener("click", () => {
       focusMailPane("reader");
       void openMessage(item.id, item).catch((err) => {
@@ -7395,11 +8160,26 @@ function quoteMessageBody(body) {
     .join("\n");
 }
 
+function composeParagraphHTMLFromText(value) {
+  const normalized = String(value || "").replace(/\r\n/g, "\n");
+  return normalized
+    .split("\n")
+    .map((line) => `<p>${escapeHtml(line || "")}</p>`)
+    .join("");
+}
+
 function buildReplyBodyPrefill(message) {
   const from = String(message?.from || "sender").trim() || "sender";
   const date = formatDate(message?.date) || "an earlier time";
   const body = quoteMessageBody(message?.body || "");
   return `\n\nOn ${date}, ${from} wrote:\n${body}`;
+}
+
+function buildReplyBodyPrefillHTML(message) {
+  const from = String(message?.from || "sender").trim() || "sender";
+  const date = formatDate(message?.date) || "an earlier time";
+  const bodyHTML = composeParagraphHTMLFromText(String(message?.body || ""));
+  return `<div class="compose-quoted-block" data-compose-quoted="reply"><p class="compose-quoted-lead">On ${escapeHtml(date)}, ${escapeHtml(from)} wrote:</p><blockquote>${bodyHTML}</blockquote></div>`;
 }
 
 function buildForwardBodyPrefill(message) {
@@ -7409,6 +8189,15 @@ function buildForwardBodyPrefill(message) {
   const date = formatDate(message?.date) || "-";
   const body = String(message?.body || "");
   return `----- Forwarded message -----\nFrom: ${from}\nDate: ${date}\nSubject: ${subject}\nTo: ${to}\n\n${body}`;
+}
+
+function buildForwardBodyPrefillHTML(message) {
+  const from = String(message?.from || "-").trim() || "-";
+  const to = Array.isArray(message?.to) ? message.to.join(", ") : "-";
+  const subject = String(message?.subject || "(no subject)");
+  const date = formatDate(message?.date) || "-";
+  const bodyHTML = composeParagraphHTMLFromText(String(message?.body || ""));
+  return `<div class="compose-quoted-block" data-compose-quoted="forward"><p class="compose-quoted-lead">----- Forwarded message -----</p><div class="compose-quoted-meta"><p><strong>From:</strong> ${escapeHtml(from)}</p><p><strong>Date:</strong> ${escapeHtml(date)}</p><p><strong>Subject:</strong> ${escapeHtml(subject)}</p><p><strong>To:</strong> ${escapeHtml(to)}</p></div><blockquote>${bodyHTML}</blockquote></div>`;
 }
 
 function pluralizeMessages(count) {
@@ -7498,6 +8287,7 @@ async function openReplyCompose() {
       to: target,
       subject: withPrefixSubject("Re", message.subject),
       bodyText: buildReplyBodyPrefill(message),
+      bodyHTML: buildReplyBodyPrefillHTML(message),
     },
   });
 }
@@ -7512,6 +8302,7 @@ async function openForwardCompose() {
     prefill: {
       subject: withPrefixSubject("Fwd", message.subject),
       bodyText: buildForwardBodyPrefill(message),
+      bodyHTML: buildForwardBodyPrefillHTML(message),
     },
   });
 }
@@ -7639,9 +8430,17 @@ async function sendCompose(form) {
 }
 
 async function discardComposeDraft() {
+  const sessionToken = Number(state.compose.draftSessionToken || 0);
+  clearComposeDraftSaveTimer();
+  if (state.compose.draftSavePromise && Number(state.compose.draftSaveSessionToken || 0) === sessionToken) {
+    try {
+      await state.compose.draftSavePromise;
+    } catch {
+      // Ignore save failures here; discard should still clear the compose session.
+    }
+  }
   const draftID = String(state.compose.draftID || "").trim();
   const hadContent = !!draftID || composeHasLiveMedia() || composeDraftHasMeaningfulContent(composeCurrentDraftPayload());
-  clearComposeDraftSaveTimer();
   if (draftID) {
     await api(`/api/v2/drafts/${encodeURIComponent(draftID)}`, {
       method: "DELETE",
@@ -9337,6 +10136,12 @@ function bindUI() {
       await loadCurrentSettingsSection();
     };
   }
+  if (el.settingsNavMail) {
+    el.settingsNavMail.onclick = async () => {
+      setActiveSettingsSection("mail");
+      await loadCurrentSettingsSection();
+    };
+  }
   if (el.settingsNavDevices) {
     el.settingsNavDevices.onclick = async () => {
       setActiveSettingsSection("devices");
@@ -9745,6 +10550,76 @@ function bindUI() {
       setStatus("Sessions refreshed.", "ok");
     });
   }
+  bindRichEditorToolbar(el.settingsMailSessionToolbar, el.settingsMailSessionSignature);
+  bindRichEditorToolbar(el.settingsMailIdentityToolbar, el.settingsMailIdentitySignature);
+  if (el.btnSettingsMailSessionSave) {
+    el.btnSettingsMailSessionSave.addEventListener("click", async () => {
+      try {
+        await saveSessionMailSettings();
+      } catch (err) {
+        setMailSettingsNote(formatAPIError(err, "Failed to save session sender."), "error");
+      }
+    });
+  }
+  if (el.btnSettingsMailAccountNew) {
+    el.btnSettingsMailAccountNew.addEventListener("click", () => {
+      state.settings.mail.selectedAccountID = "";
+      state.settings.mail.selectedIdentityID = "";
+      fillMailSettingsAccountForm(null);
+      state.settings.mail.identities = [];
+      renderMailSettingsIdentityList();
+      fillMailSettingsIdentityForm(null);
+      setMailSettingsNote("Create a new mail account.", "info");
+    });
+  }
+  if (el.btnSettingsMailAccountSave) {
+    el.btnSettingsMailAccountSave.addEventListener("click", async () => {
+      try {
+        await saveMailSettingsAccount();
+      } catch (err) {
+        setMailSettingsNote(formatAPIError(err, "Failed to save mail account."), "error");
+      }
+    });
+  }
+  if (el.btnSettingsMailAccountDelete) {
+    el.btnSettingsMailAccountDelete.addEventListener("click", async () => {
+      try {
+        await deleteMailSettingsAccount();
+      } catch (err) {
+        setMailSettingsNote(formatAPIError(err, "Failed to delete mail account."), "error");
+      }
+    });
+  }
+  if (el.btnSettingsMailIdentityNew) {
+    el.btnSettingsMailIdentityNew.addEventListener("click", () => {
+      const account = selectedMailSettingsAccount();
+      if (!account) {
+        setMailSettingsNote("Select an account before creating an identity.", "warn");
+        return;
+      }
+      state.settings.mail.selectedIdentityID = "";
+      fillMailSettingsIdentityForm(null);
+      setMailSettingsNote("Create a new sender identity.", "info");
+    });
+  }
+  if (el.btnSettingsMailIdentitySave) {
+    el.btnSettingsMailIdentitySave.addEventListener("click", async () => {
+      try {
+        await saveMailSettingsIdentity();
+      } catch (err) {
+        setMailSettingsNote(formatAPIError(err, "Failed to save identity."), "error");
+      }
+    });
+  }
+  if (el.btnSettingsMailIdentityDelete) {
+    el.btnSettingsMailIdentityDelete.addEventListener("click", async () => {
+      try {
+        await deleteMailSettingsIdentity();
+      } catch (err) {
+        setMailSettingsNote(formatAPIError(err, "Failed to delete identity."), "error");
+      }
+    });
+  }
 
   document.getElementById("form-reset-request").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -10094,6 +10969,8 @@ function bindUI() {
       state.compose.selectedAccountID = String(selectedOption?.dataset.accountId || "");
       setComposeFromMode("identity");
       setComposeFromNote("");
+      applyComposeIdentitySignature(composeSelectedIdentityItem(), { replaceUntouched: true });
+      syncComposeDraftFields();
       queueComposeDraftSave();
       updateComposeSubmitState();
     });
@@ -10328,6 +11205,7 @@ function bindUI() {
       try {
         await Promise.all([
           loadPasskeyCredentials(),
+          loadMailSettingsSection(),
           loadTrustedDevices(),
           loadSessions(),
         ]);
