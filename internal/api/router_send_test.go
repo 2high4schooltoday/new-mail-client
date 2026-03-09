@@ -36,10 +36,18 @@ type sendTestDespatch struct {
 	capturedUser string
 	messageByID  map[string]mail.Message
 	patches      map[string]mail.FlagPatch
+	mailboxes    []mail.Mailbox
 }
 
 func (m *sendTestDespatch) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
+	if len(m.mailboxes) > 0 {
+		return append([]mail.Mailbox(nil), m.mailboxes...), nil
+	}
 	return []mail.Mailbox{{Name: "INBOX", Messages: 1}}, nil
+}
+
+func (m *sendTestDespatch) CreateMailbox(ctx context.Context, user, pass, mailbox string) error {
+	return nil
 }
 
 func (m *sendTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
@@ -174,6 +182,15 @@ func newSendRouter(t *testing.T, despatch mail.Client, mailLogin string) http.Ha
 	t.Helper()
 	router, _, _ := newSendRouterWithStore(t, despatch, mailLogin)
 	return router
+}
+
+func withMailClientFactory(t *testing.T, factory func(config.Config) mail.Client) {
+	t.Helper()
+	previous := mailClientFactory
+	mailClientFactory = factory
+	t.Cleanup(func() {
+		mailClientFactory = previous
+	})
 }
 
 func loginForSend(t *testing.T, router http.Handler) (*http.Cookie, *http.Cookie) {
@@ -564,6 +581,199 @@ func TestSendIdentityModeUsesAccountIdentity(t *testing.T) {
 	}
 	if authUser != "mailbox@example.com" {
 		t.Fatalf("expected smtp auth to use mailbox login, got %q", authUser)
+	}
+}
+
+func TestSendUsesConfiguredSentMailboxMapping(t *testing.T) {
+	despatch := &sendTestDespatch{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox"},
+			{Name: "Sent", Role: "sent"},
+			{Name: "Custom Sent"},
+		},
+	}
+	router, st, _ := newSendRouterWithStore(t, despatch, "account@example.com")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	adminUser, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	if err := st.UpsertSpecialMailboxMapping(context.Background(), adminUser.ID, "account@example.com", "sent", "Custom Sent"); err != nil {
+		t.Fatalf("upsert sent mapping: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"to":      []string{"alice@example.com"},
+		"subject": "mapped sent",
+		"body":    "body",
+	})
+	rec := postSendJSON(t, router, sessionCookie, csrfCookie, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, req := despatch.snapshot()
+	if req.SentMailbox != "Custom Sent" {
+		t.Fatalf("expected sent mailbox override Custom Sent, got %q", req.SentMailbox)
+	}
+}
+
+func TestSendFallsBackToDetectedSentMailboxWhenNoMappingExists(t *testing.T) {
+	despatch := &sendTestDespatch{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox"},
+			{Name: "Sent Items", Role: "sent"},
+		},
+	}
+	router := newSendRouter(t, despatch, "account@example.com")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	body, _ := json.Marshal(map[string]any{
+		"to":      []string{"alice@example.com"},
+		"subject": "fallback sent",
+		"body":    "body",
+	})
+	rec := postSendJSON(t, router, sessionCookie, csrfCookie, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, req := despatch.snapshot()
+	if req.SentMailbox != "Sent Items" {
+		t.Fatalf("expected detected sent mailbox Sent Items, got %q", req.SentMailbox)
+	}
+}
+
+func TestSendAccountUsesMailboxMappingForSentCopy(t *testing.T) {
+	accountClient := &sendTestDespatch{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox"},
+			{Name: "Sent Items", Role: "sent"},
+			{Name: "Team Sent"},
+		},
+	}
+	withMailClientFactory(t, func(cfg config.Config) mail.Client {
+		return accountClient
+	})
+	router, st, cfg := newSendRouterWithStore(t, &sendTestDespatch{}, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	adminUser, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	secretEnc, err := util.EncryptString(util.Derive32ByteKey(cfg.SessionEncryptKey), "mailbox-secret")
+	if err != nil {
+		t.Fatalf("encrypt secret: %v", err)
+	}
+	account, err := st.CreateMailAccount(context.Background(), models.MailAccount{
+		ID:           "acct-mapped-sent",
+		UserID:       adminUser.ID,
+		DisplayName:  "Primary",
+		Login:        "mailbox@example.com",
+		SecretEnc:    secretEnc,
+		IMAPHost:     "imap.example.com",
+		IMAPPort:     993,
+		IMAPTLS:      true,
+		IMAPStartTLS: false,
+		SMTPHost:     "smtp.example.com",
+		SMTPPort:     587,
+		SMTPTLS:      false,
+		SMTPStartTLS: true,
+		IsDefault:    true,
+		Status:       "active",
+	})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if _, err := st.UpsertMailboxMapping(context.Background(), models.MailboxMapping{
+		ID:          "map-sent",
+		AccountID:   account.ID,
+		Role:        "sent",
+		MailboxName: "Team Sent",
+		Source:      "user",
+		Priority:    10,
+	}); err != nil {
+		t.Fatalf("upsert mailbox mapping: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"to":         []string{"alice@example.com"},
+		"subject":    "account sent mapping",
+		"body":       "body",
+		"account_id": account.ID,
+	})
+	rec := postSendJSON(t, router, sessionCookie, csrfCookie, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	user, req := accountClient.snapshot()
+	if user != "mailbox@example.com" {
+		t.Fatalf("expected account client login mailbox@example.com, got %q", user)
+	}
+	if req.SentMailbox != "Team Sent" {
+		t.Fatalf("expected account sent mailbox override Team Sent, got %q", req.SentMailbox)
+	}
+}
+
+func TestSendAccountFallsBackToDetectedSentMailbox(t *testing.T) {
+	accountClient := &sendTestDespatch{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox"},
+			{Name: "Sent Items", Role: "sent"},
+		},
+	}
+	withMailClientFactory(t, func(cfg config.Config) mail.Client {
+		return accountClient
+	})
+	router, st, cfg := newSendRouterWithStore(t, &sendTestDespatch{}, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	adminUser, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	secretEnc, err := util.EncryptString(util.Derive32ByteKey(cfg.SessionEncryptKey), "mailbox-secret")
+	if err != nil {
+		t.Fatalf("encrypt secret: %v", err)
+	}
+	account, err := st.CreateMailAccount(context.Background(), models.MailAccount{
+		ID:           "acct-fallback-sent",
+		UserID:       adminUser.ID,
+		DisplayName:  "Primary",
+		Login:        "mailbox@example.com",
+		SecretEnc:    secretEnc,
+		IMAPHost:     "imap.example.com",
+		IMAPPort:     993,
+		IMAPTLS:      true,
+		IMAPStartTLS: false,
+		SMTPHost:     "smtp.example.com",
+		SMTPPort:     587,
+		SMTPTLS:      false,
+		SMTPStartTLS: true,
+		IsDefault:    true,
+		Status:       "active",
+	})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"to":         []string{"alice@example.com"},
+		"subject":    "account sent fallback",
+		"body":       "body",
+		"account_id": account.ID,
+	})
+	rec := postSendJSON(t, router, sessionCookie, csrfCookie, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, req := accountClient.snapshot()
+	if req.SentMailbox != "Sent Items" {
+		t.Fatalf("expected detected sent mailbox Sent Items, got %q", req.SentMailbox)
 	}
 }
 

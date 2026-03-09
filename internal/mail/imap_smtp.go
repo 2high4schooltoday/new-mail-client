@@ -52,6 +52,19 @@ func (c *IMAPSMTPClient) ListMailboxes(ctx context.Context, user, pass string) (
 	return c.listMailboxesWithClient(cli, true)
 }
 
+func (c *IMAPSMTPClient) CreateMailbox(ctx context.Context, user, pass, mailbox string) error {
+	name := strings.TrimSpace(mailbox)
+	if name == "" {
+		return fmt.Errorf("mailbox name is required")
+	}
+	cli, err := c.connectIMAP(ctx, user, pass)
+	if err != nil {
+		return err
+	}
+	defer cli.Logout()
+	return cli.Create(name)
+}
+
 func (c *IMAPSMTPClient) listMailboxesWithClient(cli *imapclient.Client, withStatus bool) ([]Mailbox, error) {
 	ch := make(chan *imap.MailboxInfo, 32)
 	done := make(chan error, 1)
@@ -307,7 +320,7 @@ func (c *IMAPSMTPClient) Send(ctx context.Context, user, pass string, req SendRe
 	if err := c.sendWithSenderFallback(ctx, user, pass, req, msg, c.sendSMTP); err != nil {
 		return SendResult{}, err
 	}
-	return c.appendSentCopy(ctx, user, pass, msg)
+	return c.appendSentCopy(ctx, user, pass, msg, req.SentMailbox)
 }
 
 func (c *IMAPSMTPClient) sendWithSenderFallback(
@@ -347,7 +360,7 @@ func (c *IMAPSMTPClient) sendWithSenderFallback(
 	return WrapSMTPSenderRejected(err)
 }
 
-func (c *IMAPSMTPClient) appendSentCopy(ctx context.Context, user, pass string, raw []byte) (SendResult, error) {
+func (c *IMAPSMTPClient) appendSentCopy(ctx context.Context, user, pass string, raw []byte, preferredMailbox string) (SendResult, error) {
 	cli, err := c.connectIMAP(ctx, user, pass)
 	if err != nil {
 		return SendResult{SavedCopy: false, Warning: fmt.Sprintf("Message sent, but a Sent copy could not be saved: %v", err)}, nil
@@ -358,7 +371,20 @@ func (c *IMAPSMTPClient) appendSentCopy(ctx context.Context, user, pass string, 
 	if err != nil {
 		return SendResult{SavedCopy: false, Warning: fmt.Sprintf("Message sent, but a Sent copy could not be saved: %v", err)}, nil
 	}
-	sentMailbox := ResolveMailboxByRole(mailboxes, "sent")
+	sentMailbox := strings.TrimSpace(preferredMailbox)
+	if sentMailbox != "" {
+		matched := ""
+		for _, mailbox := range mailboxes {
+			if strings.EqualFold(strings.TrimSpace(mailbox.Name), sentMailbox) {
+				matched = strings.TrimSpace(mailbox.Name)
+				break
+			}
+		}
+		sentMailbox = matched
+	}
+	if sentMailbox == "" {
+		sentMailbox = ResolveMailboxByRole(mailboxes, "sent")
+	}
 	if sentMailbox == "" {
 		return SendResult{SavedCopy: false, Warning: "Message sent, but no Sent mailbox could be found to save a copy."}, nil
 	}
@@ -1089,6 +1115,12 @@ func buildMessageSummary(msg *imap.Message, mailbox, from, subject string, date 
 			if raw, err := io.ReadAll(io.LimitReader(body, int64(previewSampleBytes*2))); err == nil {
 				preview = BuildPreviewFromMIMERawSample(raw, DefaultPreviewMaxChars)
 			}
+		}
+	}
+	if strings.TrimSpace(preview) == "" {
+		preview = BuildPreviewFromBodySample(subject, 96)
+		if strings.TrimSpace(preview) == "" {
+			preview = "Message content unavailable."
 		}
 	}
 	return MessageSummary{

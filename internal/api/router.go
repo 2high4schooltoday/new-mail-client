@@ -46,6 +46,10 @@ type Handlers struct {
 	resetKey        []byte
 }
 
+var mailClientFactory = func(cfg config.Config) mail.Client {
+	return mail.NewIMAPSMTPClient(cfg)
+}
+
 const (
 	maxUploadAttachmentBytes    = 25 << 20
 	maxUploadTotalBytes         = 35 << 20
@@ -170,6 +174,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
 				r.Get("/mailboxes", h.ListMailboxes)
+				r.Get("/mailboxes/special", h.ListSpecialMailboxes)
 				r.Get("/messages", h.ListMessages)
 				r.Get("/messages/{id}", h.GetMessage)
 				r.Get("/messages/{id}/remote-image", h.GetMessageRemoteImage)
@@ -186,6 +191,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.With(middleware.RateLimit(h.limiter, "send", 30, time.Minute, h.cfg.TrustProxy)).Post("/messages/{id}/forward", h.ForwardMessage)
 					r.Post("/messages/{id}/flags", h.SetMessageFlags)
 					r.Post("/messages/{id}/move", h.MoveMessage)
+					r.Post("/mailboxes/special/{role}", h.UpsertSpecialMailbox)
 				})
 
 				r.Route("/admin", func(r chi.Router) {
@@ -829,16 +835,13 @@ func (h *Handlers) MeUpdateRecoveryEmail(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handlers) ListMailboxes(w http.ResponseWriter, r *http.Request) {
-	u, _ := middleware.User(r.Context())
-	pass, err := h.sessionMailPassword(r)
+	items, _, _, _, err := h.listMailboxesWithSpecialRoles(r)
 	if err != nil {
-		h.writeMailAuthError(w, r, err)
-		return
-	}
-	mailLogin := service.MailIdentity(u)
-	items, err := h.svc.Mail().ListMailboxes(r.Context(), mailLogin, pass)
-	if err != nil {
-		util.WriteError(w, 502, "imap_error", err.Error(), middleware.RequestID(r.Context()))
+		if isSessionMailAuthError(err) {
+			h.writeMailAuthError(w, r, err)
+			return
+		}
+		util.WriteError(w, 500, "special_mailboxes_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
 	util.WriteJSON(w, 200, items)
@@ -986,9 +989,13 @@ func (h *Handlers) ListThreadMessages(w http.ResponseWriter, r *http.Request) {
 	mailLogin := service.MailIdentity(u)
 	scanMailboxes := []string{mailbox}
 	if scope == "conversation" {
-		available, listErr := h.svc.Mail().ListMailboxes(r.Context(), mailLogin, pass)
+		available, _, _, _, listErr := h.listMailboxesWithSpecialRoles(r)
 		if listErr != nil {
-			util.WriteError(w, 502, "imap_error", listErr.Error(), middleware.RequestID(r.Context()))
+			if isSessionMailAuthError(listErr) {
+				h.writeMailAuthError(w, r, listErr)
+				return
+			}
+			util.WriteError(w, 500, "special_mailboxes_failed", listErr.Error(), middleware.RequestID(r.Context()))
 			return
 		}
 		scanMailboxes = threadConversationScanMailboxes(mailbox, available)
@@ -1067,7 +1074,7 @@ finish:
 }
 
 func threadConversationScanMailboxes(current string, available []mail.Mailbox) []string {
-	out := make([]string, 0, 4)
+	out := make([]string, 0, len(available)+1)
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		clean := strings.TrimSpace(name)
@@ -1081,11 +1088,40 @@ func threadConversationScanMailboxes(current string, available []mail.Mailbox) [
 		seen[key] = struct{}{}
 		out = append(out, clean)
 	}
+	roleOf := func(mb mail.Mailbox) string {
+		role := strings.ToLower(strings.TrimSpace(mb.Role))
+		if role != "" {
+			return role
+		}
+		return mail.MailboxRole(mb.Name, nil)
+	}
 
-	add(current)
+	currentRole := ""
+	for _, mb := range available {
+		if strings.EqualFold(strings.TrimSpace(mb.Name), current) {
+			currentRole = roleOf(mb)
+			break
+		}
+	}
+	if currentRole != "drafts" {
+		add(current)
+	}
 	for _, role := range []string{"inbox", "sent", "archive"} {
 		if resolved := mail.ResolveMailboxByRole(available, role); resolved != "" {
 			add(resolved)
+		}
+	}
+	for _, mb := range available {
+		role := roleOf(mb)
+		if role == "drafts" || role == "trash" || role == "junk" {
+			continue
+		}
+		add(mb.Name)
+	}
+	for _, mb := range available {
+		role := roleOf(mb)
+		if role == "trash" || role == "junk" {
+			add(mb.Name)
 		}
 	}
 	if len(out) == 0 {
@@ -1250,19 +1286,7 @@ func (h *Handlers) handleSend(w http.ResponseWriter, r *http.Request, inReply st
 	}
 
 	var sendResult mail.SendResult
-	if sendAccountID != "" {
-		sendResult, err = h.v2SendWithAccount(r.Context(), u, sendAccountID, req)
-	} else {
-		if sessionPass == "" {
-			pass, passErr := h.sessionMailPassword(r)
-			if passErr != nil {
-				h.writeMailAuthError(w, r, passErr)
-				return
-			}
-			sessionPass = pass
-		}
-		sendResult, err = h.svc.Mail().Send(r.Context(), mailLogin, sessionPass, req)
-	}
+	sendResult, err = h.v2SendWithAccount(r.Context(), u, sendAccountID, req)
 	if err != nil {
 		if errors.Is(err, mail.ErrSMTPSenderRejected) {
 			util.WriteError(w, 422, "smtp_sender_rejected", err.Error(), middleware.RequestID(r.Context()))

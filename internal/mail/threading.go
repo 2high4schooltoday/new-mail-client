@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"html"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -18,8 +19,14 @@ const (
 )
 
 var (
-	threadPrefixPattern   = regexp.MustCompile(`(?i)^(re|fw|fwd)\s*:\s*`)
-	previewHTMLTagPattern = regexp.MustCompile(`<[^>]+>`)
+	threadPrefixPattern      = regexp.MustCompile(`(?i)^(re|fw|fwd)\s*:\s*`)
+	previewHTMLTagPattern    = regexp.MustCompile(`(?is)<[^>]+>`)
+	previewHTMLNoisePattern  = regexp.MustCompile(`(?is)<(?:style|script|head|svg|noscript)[^>]*>.*?</(?:style|script|head|svg|noscript)>`)
+	previewHeaderLinePattern = regexp.MustCompile(`(?im)^(?:content-[\w-]+|mime-version|content-transfer-encoding|return-path|dkim-signature|received|authentication-results|x-[\w-]+)\s*:[^\n]*$`)
+	previewCSSRulePattern    = regexp.MustCompile(`(?is)(?:^|[\s;])(?:@[\w-]+\s+)?[#.\w\[\]\-:,\s>+*()]+\{[^{}]{0,400}\}`)
+	previewURLPattern        = regexp.MustCompile(`https?://[^\s<>"']+`)
+	previewBase64Token       = regexp.MustCompile(`(?i)^[a-z0-9+/=_-]{24,}$`)
+	previewHexToken          = regexp.MustCompile(`(?i)^[a-f0-9]{24,}$`)
 )
 
 // NormalizeThreadSubject strips repeated reply/forward prefixes and lowercases
@@ -58,11 +65,26 @@ func BuildPreviewFromBodySample(sample string, max int) string {
 		max = DefaultPreviewMaxChars
 	}
 	clean := strings.ReplaceAll(sample, "\x00", " ")
+	clean = previewHTMLNoisePattern.ReplaceAllString(clean, " ")
 	clean = html.UnescapeString(clean)
+	clean = previewHeaderLinePattern.ReplaceAllString(clean, " ")
+	clean = previewCSSRulePattern.ReplaceAllString(clean, " ")
 	if strings.Contains(clean, "<") && strings.Contains(clean, ">") {
 		clean = previewHTMLTagPattern.ReplaceAllString(clean, " ")
 	}
+	clean = previewURLPattern.ReplaceAllStringFunc(clean, func(raw string) string {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return " "
+		}
+		host := strings.TrimSpace(parsed.Hostname())
+		if host == "" {
+			return " "
+		}
+		return " "
+	})
 	compact := strings.Join(strings.Fields(clean), " ")
+	compact = filterPreviewNoiseTokens(compact)
 	if compact == "" {
 		return ""
 	}
@@ -71,6 +93,58 @@ func BuildPreviewFromBodySample(sample string, max int) string {
 		return compact
 	}
 	return strings.TrimSpace(string(runes[:max]))
+}
+
+func filterPreviewNoiseTokens(input string) string {
+	if strings.TrimSpace(input) == "" {
+		return ""
+	}
+	parts := strings.Fields(input)
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		token := strings.TrimSpace(part)
+		if token == "" {
+			continue
+		}
+		trimmed := strings.Trim(token, "[](){}<>,;:\"'")
+		lower := strings.ToLower(trimmed)
+		switch {
+		case trimmed == "":
+			continue
+		case strings.ContainsAny(trimmed, "{}"):
+			continue
+		case strings.Contains(lower, "border-collapse") || strings.Contains(lower, "font-family") || strings.Contains(lower, "cellpadding") || strings.Contains(lower, "cellspacing"):
+			continue
+		case previewBase64Token.MatchString(trimmed):
+			continue
+		case previewHexToken.MatchString(trimmed):
+			continue
+		case len(trimmed) >= 48 && machinePreviewToken(trimmed):
+			continue
+		}
+		filtered = append(filtered, token)
+	}
+	return strings.Join(filtered, " ")
+}
+
+func machinePreviewToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	machineChars := 0
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z':
+			machineChars++
+		case r >= 'A' && r <= 'Z':
+			machineChars++
+		case r >= '0' && r <= '9':
+			machineChars++
+		case r == '+' || r == '/' || r == '=' || r == '_' || r == '-':
+			machineChars++
+		}
+	}
+	return machineChars*100/len([]rune(token)) >= 92
 }
 
 // BuildPreviewFromMIMERawSample creates a robust snippet from a sampled RFC822

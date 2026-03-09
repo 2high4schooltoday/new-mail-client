@@ -1035,6 +1035,11 @@ a:focus-visible {
   border-left: var(--border-w) solid var(--line-2);
 }
 
+.mail-commandbar-group--selection {
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .mail-commandbar .cmd-btn {
   border-color: var(--line-2);
 }
@@ -1081,7 +1086,7 @@ a:focus-visible {
 }
 
 .mail-pane--messages {
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto 1fr;
 }
 
 .mail-pane--reader {
@@ -1116,15 +1121,10 @@ a:focus-visible {
   min-height: 0;
 }
 
-.mail-bulk-bar {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: var(--border-w) solid var(--line-2);
-  background: color-mix(in srgb, var(--bg-1) 84%, transparent);
-}
-
 .mail-selection-count {
-  color: var(--fg-muted);
-  font-size: 0.76rem;
+  color: var(--fg-1);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
 }
 
 .mailbox-section {
@@ -1184,70 +1184,40 @@ a:focus-visible {
 
 .message-row-btn {
   width: 100%;
-  min-height: 74px;
+  min-height: 48px;
   border: 0;
   background: transparent;
   color: inherit;
   font: inherit;
   display: grid;
-  grid-template-columns: 10px minmax(0, 1fr) auto;
-  grid-template-areas:
-    "mark from date"
-    "mark subject date"
-    "mark preview date";
-  align-items: baseline;
-  column-gap: var(--space-2);
-  row-gap: 3px;
+  grid-template-columns: 12px minmax(140px, 186px) minmax(0, 1fr) 72px;
+  align-items: center;
+  column-gap: 10px;
   text-align: left;
-  padding: 10px var(--space-3);
+  padding: 0 var(--space-3);
   cursor: pointer;
   border-left: var(--border-w) solid transparent;
 }
 
 .message-row {
-  margin: 5px 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: stretch;
-}
-
-.message-row-select {
-  display: grid;
-  place-items: center;
-  padding: 0 0 0 var(--space-2);
-}
-
-.message-row-check {
-  width: 14px;
-  height: 14px;
   margin: 0;
+  border-bottom: var(--border-w) solid color-mix(in srgb, var(--line-2) 72%, transparent);
 }
 
 .message-mark {
-  grid-area: mark;
   width: 6px;
   height: 6px;
-  border: var(--border-w) solid var(--line-1);
-  margin-top: 8px;
-  align-self: start;
+  background: transparent;
+  clip-path: circle(50%);
+  justify-self: center;
 }
 
 .message-row.is-unread .message-mark {
-  border-color: var(--line-0);
   background: var(--line-0);
 }
 
-.message-row.is-flagged .message-mark {
-  border-color: var(--sig-warn);
-  background: color-mix(in srgb, var(--sig-warn) 24%, transparent);
-}
-
-.message-row.is-unread.is-flagged .message-mark {
-  border-color: var(--sig-warn);
-  background: color-mix(in srgb, var(--sig-warn) 26%, var(--line-0));
-}
-
 .message-from,
+.message-content,
 .message-subject,
 .message-date,
 .message-preview {
@@ -1257,20 +1227,34 @@ a:focus-visible {
 }
 
 .message-from {
-  grid-area: from;
-  color: var(--fg-0);
+  color: color-mix(in srgb, var(--fg-0) 90%, var(--fg-1));
   font-weight: 600;
+  min-width: 0;
+}
+
+.message-content {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
 }
 
 .message-subject {
-  grid-area: subject;
   color: var(--fg-1);
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .message-preview {
-  grid-area: preview;
-  color: var(--fg-muted);
-  font-size: 0.78rem;
+  color: color-mix(in srgb, var(--fg-muted) 86%, var(--bg-1));
+  font-size: 0.75rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.message-preview-sep {
+  color: color-mix(in srgb, var(--fg-muted) 75%, transparent);
+  flex: 0 0 auto;
 }
 
 .message-preview--empty {
@@ -1278,29 +1262,23 @@ a:focus-visible {
 }
 
 .message-date {
-  grid-area: date;
-  color: var(--fg-muted);
-  font-size: 0.78rem;
+  color: color-mix(in srgb, var(--fg-muted) 92%, transparent);
+  font-size: 0.74rem;
   text-align: right;
-  align-self: start;
-}
-
-.message-row.is-unread .message-from,
-.message-row.is-unread .message-subject {
-  font-weight: 700;
+  justify-self: end;
 }
 
 .message-row:hover .message-row-btn {
-  background: color-mix(in srgb, var(--line-2) 50%, transparent);
+  background: color-mix(in srgb, var(--line-2) 34%, transparent);
 }
 
 .message-row.active .message-row-btn {
-  background: color-mix(in srgb, var(--line-0) 10%, transparent);
+  background: color-mix(in srgb, var(--line-0) 8%, transparent);
   border-left-color: var(--line-0);
 }
 
 .message-row.is-selected .message-row-btn {
-  background: color-mix(in srgb, var(--line-0) 8%, transparent);
+  background: color-mix(in srgb, var(--line-0) 12%, transparent);
 }
 
 .message-row.active .message-subject,
@@ -1308,11 +1286,6 @@ a:focus-visible {
 .message-row.active .message-date,
 .message-row.active .message-preview {
   color: var(--fg-0);
-}
-
-.message-row.is-answered .message-subject::before {
-  content: "↩ ";
-  color: var(--fg-muted);
 }
 
 .message-context-badge {
@@ -1329,7 +1302,6 @@ a:focus-visible {
 }
 
 .message-row.is-draft .message-mark {
-  border-color: var(--line-0);
   background: color-mix(in srgb, var(--line-0) 18%, transparent);
 }
 
@@ -3093,8 +3065,8 @@ button.setting-list-item {
   }
 
   .message-row-btn {
-    grid-template-columns: 10px minmax(0, 1fr) auto;
-    padding: 7px var(--space-2);
+    grid-template-columns: 10px minmax(92px, 126px) minmax(0, 1fr) 62px;
+    padding: 0 var(--space-2);
   }
 
   .thread-context {
@@ -3132,10 +3104,6 @@ button.setting-list-item {
   .workspace-header {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .mail-bulk-bar {
-    padding: var(--space-2);
   }
 
   .section-tools {

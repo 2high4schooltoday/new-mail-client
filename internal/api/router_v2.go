@@ -3138,6 +3138,9 @@ func (h *Handlers) v2SendWithAccount(ctx context.Context, u models.User, account
 			return mail.SendResult{}, err
 		}
 		login := service.MailIdentity(u)
+		if preferredSent, err := h.resolveSessionSpecialMailboxByRole(ctx, u, pass, "sent"); err == nil {
+			req.SentMailbox = preferredSent
+		}
 		return h.svc.Mail().Send(ctx, login, pass, req)
 	}
 	acc, err := h.svc.Store().GetMailAccountByID(ctx, u.ID, accountID)
@@ -3157,7 +3160,10 @@ func (h *Handlers) v2SendWithAccount(ctx context.Context, u models.User, account
 	cfg.SMTPPort = acc.SMTPPort
 	cfg.SMTPTLS = acc.SMTPTLS
 	cfg.SMTPStartTLS = acc.SMTPStartTLS
-	cli := mail.NewIMAPSMTPClient(cfg)
+	cli := mailClientFactory(cfg)
+	if preferredSent, err := h.resolveAccountSpecialMailboxByRole(ctx, acc, pass, "sent", cli); err == nil {
+		req.SentMailbox = preferredSent
+	}
 	return cli.Send(ctx, acc.Login, pass, req)
 }
 

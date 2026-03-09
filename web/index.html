@@ -430,7 +430,7 @@
         <article class="panel workspace-header">
           <div>
             <h2>Mailbox</h2>
-            <p class="hint">Keyboard: Tab pane, j/k move, Enter open, / search, c compose, r reply, Shift+F forward, f flag, s read state, Delete trash.</p>
+            <p class="hint">Keyboard: Tab pane, j/k move row, Enter open, Shift+Arrow range select, Cmd/Ctrl+click multi-select, / search, c compose, r reply, Shift+F forward, f flag, s read state, Delete trash. Reader: j/k thread.</p>
           </div>
           <div class="actions">
             <button id="mail-mobile-back" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
@@ -460,6 +460,10 @@
             <div class="mail-commandbar-group mail-commandbar-group--danger" role="group" aria-label="Destructive actions">
               <button id="btn-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Move To Trash</button>
             </div>
+            <div id="mail-selection-tools" class="mail-commandbar-group mail-commandbar-group--selection hidden" role="status" aria-live="polite">
+              <span id="mail-selection-count" class="mail-selection-count">0 selected</span>
+              <button id="btn-mail-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear Selection</button>
+            </div>
           </div>
           <div class="mail-commandbar-search">
             <input id="search-input" type="text" placeholder="Search subject, body, sender">
@@ -475,12 +479,6 @@
           <section id="mail-pane-messages" class="panel mail-pane mail-pane--messages" tabindex="-1">
             <div class="pane-head">
               <button id="mail-back-to-mailboxes" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
-            </div>
-            <div id="mail-bulk-bar" class="bulk-bar mail-bulk-bar hidden">
-              <label class="bulk-check"><input id="mail-check-all" type="checkbox"> Select visible</label>
-              <span id="mail-selection-count" class="mail-selection-count">0 selected</span>
-              <button id="btn-mail-select-visible" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Select visible</button>
-              <button id="btn-mail-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear</button>
             </div>
             <ul id="messages" class="message-list" role="listbox" aria-label="Messages" tabindex="0"></ul>
           </section>
@@ -863,7 +861,8 @@
       <p id="ui-modal-body" class="hint"></p>
       <label id="ui-modal-input-wrap" class="ui-modal-input-wrap hidden">
         <span id="ui-modal-input-label">Value</span>
-        <input id="ui-modal-input" type="text" autocomplete="off">
+        <input id="ui-modal-input" type="text" autocomplete="off" list="ui-modal-datalist">
+        <datalist id="ui-modal-datalist"></datalist>
       </label>
       <div class="actions ui-modal-actions">
         <button id="ui-modal-cancel" class="cmd-btn" type="button">Cancel</button>

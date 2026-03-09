@@ -58,6 +58,10 @@ func (m pamTestDespatch) ListMailboxes(ctx context.Context, user, pass string) (
 	}
 	return []mail.Mailbox{{Name: "INBOX", Messages: 1}}, nil
 }
+
+func (m pamTestDespatch) CreateMailbox(ctx context.Context, user, pass, mailbox string) error {
+	return nil
+}
 func (m pamTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }

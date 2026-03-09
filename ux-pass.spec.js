@@ -152,6 +152,7 @@ function composeReliabilityFixture() {
     },
     mailboxes: [
       { name: 'INBOX', role: 'inbox', unread: 1, messages: 1 },
+      { name: 'Sent', role: 'sent', unread: 0, messages: 0 },
       { name: 'Drafts', role: 'drafts', unread: 0, messages: 0 },
     ],
     mailboxItems: [
@@ -184,6 +185,40 @@ function composeReliabilityFixture() {
         attachments: [],
       },
     },
+  };
+}
+
+function reliableMailboxStateFixture() {
+  const original = {
+    id: 'm-live-1',
+    mailbox: 'INBOX',
+    from: 'sender@example.com',
+    to: ['admin@example.com'],
+    subject: 'Reliable mailbox state',
+    date: '2026-03-09T09:00:00.000Z',
+    seen: false,
+    flagged: false,
+    answered: false,
+    preview: 'Please send the latest update and keep the thread intact.',
+    body: 'Please send the latest update and keep the thread intact.',
+    body_html: '',
+    attachments: [],
+    thread_id: 'thread-live-1',
+  };
+  return {
+    user: {
+      email: 'admin@example.com',
+      role: 'admin',
+      recovery_email: 'recovery@example.net',
+      needs_recovery_email: false,
+      auth_stage: 'authenticated',
+      mail_secret_required: false,
+    },
+    mailboxes: [
+      { name: 'INBOX', role: 'inbox' },
+      { name: 'Projects', role: '' },
+    ],
+    messages: [original],
   };
 }
 
@@ -266,9 +301,7 @@ function mailActionFixture() {
     },
     mailboxes: [
       { name: 'INBOX', role: 'inbox' },
-      { name: 'Archive', role: 'archive' },
       { name: 'Projects', role: '' },
-      { name: 'Deleted Messages', role: 'trash' },
     ],
     messages,
   };
@@ -530,6 +563,7 @@ async function mockComposeReliabilityScenario(page) {
 async function mockMailActionScenario(page) {
   const fixture = mailActionFixture();
   const messages = new Map(fixture.messages.map((item) => [item.id, { ...item }]));
+  const specialMappings = {};
 
   const summarize = (item) => ({
     id: item.id,
@@ -545,7 +579,9 @@ async function mockMailActionScenario(page) {
   });
 
   const mailboxPayload = () => fixture.mailboxes.map((mailbox) => {
-    const role = mailbox.role || '';
+    let role = mailbox.role || '';
+    if (specialMappings.archive === mailbox.name) role = 'archive';
+    if (specialMappings.trash === mailbox.name) role = 'trash';
     const mailboxMessages = Array.from(messages.values()).filter((item) => item.mailbox === mailbox.name);
     return {
       name: mailbox.name,
@@ -600,6 +636,11 @@ async function mockMailActionScenario(page) {
     if (path === '/api/v2/security/mfa/trusted-devices') return ok({ items: [] });
     if (path === '/api/v2/security/sessions') return ok({ items: [] });
     if (path === '/api/v1/mailboxes') return ok(mailboxPayload());
+    if (path === '/api/v1/mailboxes/special') {
+      return ok({
+        items: Object.entries(specialMappings).map(([role, mailbox_name]) => ({ role, mailbox_name })),
+      });
+    }
     if (path === '/api/v2/drafts') return ok({ items: [], page: 1, page_size: 100, total: 0 });
     if (path === '/api/v1/compose/identities') return ok({ items: [] });
     if (path === '/api/v1/search') {
@@ -641,6 +682,38 @@ async function mockMailActionScenario(page) {
       return ok({ status: 'ok' });
     }
 
+    const specialMailboxMatch = path.match(/^\/api\/v1\/mailboxes\/special\/([^/]+)$/);
+    if (specialMailboxMatch && route.request().method() === 'POST') {
+      const role = decodeURIComponent(specialMailboxMatch[1]);
+      const payload = route.request().postDataJSON();
+      const mailboxName = String(payload.mailbox_name || '').trim();
+      if (!mailboxName) return ok({ error: 'mailbox_name_required' }, { status: 400 });
+      if (!fixture.mailboxes.some((item) => item.name === mailboxName)) {
+        fixture.mailboxes.push({ name: mailboxName, role: '' });
+      }
+      specialMappings[role] = mailboxName;
+      return ok({
+        status: 'ok',
+        role,
+        mailbox_name: mailboxName,
+        created: true,
+        items: Object.entries(specialMappings).map(([entryRole, entryMailboxName]) => ({ role: entryRole, mailbox_name: entryMailboxName })),
+        mailboxes: mailboxPayload(),
+      });
+    }
+
+    const threadMatch = path.match(/^\/api\/v1\/threads\/([^/]+)\/messages$/);
+    if (threadMatch) {
+      const threadID = decodeURIComponent(threadMatch[1]);
+      return ok({
+        thread_id: threadID,
+        mailbox: url.searchParams.get('mailbox') || 'INBOX',
+        scope: 'conversation',
+        truncated: false,
+        items: Array.from(messages.values()).filter((item) => item.thread_id === threadID).map(summarize),
+      });
+    }
+
     const messageMatch = path.match(/^\/api\/v1\/messages\/([^/]+)$/);
     if (messageMatch) {
       const message = messages.get(decodeURIComponent(messageMatch[1]));
@@ -653,6 +726,371 @@ async function mockMailActionScenario(page) {
       body: JSON.stringify({ error: path }),
     });
   });
+}
+
+async function mockReliableMailboxStateScenario(page) {
+  const fixture = reliableMailboxStateFixture();
+  const messages = new Map(fixture.messages.map((item) => [item.id, { ...item }]));
+  const drafts = new Map();
+  const specialMappings = {};
+  let draftSeq = 1;
+  let sentSeq = 1;
+
+  const summarize = (item) => ({
+    id: item.id,
+    mailbox: item.mailbox,
+    from: item.from,
+    subject: item.subject,
+    date: item.date,
+    seen: item.seen,
+    answered: item.answered,
+    flagged: item.flagged,
+    preview: item.preview,
+    thread_id: item.thread_id,
+  });
+
+  const mailboxPayload = () => fixture.mailboxes.map((mailbox) => {
+    let role = mailbox.role || '';
+    if (specialMappings.sent === mailbox.name) role = 'sent';
+    if (specialMappings.archive === mailbox.name) role = 'archive';
+    if (specialMappings.trash === mailbox.name) role = 'trash';
+    const mailboxMessages = Array.from(messages.values()).filter((item) => item.mailbox === mailbox.name);
+    return {
+      name: mailbox.name,
+      role,
+      unread: mailboxMessages.filter((item) => !item.seen).length,
+      messages: mailboxMessages.length,
+    };
+  });
+
+  const mailboxItems = (mailboxName) => Array
+    .from(messages.values())
+    .filter((item) => item.mailbox === mailboxName)
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .map(summarize);
+
+  const draftList = () => Array
+    .from(drafts.values())
+    .filter((item) => String(item.status || '').toLowerCase() !== 'sent')
+    .sort((a, b) => new Date(b.updated_at || b.created_at || 0).getTime() - new Date(a.updated_at || a.created_at || 0).getTime());
+
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const ok = async (body, extra = {}) => {
+      await route.fulfill({
+        status: extra.status || 200,
+        contentType: extra.contentType || 'application/json',
+        body: extra.rawBody ?? JSON.stringify(body),
+      });
+    };
+
+    if (path === '/api/v1/public/captcha/config') return ok({ enabled: false });
+    if (path === '/api/v1/public/password-reset/capabilities') return ok({ enabled: false, reason: 'disabled' });
+    if (path === '/api/v1/public/auth/capabilities') {
+      return ok({
+        passkey_mfa_available: false,
+        passkey_passwordless_available: false,
+        passkey_usernameless_enabled: true,
+        reason: 'disabled',
+      });
+    }
+    if (path === '/api/v1/setup/status') {
+      return ok({
+        required: false,
+        base_domain: 'example.com',
+        default_admin_email: 'webmaster@example.com',
+        auth_mode: 'sql',
+        password_min_length: 12,
+        password_max_length: 128,
+        password_class_min: 3,
+        automatic_updates_enabled: true,
+        passkey_primary_sign_in_enabled: true,
+      });
+    }
+    if (path === '/api/v1/me') return ok(fixture.user);
+    if (path === '/api/v2/security/mfa/webauthn') return ok({ items: [] });
+    if (path === '/api/v2/security/mfa/trusted-devices') return ok({ items: [] });
+    if (path === '/api/v2/security/sessions') return ok({ items: [] });
+    if (path === '/api/v1/mailboxes') return ok(mailboxPayload());
+    if (path === '/api/v1/mailboxes/special') {
+      return ok({
+        items: Object.entries(specialMappings).map(([role, mailbox_name]) => ({ role, mailbox_name })),
+      });
+    }
+    if (path === '/api/v1/compose/identities') return ok({ items: [] });
+    if (path === '/api/v2/drafts' && route.request().method() === 'GET') {
+      return ok({ items: draftList(), page: 1, page_size: 100, total: draftList().length });
+    }
+    if (path === '/api/v2/drafts' && route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON();
+      const draft = {
+        id: `draft-${draftSeq++}`,
+        account_id: payload.account_id || '',
+        identity_id: payload.identity_id || '',
+        compose_mode: payload.compose_mode || 'send',
+        context_message_id: payload.context_message_id || '',
+        from_mode: payload.from_mode || 'default',
+        from_manual: payload.from_manual || '',
+        client_state_json: payload.client_state_json || '',
+        to: payload.to || '',
+        cc: payload.cc || '',
+        bcc: payload.bcc || '',
+        subject: payload.subject || '',
+        body_text: payload.body_text || '',
+        body_html: payload.body_html || '',
+        attachments_json: '[]',
+        status: payload.status || 'active',
+        last_send_error: '',
+        created_at: '2026-03-09T10:00:00.000Z',
+        updated_at: new Date().toISOString(),
+      };
+      drafts.set(draft.id, draft);
+      return ok(draft, { status: 201 });
+    }
+
+    const draftMatch = path.match(/^\/api\/v2\/drafts\/([^/]+)$/);
+    if (draftMatch && route.request().method() === 'PATCH') {
+      const draftID = decodeURIComponent(draftMatch[1]);
+      const draft = drafts.get(draftID);
+      if (!draft) return ok({ error: 'draft_not_found' }, { status: 404 });
+      Object.assign(draft, route.request().postDataJSON(), { updated_at: new Date().toISOString() });
+      drafts.set(draftID, draft);
+      return ok(draft);
+    }
+
+    const draftSendMatch = path.match(/^\/api\/v2\/drafts\/([^/]+)\/send$/);
+    if (draftSendMatch) {
+      const draftID = decodeURIComponent(draftSendMatch[1]);
+      const draft = drafts.get(draftID);
+      if (!draft) return ok({ error: 'draft_not_found' }, { status: 404 });
+      const savedCopyMailbox = specialMappings.sent || 'Sent';
+      if (!fixture.mailboxes.some((item) => item.name === savedCopyMailbox)) {
+        fixture.mailboxes.push({ name: savedCopyMailbox, role: '' });
+      }
+      const messageID = `sent-${sentSeq++}`;
+      const sentMessage = {
+        id: messageID,
+        mailbox: savedCopyMailbox,
+        from: fixture.user.email,
+        to: String(draft.to || '').split(',').map((item) => item.trim()).filter(Boolean),
+        subject: draft.subject || '(no subject)',
+        date: new Date().toISOString(),
+        seen: true,
+        flagged: false,
+        answered: String(draft.compose_mode || '').toLowerCase() === 'reply',
+        preview: String(draft.body_text || '').replace(/\s+/g, ' ').trim().slice(0, 140),
+        body: draft.body_text || '',
+        body_html: draft.body_html || '',
+        attachments: [],
+        thread_id: draft.context_message_id ? 'thread-live-1' : `thread-sent-${messageID}`,
+      };
+      messages.set(messageID, sentMessage);
+      if (draft.context_message_id && messages.has(draft.context_message_id)) {
+        const original = messages.get(draft.context_message_id);
+        original.answered = true;
+        messages.set(original.id, original);
+      }
+      draft.status = 'sent';
+      drafts.set(draftID, draft);
+      return ok({ status: 'sent', saved_copy: true, saved_copy_mailbox: savedCopyMailbox });
+    }
+
+    if (path === '/api/v1/messages') {
+      const mailbox = url.searchParams.get('mailbox') || 'INBOX';
+      return ok({ items: mailboxItems(mailbox) });
+    }
+    if (path === '/api/v1/search') {
+      const mailbox = url.searchParams.get('mailbox') || 'INBOX';
+      const q = String(url.searchParams.get('q') || '').toLowerCase();
+      return ok({
+        items: mailboxItems(mailbox).filter((item) => (
+          [item.from, item.subject, item.preview].join('\n').toLowerCase().includes(q)
+        )),
+      });
+    }
+
+    const messageFlagsMatch = path.match(/^\/api\/v1\/messages\/([^/]+)\/flags$/);
+    if (messageFlagsMatch && route.request().method() === 'POST') {
+      const message = messages.get(decodeURIComponent(messageFlagsMatch[1]));
+      if (!message) return ok({ error: 'not_found' }, { status: 404 });
+      const payload = route.request().postDataJSON();
+      const add = Array.isArray(payload.add) ? payload.add : [];
+      const remove = Array.isArray(payload.remove) ? payload.remove : [];
+      if (add.includes('\\Seen')) message.seen = true;
+      if (remove.includes('\\Seen')) message.seen = false;
+      messages.set(message.id, message);
+      return ok({ status: 'ok' });
+    }
+
+    const specialMailboxMatch = path.match(/^\/api\/v1\/mailboxes\/special\/([^/]+)$/);
+    if (specialMailboxMatch && route.request().method() === 'POST') {
+      const role = decodeURIComponent(specialMailboxMatch[1]);
+      const payload = route.request().postDataJSON();
+      const mailboxName = String(payload.mailbox_name || '').trim();
+      if (!mailboxName) return ok({ error: 'mailbox_name_required' }, { status: 400 });
+      if (!fixture.mailboxes.some((item) => item.name === mailboxName)) {
+        fixture.mailboxes.push({ name: mailboxName, role: '' });
+      }
+      specialMappings[role] = mailboxName;
+      return ok({
+        status: 'ok',
+        role,
+        mailbox_name: mailboxName,
+        created: true,
+        items: Object.entries(specialMappings).map(([entryRole, entryMailboxName]) => ({ role: entryRole, mailbox_name: entryMailboxName })),
+        mailboxes: mailboxPayload(),
+      });
+    }
+
+    const threadMatch = path.match(/^\/api\/v1\/threads\/([^/]+)\/messages$/);
+    if (threadMatch) {
+      const threadID = decodeURIComponent(threadMatch[1]);
+      return ok({
+        thread_id: threadID,
+        mailbox: url.searchParams.get('mailbox') || 'INBOX',
+        scope: 'conversation',
+        truncated: false,
+        items: Array.from(messages.values()).filter((item) => item.thread_id === threadID).map(summarize),
+      });
+    }
+
+    const messageMatch = path.match(/^\/api\/v1\/messages\/([^/]+)$/);
+    if (messageMatch) {
+      const message = messages.get(decodeURIComponent(messageMatch[1]));
+      if (message) return ok(message);
+    }
+
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: path }),
+    });
+  });
+}
+
+async function mockLiveRefreshScenario(page) {
+  const fixture = threadedMailFixture();
+  const messages = new Map(fixture.threadItems.map((item) => [item.id, {
+    ...fixture.messageDetails[item.id],
+    preview: item.preview,
+    thread_id: item.thread_id,
+  }]));
+
+  const summarize = (item) => ({
+    id: item.id,
+    mailbox: item.mailbox,
+    from: item.from,
+    subject: item.subject,
+    date: item.date,
+    seen: item.seen,
+    answered: item.answered,
+    flagged: item.flagged,
+    preview: item.preview,
+    thread_id: item.thread_id,
+  });
+
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const ok = async (body) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    };
+
+    if (path === '/api/v1/public/captcha/config') return ok({ enabled: false });
+    if (path === '/api/v1/public/password-reset/capabilities') return ok({ enabled: false, reason: 'disabled' });
+    if (path === '/api/v1/public/auth/capabilities') {
+      return ok({
+        passkey_mfa_available: false,
+        passkey_passwordless_available: false,
+        passkey_usernameless_enabled: true,
+        reason: 'disabled',
+      });
+    }
+    if (path === '/api/v1/setup/status') {
+      return ok({
+        required: false,
+        base_domain: 'example.com',
+        default_admin_email: 'webmaster@example.com',
+        auth_mode: 'sql',
+        password_min_length: 12,
+        password_max_length: 128,
+        password_class_min: 3,
+        automatic_updates_enabled: true,
+        passkey_primary_sign_in_enabled: true,
+      });
+    }
+    if (path === '/api/v1/me') return ok(fixture.user);
+    if (path === '/api/v2/security/mfa/webauthn') return ok({ items: [] });
+    if (path === '/api/v2/security/mfa/trusted-devices') return ok({ items: [] });
+    if (path === '/api/v2/security/sessions') return ok({ items: [] });
+    if (path === '/api/v2/drafts') return ok({ items: [], page: 1, page_size: 100, total: 0 });
+    if (path === '/api/v1/compose/identities') return ok({ items: [] });
+    if (path === '/api/v1/mailboxes') {
+      const inboxMessages = Array.from(messages.values()).filter((item) => item.mailbox === 'INBOX');
+      return ok([
+        { name: 'INBOX', role: 'inbox', unread: inboxMessages.filter((item) => !item.seen).length, messages: inboxMessages.length },
+        { name: 'Sent Messages', role: 'sent', unread: 0, messages: Array.from(messages.values()).filter((item) => item.mailbox === 'Sent Messages').length },
+        { name: 'Archive', role: 'archive', unread: 0, messages: Array.from(messages.values()).filter((item) => item.mailbox === 'Archive').length },
+      ]);
+    }
+    if (path === '/api/v1/messages') {
+      const mailbox = url.searchParams.get('mailbox') || 'INBOX';
+      return ok({
+        items: Array.from(messages.values())
+          .filter((item) => item.mailbox === mailbox)
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .map(summarize),
+      });
+    }
+    if (path === '/api/v1/threads/thread-1/messages') {
+      return ok({
+        thread_id: 'thread-1',
+        mailbox: 'INBOX',
+        scope: 'conversation',
+        truncated: false,
+        items: Array.from(messages.values()).filter((item) => item.thread_id === 'thread-1').map(summarize),
+      });
+    }
+    if (/^\/api\/v1\/messages\/[^/]+\/flags$/.test(path)) {
+      return ok({ status: 'ok' });
+    }
+    const messageMatch = path.match(/^\/api\/v1\/messages\/([^/]+)$/);
+    if (messageMatch) {
+      const message = messages.get(decodeURIComponent(messageMatch[1]));
+      if (message) return ok(message);
+    }
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: path }),
+    });
+  });
+
+  return {
+    addIncomingMessage() {
+      messages.set('m4', {
+        id: 'm4',
+        mailbox: 'INBOX',
+        from: 'alerts@example.com',
+        to: ['admin@example.com'],
+        subject: 'New incoming status',
+        date: '2026-03-09T11:20:00.000Z',
+        seen: false,
+        flagged: false,
+        answered: false,
+        preview: 'A fresh message arrived while you were reading.',
+        body: 'A fresh message arrived while you were reading.',
+        body_html: '',
+        attachments: [],
+        thread_id: 'thread-4',
+      });
+    },
+  };
 }
 
 async function mockThreadedMailScenario(page) {
@@ -960,17 +1398,74 @@ test('compose drafts keep media and retry send after temporary failure', async (
   await expect(page.locator('.message-row-btn')).toHaveCount(0);
 });
 
-test('mailbox core actions support bulk selection, state toggles, archive, and move', async ({ page }) => {
+test('mailbox state resolves Sent on first send, updates thread context, and inserts sent rows immediately', async ({ page }) => {
+  await mockReliableMailboxStateScenario(page);
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
+
+  const inboxButton = page.locator('#mailboxes .mailbox-row button', { hasText: /^Inbox/i });
+  await expect(inboxButton).toContainText('(1)');
+
+  await page.locator('.message-row-btn').first().click();
+  await expect(inboxButton).not.toContainText('(1)');
+  await expect(page.locator('#thread-position')).toHaveText(/Conversation · 1 message/i);
+
+  await page.click('#btn-reply');
+  await page.click('#btn-compose-send');
+
+  await expect(page.locator('#ui-modal-overlay')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#ui-modal-title')).toHaveText(/Choose Sent Mailbox/i);
+  await expect(page.locator('#ui-modal-input')).toHaveValue('Sent');
+  await page.click('#ui-modal-confirm');
+
+  await expect(page.locator('#compose-overlay')).toHaveClass(/hidden/);
+  await expect(page.locator('#status-line')).toContainText(/Saved to Sent/i);
+  await expect(page.locator('#mailboxes .mailbox-row button', { hasText: /^Sent/i })).toBeVisible();
+  await expect(page.locator('#message-meta')).toContainText(/Replied/i);
+  await expect(page.locator('#thread-position')).toHaveText(/Conversation · 2 messages/i);
+
+  await page.locator('#mailboxes .mailbox-row button', { hasText: /^Sent/i }).click();
+  await expect(page.locator('.message-row-btn')).toHaveCount(1);
+
+  await page.click('#btn-compose-open');
+  await page.fill('#compose-to-input', 'alice@example.com');
+  await page.keyboard.press('Enter');
+  await page.fill('#compose-subject-input', 'Immediate sent row');
+  await page.fill('#compose-editor', 'Second send body.');
+  await page.click('#btn-compose-send');
+
+  await expect(page.locator('#compose-overlay')).toHaveClass(/hidden/);
+  await expect(page.locator('.message-row-btn')).toHaveCount(2);
+  await expect(page.locator('.message-row-btn').first()).toContainText(/Immediate sent row/i);
+});
+
+test('mailbox core actions use row selection, create archive or trash folders on demand, and move messages', async ({ page }) => {
   await mockMailActionScenario(page);
   await page.setViewportSize({ width: 1366, height: 900 });
   await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
 
   await expect(page.locator('#view-mail')).toBeVisible();
   await expect(page.locator('.message-row-btn')).toHaveCount(4);
-  await expect(page.locator('#mail-bulk-bar')).not.toHaveClass(/hidden/);
-  await expect(page.locator('#mail-selection-count')).toHaveText('0 selected');
+  await expect(page.locator('.message-row-check')).toHaveCount(0);
+  await expect(page.locator('#mail-selection-tools')).toHaveClass(/hidden/);
+  const inboxButton = page.locator('#mailboxes .mailbox-row button', { hasText: /^Inbox/i });
+  await expect(inboxButton).toContainText('(1)');
 
-  await page.check('[data-message-select="m1"]');
+  const heights = await page.locator('.message-row-btn').evaluateAll((nodes) => nodes.slice(0, 3).map((node) => Math.round(node.getBoundingClientRect().height)));
+  expect(new Set(heights).size).toBe(1);
+
+  await page.locator('.message-row[data-message-id="m3"] .message-row-btn').click();
+  await expect(inboxButton).not.toContainText('(1)');
+  await expect(page.locator('#btn-mark-seen')).toHaveText('Mark Unread');
+  await page.click('#btn-mark-seen');
+  await expect(inboxButton).toContainText('(1)');
+  await expect(page.locator('#btn-mark-seen')).toHaveText('Mark Read');
+  await page.click('#btn-mark-seen');
+  await expect(inboxButton).not.toContainText('(1)');
+
+  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+  await page.locator('.message-row[data-message-id="m1"] .message-row-btn').click({ modifiers: [modifier] });
+  await expect(page.locator('#mail-selection-tools')).not.toHaveClass(/hidden/);
   await expect(page.locator('#mail-selection-count')).toHaveText('1 selected');
   await expect(page.locator('#btn-mark-seen')).toHaveText('Mark Unread');
   await page.click('#btn-mark-seen');
@@ -982,33 +1477,38 @@ test('mailbox core actions support bulk selection, state toggles, archive, and m
   await expect(page.locator('#btn-mark-seen')).toHaveText('Mark Unread');
 
   await page.click('#btn-mail-clear');
-  await expect(page.locator('#mail-selection-count')).toHaveText('0 selected');
+  await expect(page.locator('#mail-selection-tools')).toHaveClass(/hidden/);
 
-  await page.check('[data-message-select="m2"]');
-  await page.check('[data-message-select="m3"]');
+  await page.locator('.message-row[data-message-id="m2"] .message-row-btn').click({ modifiers: [modifier] });
+  await page.locator('.message-row[data-message-id="m4"] .message-row-btn').click({ modifiers: [modifier] });
   await expect(page.locator('#mail-selection-count')).toHaveText('2 selected');
   await expect(page.locator('#btn-flag')).toHaveText('Flag');
   await page.click('#btn-flag');
   await expect(page.locator('.message-row[data-message-id="m2"]')).toHaveClass(/is-flagged/);
-  await expect(page.locator('.message-row[data-message-id="m3"]')).toHaveClass(/is-flagged/);
+  await expect(page.locator('.message-row[data-message-id="m4"]')).toHaveClass(/is-flagged/);
   await expect(page.locator('#btn-flag')).toHaveText('Unflag');
 
   await page.click('#btn-mail-clear');
-  await expect(page.locator('#mail-selection-count')).toHaveText('0 selected');
+  await expect(page.locator('#mail-selection-tools')).toHaveClass(/hidden/);
 
-  await page.check('#mail-check-all');
+  await page.locator('.message-row[data-message-id="m1"] .message-row-btn').click({ modifiers: [modifier] });
+  await page.locator('.message-row[data-message-id="m4"] .message-row-btn').click({ modifiers: ['Shift'] });
   await expect(page.locator('#mail-selection-count')).toHaveText('4 selected');
   await expect(page.locator('#btn-archive')).toBeEnabled();
   await page.click('#btn-archive');
+  await expect(page.locator('#ui-modal-overlay')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#ui-modal-input')).toHaveValue('Archive');
+  await page.click('#ui-modal-confirm');
 
   await expect(page.locator('#messages .message-row-btn')).toHaveCount(0);
   await expect(page.locator('#messages .message-empty')).toHaveText(/No messages to display/i);
-  await expect(page.locator('#mailboxes .mailbox-row button', { hasText: /^Archive/ })).toContainText('(1)');
+  await expect(page.locator('#mailboxes .mailbox-row button', { hasText: /^Archive/ })).toBeVisible();
 
   await page.locator('#mailboxes .mailbox-row button', { hasText: /^Archive/ }).click();
   await expect(page.locator('#messages .message-row-btn')).toHaveCount(4);
 
-  await page.check('[data-message-select="m1"]');
+  await page.locator('.message-row[data-message-id="m1"] .message-row-btn').click();
+  await expect(page.locator('#message-subject-anchor')).toHaveText(/Action one/i);
   await page.selectOption('#mail-move-target', 'Projects');
   await expect(page.locator('#btn-move')).toBeEnabled();
   await page.click('#btn-move');
@@ -1018,6 +1518,64 @@ test('mailbox core actions support bulk selection, state toggles, archive, and m
   await page.locator('#mailboxes .mailbox-row button', { hasText: /^Projects/ }).click();
   await expect(page.locator('#messages .message-row-btn')).toHaveCount(1);
   await expect(page.locator('#messages .message-row-btn .message-subject')).toHaveText(/Action one/i);
+
+  await page.locator('.message-row[data-message-id="m1"] .message-row-btn').click();
+  await page.click('#btn-trash');
+  await expect(page.locator('#ui-modal-overlay')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#ui-modal-input')).toHaveValue('Trash');
+  await page.click('#ui-modal-confirm');
+
+  await expect(page.locator('#messages .message-row-btn')).toHaveCount(0);
+  await page.locator('#mailboxes .mailbox-row button', { hasText: /^Trash/ }).click();
+  await expect(page.locator('#messages .message-row-btn')).toHaveCount(1);
+});
+
+test('mailbox live refresh updates counts and rows without losing the open thread context', async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalSetInterval = window.setInterval.bind(window);
+    window.setInterval = (fn, ms, ...args) => originalSetInterval(fn, ms >= 20000 ? 80 : ms, ...args);
+  });
+  const control = await mockLiveRefreshScenario(page);
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
+
+  await page.locator('.message-row-btn').first().click();
+  await expect(page.locator('#message-subject-anchor')).toHaveText(/Re: Updates to OpenAI Privacy Policy/i);
+  await expect(page.locator('#thread-position')).toHaveText(/Conversation · 4 messages/i);
+
+  control.addIncomingMessage();
+  await page.evaluate(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('#mailboxes .mailbox-row button', { hasText: /^Inbox/i })).toContainText('(1)');
+  await expect(page.locator('.message-row-btn')).toHaveCount(3);
+  await expect(page.locator('#message-subject-anchor')).toHaveText(/Re: Updates to OpenAI Privacy Policy/i);
+  await expect(page.locator('#thread-position')).toHaveText(/Conversation · 4 messages/i);
+});
+
+test('mailbox long press enters selection mode on mobile', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  const page = await context.newPage();
+  await mockMailActionScenario(page);
+  await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
+
+  const firstRow = page.locator('.message-row[data-message-id="m1"] .message-row-btn');
+  await firstRow.dispatchEvent('pointerdown', { pointerType: 'touch', isPrimary: true, button: 0 });
+  await page.waitForTimeout(520);
+  await firstRow.dispatchEvent('pointerup', { pointerType: 'touch', isPrimary: true, button: 0 });
+
+  await expect(page.locator('#mail-selection-tools')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#mail-selection-count')).toHaveText('1 selected');
+  await page.locator('.message-row[data-message-id="m2"] .message-row-btn').click();
+  await expect(page.locator('#mail-selection-count')).toHaveText('2 selected');
+
+  await page.click('#btn-mail-clear');
+  await expect(page.locator('#mail-selection-tools')).toHaveClass(/hidden/);
+  await context.close();
 });
 
 test('desktop ux pass', async ({ page }) => {
@@ -1051,7 +1609,7 @@ test('desktop ux pass', async ({ page }) => {
 
   await expect(page.locator('#view-mail')).toBeVisible();
   await expect(page.locator('.mail-commandbar')).toBeVisible();
-  await expect(page.locator('.mail-commandbar-group')).toHaveCount(5);
+  await expect(page.locator('.mail-commandbar-group')).toHaveCount(6);
   await expect(page.locator('#mailboxes .mailbox-row button', { hasText: /^Drafts/ })).toBeVisible();
   await expect(page.locator('#btn-reader-view-html')).toBeVisible();
   await expect(page.locator('#btn-reader-view-plain')).toBeVisible();

@@ -18,6 +18,7 @@ type mailRouterTestClient struct {
 	listByMailboxPage map[string]map[int][]mail.MessageSummary
 	search            []mail.MessageSummary
 	mailboxes         []mail.Mailbox
+	createdMailboxes  []string
 }
 
 func (m *mailRouterTestClient) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
@@ -25,6 +26,12 @@ func (m *mailRouterTestClient) ListMailboxes(ctx context.Context, user, pass str
 		return m.mailboxes, nil
 	}
 	return []mail.Mailbox{{Name: "INBOX", Unread: 1, Messages: 3}}, nil
+}
+
+func (m *mailRouterTestClient) CreateMailbox(ctx context.Context, user, pass, mailbox string) error {
+	m.createdMailboxes = append(m.createdMailboxes, mailbox)
+	m.mailboxes = append(m.mailboxes, mail.Mailbox{Name: mailbox})
+	return nil
 }
 
 func (m *mailRouterTestClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
@@ -246,7 +253,7 @@ func TestV1ThreadMessagesFiltersAndPaginates(t *testing.T) {
 	}
 }
 
-func TestV1ThreadMessagesConversationScopeScansDefaultFolders(t *testing.T) {
+func TestV1ThreadMessagesConversationScopeScansAllNonDraftFolders(t *testing.T) {
 	threadID := mail.DeriveThreadID("INBOX", "Release Plan", "alice@example.com")
 	router := newSendRouter(t, &mailRouterTestClient{
 		mailboxes: []mail.Mailbox{
@@ -301,16 +308,185 @@ func TestV1ThreadMessagesConversationScopeScansDefaultFolders(t *testing.T) {
 		t.Fatalf("expected conversation scope, got %q", payload.Scope)
 	}
 	if len(payload.MailboxesScanned) < 3 {
-		t.Fatalf("expected Inbox/Sent/Archive scan set, got %+v", payload.MailboxesScanned)
+		t.Fatalf("expected multiple mailboxes scanned, got %+v", payload.MailboxesScanned)
 	}
-	if len(payload.Items) != 3 {
-		t.Fatalf("expected 3 cross-mailbox thread items, got %+v", payload.Items)
+	if len(payload.Items) != 4 {
+		t.Fatalf("expected 4 cross-mailbox thread items, got %+v", payload.Items)
 	}
-	for _, item := range payload.Items {
-		if item.Mailbox == "Deleted Messages" {
-			t.Fatalf("did not expect trash mailbox in default conversation scan: %+v", payload.Items)
+	if payload.Items[len(payload.Items)-1].Mailbox != "Deleted Messages" {
+		t.Fatalf("expected trash mailbox to be scanned after primary folders, got %+v", payload.Items)
+	}
+}
+
+func TestV1ThreadMessagesConversationScopeIncludesCustomFolders(t *testing.T) {
+	threadID := mail.DeriveThreadID("INBOX", "Project Check-In", "alice@example.com")
+	router := newSendRouter(t, &mailRouterTestClient{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox"},
+			{Name: "Sent Items", Role: "sent"},
+			{Name: "Projects/Alpha"},
+			{Name: "Drafts", Role: "drafts"},
+			{Name: "Spam", Role: "junk"},
+		},
+		listByMailboxPage: map[string]map[int][]mail.MessageSummary{
+			"INBOX":          {1: {}, 2: {}},
+			"Sent Items":     {1: {}, 2: {}},
+			"Projects/Alpha": {1: {{ID: "p1", Mailbox: "Projects/Alpha", Subject: "Re: Project Check-In", From: "alice@example.com", ThreadID: threadID}}, 2: {}},
+			"Spam":           {1: {}, 2: {}},
+		},
+	}, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	path := "/api/v1/threads/" + url.PathEscape(threadID) + "/messages?mailbox=INBOX&scope=conversation&page=1&page_size=10"
+	rec := authedV1Get(t, router, path, sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		MailboxesScanned []string              `json:"mailboxes_scanned"`
+		Items            []mail.MessageSummary `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode conversation payload: %v body=%s", err, rec.Body.String())
+	}
+	if !containsString(payload.MailboxesScanned, "Projects/Alpha") {
+		t.Fatalf("expected custom folder in scan list, got %+v", payload.MailboxesScanned)
+	}
+	if containsString(payload.MailboxesScanned, "Drafts") {
+		t.Fatalf("did not expect drafts mailbox in scan list, got %+v", payload.MailboxesScanned)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Mailbox != "Projects/Alpha" {
+		t.Fatalf("expected custom-folder thread result, got %+v", payload.Items)
+	}
+}
+
+func TestV1SpecialMailboxMappingCreatesAndPersistsFolder(t *testing.T) {
+	client := &mailRouterTestClient{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox", Unread: 2, Messages: 7},
+		},
+	}
+	router, st, _ := newSendRouterWithStore(t, client, "account@example.com")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	rec := postMailJSON(t, router, "/api/v1/mailboxes/special/archive", sessionCookie, csrfCookie, []byte(`{"mailbox_name":"Archive","create_if_missing":true}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(client.createdMailboxes) != 1 || client.createdMailboxes[0] != "Archive" {
+		t.Fatalf("expected mailbox creation to run once, got %+v", client.createdMailboxes)
+	}
+
+	admin, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	mappings, err := st.ListSpecialMailboxMappings(context.Background(), admin.ID, "account@example.com")
+	if err != nil {
+		t.Fatalf("load special mappings: %v", err)
+	}
+	if mappings["archive"] != "Archive" {
+		t.Fatalf("expected persisted archive mapping, got %+v", mappings)
+	}
+
+	mailboxesRec := authedV1Get(t, router, "/api/v1/mailboxes", sessionCookie, csrfCookie)
+	if mailboxesRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", mailboxesRec.Code, mailboxesRec.Body.String())
+	}
+	var mailboxes []mail.Mailbox
+	if err := json.Unmarshal(mailboxesRec.Body.Bytes(), &mailboxes); err != nil {
+		t.Fatalf("decode mailboxes: %v", err)
+	}
+	if resolved := mail.ResolveMailboxByRole(mailboxes, "archive"); resolved != "Archive" {
+		t.Fatalf("expected archive role overlay, got %+v", mailboxes)
+	}
+
+	specialRec := authedV1Get(t, router, "/api/v1/mailboxes/special", sessionCookie, csrfCookie)
+	if specialRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", specialRec.Code, specialRec.Body.String())
+	}
+	var payload struct {
+		Items []specialMailboxMappingDTO `json:"items"`
+	}
+	if err := json.Unmarshal(specialRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode special mailboxes payload: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Role != "archive" || payload.Items[0].MailboxName != "Archive" {
+		t.Fatalf("unexpected special mailbox payload: %+v", payload.Items)
+	}
+}
+
+func TestV1SpecialMailboxMappingSupportsSentRole(t *testing.T) {
+	client := &mailRouterTestClient{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox", Unread: 2, Messages: 7},
+			{Name: "Sent Items", Role: "sent", Unread: 0, Messages: 3},
+			{Name: "Team Sent", Unread: 0, Messages: 0},
+		},
+	}
+	router, st, _ := newSendRouterWithStore(t, client, "account@example.com")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	rec := postMailJSON(t, router, "/api/v1/mailboxes/special/sent", sessionCookie, csrfCookie, []byte(`{"mailbox_name":"Team Sent","create_if_missing":false}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	admin, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	mappings, err := st.ListSpecialMailboxMappings(context.Background(), admin.ID, "account@example.com")
+	if err != nil {
+		t.Fatalf("load special mappings: %v", err)
+	}
+	if mappings["sent"] != "Team Sent" {
+		t.Fatalf("expected persisted sent mapping, got %+v", mappings)
+	}
+
+	mailboxesRec := authedV1Get(t, router, "/api/v1/mailboxes", sessionCookie, csrfCookie)
+	if mailboxesRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", mailboxesRec.Code, mailboxesRec.Body.String())
+	}
+	var mailboxes []mail.Mailbox
+	if err := json.Unmarshal(mailboxesRec.Body.Bytes(), &mailboxes); err != nil {
+		t.Fatalf("decode mailboxes: %v", err)
+	}
+	if resolved := mail.ResolveMailboxByRole(mailboxes, "sent"); resolved != "Team Sent" {
+		t.Fatalf("expected sent role overlay, got %+v", mailboxes)
+	}
+
+	specialRec := authedV1Get(t, router, "/api/v1/mailboxes/special", sessionCookie, csrfCookie)
+	if specialRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", specialRec.Code, specialRec.Body.String())
+	}
+	var payload struct {
+		Items []specialMailboxMappingDTO `json:"items"`
+	}
+	if err := json.Unmarshal(specialRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode special mailboxes payload: %v", err)
+	}
+	if !containsSpecialMailbox(payload.Items, "sent", "Team Sent") {
+		t.Fatalf("expected sent mapping in payload, got %+v", payload.Items)
+	}
+}
+
+func containsSpecialMailbox(items []specialMailboxMappingDTO, role, mailboxName string) bool {
+	for _, item := range items {
+		if item.Role == role && item.MailboxName == mailboxName {
+			return true
 		}
 	}
+	return false
+}
+
+func containsString(items []string, needle string) bool {
+	for _, item := range items {
+		if item == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func TestV1ThreadMessagesSetsTruncatedWhenScanCapReached(t *testing.T) {

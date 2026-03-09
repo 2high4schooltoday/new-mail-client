@@ -19,8 +19,17 @@ const state = {
     drafts: [],
     selectedDraftID: "",
     selectedMessageIDs: new Set(),
+    activeMessageID: "",
+    selectionAnchorID: "",
+    mobileSelectionMode: false,
+    suppressRowClickUntil: 0,
+    suppressRowClickMessageID: "",
+    rowLongPressTimer: 0,
     pollTimer: 0,
     refreshInFlight: false,
+    refreshTimer: 0,
+    refreshPending: false,
+    searchQuery: "",
   },
   selectedMessage: null,
   selectedMessageSummary: null,
@@ -248,10 +257,8 @@ const el = {
   btnMove: document.getElementById("btn-move"),
   btnTrash: document.getElementById("btn-trash"),
   mailMoveTarget: document.getElementById("mail-move-target"),
-  mailBulkBar: document.getElementById("mail-bulk-bar"),
-  mailCheckAll: document.getElementById("mail-check-all"),
+  mailSelectionTools: document.getElementById("mail-selection-tools"),
   mailSelectionCount: document.getElementById("mail-selection-count"),
-  btnMailSelectVisible: document.getElementById("btn-mail-select-visible"),
   btnMailClear: document.getElementById("btn-mail-clear"),
   btnComposeOpen: document.getElementById("btn-compose-open"),
   btnComposeClose: document.getElementById("btn-compose-close"),
@@ -310,6 +317,7 @@ const el = {
   uiModalInputWrap: document.getElementById("ui-modal-input-wrap"),
   uiModalInputLabel: document.getElementById("ui-modal-input-label"),
   uiModalInput: document.getElementById("ui-modal-input"),
+  uiModalDatalist: document.getElementById("ui-modal-datalist"),
   uiModalCancel: document.getElementById("ui-modal-cancel"),
   uiModalConfirm: document.getElementById("ui-modal-confirm"),
   mfaModalOverlay: document.getElementById("mfa-modal-overlay"),
@@ -723,8 +731,8 @@ function syncMailboxActiveDescendant() {
 function syncMessageActiveDescendant() {
   if (!el.messages) return;
   const buttons = messageButtons();
-  const selectedID = String(state.selectedMessage?.id || "");
-  const active = buttons.find((node) => String(node.dataset.messageId || "") === selectedID) || null;
+  const activeID = String(currentActiveMailMessageID() || "");
+  const active = buttons.find((node) => String(node.dataset.messageId || "") === activeID) || null;
   for (const button of buttons) {
     const isActive = button === active;
     const row = button.closest(".message-row");
@@ -1687,7 +1695,8 @@ function composeDraftStatusText() {
 }
 
 async function flushComposeDraft(options = {}) {
-  if (!el.composeForm || state.compose.submitInFlight) return null;
+  if (!el.composeForm) return null;
+  if (state.compose.submitInFlight && options.allowWhileSubmitting !== true) return null;
   clearComposeDraftSaveTimer();
   syncComposeDraftFields();
   const payload = composeCurrentDraftPayload();
@@ -1786,12 +1795,42 @@ function visibleActionableMessages() {
   return (Array.isArray(state.messages) ? state.messages : []).filter((item) => isActionableMailSummary(item));
 }
 
+function visibleActionableMessageIDs() {
+  return visibleActionableMessages().map((item) => String(item?.id || "")).filter(Boolean);
+}
+
 function selectedMailMessageIDs() {
   return state.mail.selectedMessageIDs instanceof Set ? state.mail.selectedMessageIDs : new Set();
 }
 
 function hasBulkMailSelection() {
   return selectedMailMessageIDs().size > 0;
+}
+
+function currentActiveMailMessageID() {
+  const activeID = String(state.mail.activeMessageID || "").trim();
+  if (activeID) return activeID;
+  const draftID = String(state.mail.selectedDraftID || "").trim();
+  if (draftID) return draftID;
+  const selectedID = String(state.selectedMessage?.id || "").trim();
+  if (selectedID) return selectedID;
+  const firstMessage = Array.isArray(state.messages) && state.messages.length > 0 ? String(state.messages[0]?.id || "") : "";
+  return firstMessage.trim();
+}
+
+function setActiveMailMessageID(id, options = {}) {
+  const key = String(id || "").trim();
+  if (!key) return;
+  state.mail.activeMessageID = key;
+  if (options.updateAnchor !== false) {
+    state.mail.selectionAnchorID = key;
+  }
+  if (options.render) {
+    renderMessages(state.messages);
+    return;
+  }
+  syncMessageActiveDescendant();
+  applyMailActionAvailability();
 }
 
 function pruneMailSelectionToVisible() {
@@ -1802,34 +1841,107 @@ function pruneMailSelectionToVisible() {
     if (visible.has(key)) next.add(key);
   }
   state.mail.selectedMessageIDs = next;
+  if (next.size === 0) {
+    state.mail.mobileSelectionMode = false;
+  }
+  const activeID = String(state.mail.activeMessageID || "").trim();
+  if (activeID) {
+    const known = (Array.isArray(state.messages) ? state.messages : []).some((item) => String(item?.id || "") === activeID);
+    if (!known) {
+      state.mail.activeMessageID = "";
+    }
+  }
 }
 
 function clearMailMessageSelection(options = {}) {
   state.mail.selectedMessageIDs = new Set();
+  state.mail.mobileSelectionMode = false;
   if (options.render !== false) {
     renderMessages(state.messages);
     return;
   }
-  syncMailBulkControls();
+  syncMailSelectionControls();
   applyMailActionAvailability();
 }
 
-function toggleMailMessageSelection(id, selected) {
+function setMailSelectionSet(next, options = {}) {
+  const visible = new Set(visibleActionableMessageIDs());
+  const normalized = new Set();
+  for (const id of next instanceof Set ? next : new Set(next)) {
+    const key = String(id || "").trim();
+    if (visible.has(key)) normalized.add(key);
+  }
+  state.mail.selectedMessageIDs = normalized;
+  if (normalized.size === 0) {
+    state.mail.mobileSelectionMode = false;
+  } else if (options.mobileMode) {
+    state.mail.mobileSelectionMode = true;
+  }
+  if (options.render !== false) {
+    renderMessages(state.messages);
+    return;
+  }
+  syncMailSelectionControls();
+  syncMessageActiveDescendant();
+  applyMailActionAvailability();
+}
+
+function toggleMailMessageSelection(id, selected, options = {}) {
   const key = String(id || "").trim();
   if (!key) return;
   const next = new Set(selectedMailMessageIDs());
   if (selected) next.add(key);
   else next.delete(key);
-  state.mail.selectedMessageIDs = next;
-  renderMessages(state.messages);
+  state.mail.activeMessageID = key;
+  if (options.updateAnchor !== false) {
+    state.mail.selectionAnchorID = key;
+  }
+  if (options.mobileMode) {
+    state.mail.mobileSelectionMode = next.size > 0;
+  } else if (next.size === 0) {
+    state.mail.mobileSelectionMode = false;
+  }
+  setMailSelectionSet(next, options);
+}
+
+function setMailSelectionRange(targetID, options = {}) {
+  const key = String(targetID || "").trim();
+  if (!key) return;
+  const ordered = visibleActionableMessageIDs();
+  if (!ordered.includes(key)) return;
+  let anchorID = String(state.mail.selectionAnchorID || "").trim();
+  if (!ordered.includes(anchorID)) {
+    anchorID = key;
+  }
+  const anchorIndex = ordered.indexOf(anchorID);
+  const targetIndex = ordered.indexOf(key);
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  const next = new Set(ordered.slice(start, end + 1));
+  state.mail.activeMessageID = key;
+  state.mail.selectionAnchorID = anchorID;
+  setMailSelectionSet(next, options);
+}
+
+function enterMobileMailSelectionMode(id) {
+  const key = String(id || "").trim();
+  if (!key) return;
+  state.mail.mobileSelectionMode = true;
+  state.mail.suppressRowClickUntil = Date.now() + 600;
+  state.mail.suppressRowClickMessageID = key;
+  state.mail.activeMessageID = key;
+  state.mail.selectionAnchorID = key;
+  toggleMailMessageSelection(key, true, { mobileMode: true });
 }
 
 function selectedMailActionIDs() {
   pruneMailSelectionToVisible();
   const bulkIDs = Array.from(selectedMailMessageIDs());
   if (bulkIDs.length > 0) return bulkIDs;
+  const activeID = String(currentActiveMailMessageID() || "").trim();
   const currentID = String(state.selectedMessage?.id || "").trim();
   if (currentID && !isDraftsMailboxSelected()) return [currentID];
+  if (activeID && !isDraftsMailboxSelected()) return [activeID];
   return [];
 }
 
@@ -1898,19 +2010,12 @@ function renderMailMoveTargets() {
   applyMailActionAvailability();
 }
 
-function syncMailBulkControls() {
-  if (!el.mailBulkBar || !el.mailSelectionCount || !el.mailCheckAll) return;
+function syncMailSelectionControls() {
+  if (!el.mailSelectionTools || !el.mailSelectionCount) return;
   pruneMailSelectionToVisible();
-  const visible = visibleActionableMessages();
   const count = selectedMailMessageIDs().size;
-  const hasVisible = visible.length > 0;
-  const bulkEnabled = !isDraftsMailboxSelected() && hasVisible;
-  el.mailBulkBar.classList.toggle("hidden", !bulkEnabled);
   el.mailSelectionCount.textContent = count === 1 ? "1 selected" : `${count} selected`;
-  el.mailCheckAll.disabled = !bulkEnabled;
-  el.mailCheckAll.checked = bulkEnabled && count > 0 && count === visible.length;
-  el.mailCheckAll.indeterminate = bulkEnabled && count > 0 && count < visible.length;
-  if (el.btnMailSelectVisible) el.btnMailSelectVisible.disabled = !bulkEnabled || count === visible.length;
+  el.mailSelectionTools.classList.toggle("hidden", count === 0);
   if (el.btnMailClear) el.btnMailClear.disabled = count === 0;
 }
 
@@ -2777,6 +2882,7 @@ function openUIModal(options) {
     inputLabel = "Value",
     inputType = "text",
     inputValue = "",
+    choices = [],
     mode = "confirm",
     trigger = null,
   } = options || {};
@@ -2791,6 +2897,21 @@ function openUIModal(options) {
   el.uiModalInputLabel.textContent = inputLabel;
   el.uiModalInput.type = inputType;
   el.uiModalInput.value = inputValue;
+  if (el.uiModalDatalist) {
+    el.uiModalDatalist.replaceChildren();
+    for (const choice of Array.isArray(choices) ? choices : []) {
+      const value = String(choice || "").trim();
+      if (!value) continue;
+      const option = document.createElement("option");
+      option.value = value;
+      el.uiModalDatalist.appendChild(option);
+    }
+    if (el.uiModalDatalist.children.length > 0) {
+      el.uiModalInput.setAttribute("list", "ui-modal-datalist");
+    } else {
+      el.uiModalInput.removeAttribute("list");
+    }
+  }
   const hasInput = mode === "prompt";
   el.uiModalInputWrap.classList.toggle("hidden", !hasInput);
   el.uiModalOverlay.classList.remove("hidden");
@@ -2815,6 +2936,7 @@ async function showPromptModal(opts) {
     inputLabel: opts?.label || "Value",
     inputType: opts?.inputType || "text",
     inputValue: opts?.defaultValue || "",
+    choices: opts?.choices || [],
     confirmText: opts?.confirmText || "Confirm",
     cancelText: opts?.cancelText || "Cancel",
     trigger: opts?.trigger || null,
@@ -6110,6 +6232,59 @@ function mailboxNameForRole(role) {
   return String(match?.name || "");
 }
 
+function defaultMailboxNameForRole(role) {
+  if (role === "sent") return "Sent";
+  return role === "archive" ? "Archive" : "Trash";
+}
+
+async function ensureSpecialMailbox(role, trigger = null) {
+  const normalizedRole = normalizeMailboxRole(role);
+  if (normalizedRole !== "sent" && normalizedRole !== "archive" && normalizedRole !== "trash") {
+    throw new Error("Unsupported special mailbox.");
+  }
+  const existing = String(mailboxNameForRole(normalizedRole) || "").trim();
+  if (existing) {
+    return existing;
+  }
+  const choices = selectableMoveMailboxes().map((item) => String(item?.name || "").trim()).filter(Boolean);
+  const input = await showPromptModal({
+    title: normalizedRole === "sent"
+      ? "Choose Sent Mailbox"
+      : normalizedRole === "archive"
+        ? "Choose Archive Mailbox"
+        : "Choose Trash Mailbox",
+    body: "Pick an existing mailbox or type a new mailbox name. Despatch will create it if it does not exist yet.",
+    label: "Mailbox",
+    defaultValue: defaultMailboxNameForRole(normalizedRole),
+    confirmText: "Save",
+    cancelText: "Cancel",
+    choices,
+    trigger,
+  });
+  if (input === null) {
+    throw new Error("Mailbox setup cancelled.");
+  }
+  const mailboxName = String(input || "").trim();
+  if (!mailboxName) {
+    throw new Error("Mailbox name is required.");
+  }
+  const payload = await api(`/api/v1/mailboxes/special/${encodeURIComponent(normalizedRole)}`, {
+    method: "POST",
+    json: {
+      mailbox_name: mailboxName,
+      create_if_missing: true,
+    },
+  });
+  if (Array.isArray(payload?.mailboxes)) {
+    state.mail.mailboxes = payload.mailboxes;
+    renderMailboxes();
+    renderMailMoveTargets();
+  } else {
+    await loadMailboxes({ quiet: true, logErrors: false });
+  }
+  return String(payload?.mailbox_name || mailboxName).trim();
+}
+
 function renderMailboxes() {
   const items = Array.isArray(state.mail.mailboxes) ? state.mail.mailboxes : [];
   const system = [];
@@ -6161,6 +6336,7 @@ function renderMailboxes() {
       btn.tabIndex = -1;
       btn.onclick = async () => {
         state.mailbox = mb.name;
+        state.mail.searchQuery = "";
         state.mail.selectedDraftID = "";
         clearMailMessageSelection({ render: false });
         clearReaderSelection();
@@ -6193,21 +6369,279 @@ async function loadMailboxes(opts = {}) {
     api("/api/v1/mailboxes", { logErrors: opts.logErrors }),
     loadDrafts({ logErrors: false }).catch(() => state.mail.drafts),
   ]);
-  state.mail.mailboxes = Array.isArray(mailboxes) ? mailboxes : [];
+  reconcileMailboxes(Array.isArray(mailboxes) ? mailboxes : []);
+}
+
+function updateLocalMailboxCounts(mailboxName, deltas = {}) {
+  const target = String(mailboxName || state.mailbox || "").trim();
+  if (!target) return;
+  const unreadDelta = Number(deltas.unreadDelta || 0);
+  const messagesDelta = Number(deltas.messagesDelta || 0);
+  if (!unreadDelta && !messagesDelta) return;
+  for (const mailbox of state.mail.mailboxes) {
+    if (String(mailbox?.name || "") !== target) continue;
+    if (unreadDelta) {
+      mailbox.unread = Math.max(0, Number(mailbox?.unread || 0) + unreadDelta);
+    }
+    if (messagesDelta) {
+      mailbox.messages = Math.max(0, Number(mailbox?.messages || 0) + messagesDelta);
+    }
+    break;
+  }
   renderMailboxes();
   renderMailMoveTargets();
 }
 
 function updateLocalMailboxUnread(mailboxName, delta) {
-  const target = String(mailboxName || state.mailbox || "").trim();
-  if (!target || !delta) return;
-  for (const mailbox of state.mail.mailboxes) {
-    if (String(mailbox?.name || "") !== target) continue;
-    const next = Math.max(0, Number(mailbox?.unread || 0) + Number(delta || 0));
-    mailbox.unread = next;
-    break;
+  updateLocalMailboxCounts(mailboxName, { unreadDelta: delta });
+}
+
+function mailSnapshotValue(value) {
+  if (value === null || value === undefined) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function snapshotMailState() {
+  return {
+    mailbox: state.mailbox,
+    mailboxes: mailSnapshotValue(state.mail.mailboxes),
+    messages: mailSnapshotValue(state.messages),
+    selectedMessage: mailSnapshotValue(state.selectedMessage),
+    selectedMessageSummary: mailSnapshotValue(state.selectedMessageSummary),
+    thread: mailSnapshotValue(state.thread),
+    selectedMessageIDs: Array.from(selectedMailMessageIDs()),
+    activeMessageID: String(state.mail.activeMessageID || ""),
+    selectionAnchorID: String(state.mail.selectionAnchorID || ""),
+    selectedDraftID: String(state.mail.selectedDraftID || ""),
+    mobileSelectionMode: !!state.mail.mobileSelectionMode,
+    activeMailPane: String(state.ui.activeMailPane || "messages"),
+  };
+}
+
+function renderAttachmentLinks(message = state.selectedMessage) {
+  if (!el.attachments) return;
+  el.attachments.innerHTML = "";
+  if (!message) return;
+  for (const attachment of (message.attachments || [])) {
+    const link = document.createElement("a");
+    link.href = `/api/v1/attachments/${encodeURIComponent(attachment.id)}`;
+    link.textContent = `${attachment.filename || "attachment"} (${Math.round((attachment.size || 0) / 1024)} KB)`;
+    link.target = "_blank";
+    el.attachments.appendChild(link);
+  }
+}
+
+function restoreMailStateSnapshot(snapshot) {
+  if (!snapshot) return;
+  state.mailbox = String(snapshot.mailbox || state.mailbox || "INBOX");
+  state.mail.mailboxes = Array.isArray(snapshot.mailboxes) ? snapshot.mailboxes : [];
+  state.messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+  state.selectedMessage = snapshot.selectedMessage || null;
+  state.selectedMessageSummary = snapshot.selectedMessageSummary || null;
+  state.thread = createThreadState(snapshot.thread || {});
+  state.mail.selectedMessageIDs = new Set(Array.isArray(snapshot.selectedMessageIDs) ? snapshot.selectedMessageIDs : []);
+  state.mail.activeMessageID = String(snapshot.activeMessageID || "");
+  state.mail.selectionAnchorID = String(snapshot.selectionAnchorID || "");
+  state.mail.selectedDraftID = String(snapshot.selectedDraftID || "");
+  state.mail.mobileSelectionMode = !!snapshot.mobileSelectionMode;
+  renderMailboxes();
+  renderMailMoveTargets();
+  renderMessages(state.messages);
+  renderSelectedMessageChrome(state.selectedMessage);
+  renderReaderBody(state.selectedMessage);
+  renderAttachmentLinks(state.selectedMessage);
+  renderThreadContext();
+  setActiveMailPane(snapshot.activeMailPane || (state.selectedMessage ? "reader" : "messages"), { focus: false });
+}
+
+function reconcileMailboxes(items) {
+  const next = Array.isArray(items) ? items : [];
+  state.mail.mailboxes = next;
+  if (!isDraftsMailboxSelected()) {
+    const current = String(state.mailbox || "").trim();
+    if (current && !next.some((item) => String(item?.name || "") === current)) {
+      const inbox = next.find((item) => normalizeMailboxRole(item?.role, item?.name) === "inbox");
+      state.mailbox = String(inbox?.name || next[0]?.name || "INBOX");
+    }
   }
   renderMailboxes();
+  renderMailMoveTargets();
+}
+
+function reconcileVisibleMessages(items, options = {}) {
+  const next = Array.isArray(items) ? items : [];
+  const visibleIDs = new Set(next.map((item) => String(item?.id || "")).filter(Boolean));
+  const selectedIDs = Array.from(selectedMailMessageIDs()).filter((id) => visibleIDs.has(String(id || "")));
+  const previousActiveID = String(state.mail.activeMessageID || "").trim();
+  const previousReaderID = String(state.selectedMessage?.id || "").trim();
+  const readerMailbox = String(
+    state.selectedMessageSummary?.mailbox
+      || state.selectedMessage?.mailbox
+      || state.mailbox
+      || "",
+  ).trim();
+
+  if (
+    previousReaderID
+    && !visibleIDs.has(previousReaderID)
+    && options.clearMissingReader !== false
+    && readerMailbox
+    && readerMailbox === String(state.mailbox || "").trim()
+  ) {
+    clearReaderSelection();
+  } else if (previousReaderID && visibleIDs.has(previousReaderID)) {
+    state.selectedMessageSummary = next.find((item) => String(item?.id || "") === previousReaderID) || state.selectedMessageSummary;
+  }
+
+  state.mail.selectedMessageIDs = new Set(selectedIDs);
+  state.mail.mobileSelectionMode = state.mail.mobileSelectionMode && selectedIDs.length > 0;
+
+  if (previousActiveID && visibleIDs.has(previousActiveID)) {
+    state.mail.activeMessageID = previousActiveID;
+  } else if (previousReaderID && visibleIDs.has(previousReaderID)) {
+    state.mail.activeMessageID = previousReaderID;
+  } else if (selectedIDs.length > 0) {
+    state.mail.activeMessageID = String(selectedIDs[selectedIDs.length - 1] || "");
+  } else if (!visibleIDs.has(String(state.mail.activeMessageID || ""))) {
+    state.mail.activeMessageID = "";
+  }
+
+  renderMessages(next);
+}
+
+function stopQueuedMailRefresh() {
+  if (!state.mail.refreshTimer) return;
+  window.clearTimeout(state.mail.refreshTimer);
+  state.mail.refreshTimer = 0;
+}
+
+async function runQueuedMailRefresh(options = {}) {
+  if (!state.user) return;
+  if (state.mail.refreshInFlight) {
+    state.mail.refreshPending = true;
+    return;
+  }
+  state.mail.refreshInFlight = true;
+  try {
+    await refreshMailView(options);
+  } catch {
+    // Background refresh should not interrupt current state.
+  } finally {
+    state.mail.refreshInFlight = false;
+    if (state.mail.refreshPending) {
+      state.mail.refreshPending = false;
+      queueMailRefresh(options);
+    }
+  }
+}
+
+function queueMailRefresh(options = {}) {
+  if (!state.user) return;
+  state.mail.refreshPending = false;
+  stopQueuedMailRefresh();
+  const delay = Math.max(0, Number(options.delay || 0));
+  state.mail.refreshTimer = window.setTimeout(() => {
+    state.mail.refreshTimer = 0;
+    void runQueuedMailRefresh(options);
+  }, delay);
+}
+
+function optimisticMoveMessages(messageIDs, targetMailbox) {
+  const ids = new Set((Array.isArray(messageIDs) ? messageIDs : []).map((item) => String(item || "").trim()).filter(Boolean));
+  if (ids.size === 0) return;
+  const currentMailbox = String(state.mailbox || "").trim();
+  let removedSelectedReader = false;
+  state.messages = (Array.isArray(state.messages) ? state.messages : []).filter((item) => {
+    const id = String(item?.id || "").trim();
+    if (!ids.has(id)) return true;
+    const mailbox = String(item?.mailbox || currentMailbox).trim();
+    updateLocalMailboxCounts(mailbox, {
+      unreadDelta: item?.seen ? 0 : -1,
+      messagesDelta: -1,
+    });
+    updateLocalMailboxCounts(targetMailbox, { messagesDelta: 1 });
+    applyLocalMessagePatch(id, { mailbox: targetMailbox });
+    if (String(state.selectedMessage?.id || "") === id || String(state.selectedMessageSummary?.id || "") === id) {
+      removedSelectedReader = true;
+    }
+    return false;
+  });
+  if (removedSelectedReader) {
+    clearReaderSelection();
+    setActiveMailPane("messages", { focus: false });
+  }
+  renderMessages(state.messages);
+}
+
+function mailPreviewFromText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 140);
+}
+
+function optimisticComposeSummary(snapshot, mailboxName, options = {}) {
+  const previewSource = String(snapshot?.bodyText || "").trim() || stripHTMLToText(snapshot?.bodyHTML || "");
+  return {
+    id: `sent-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    mailbox: mailboxName,
+    from: String(snapshot?.from || state.user?.email || "").trim(),
+    subject: String(snapshot?.subject || "").trim() || "(no subject)",
+    date: new Date().toISOString(),
+    seen: true,
+    flagged: false,
+    answered: !!options.answered,
+    preview: mailPreviewFromText(previewSource),
+    thread_id: String(snapshot?.threadID || "").trim(),
+  };
+}
+
+function insertOptimisticMailboxSummary(summary) {
+  if (!summary || !summary.id) return;
+  const mailboxName = String(summary.mailbox || "").trim();
+  if (!mailboxName) return;
+  updateLocalMailboxCounts(mailboxName, { messagesDelta: 1 });
+  if (mailboxName !== String(state.mailbox || "").trim()) return;
+  const items = Array.isArray(state.messages) ? [...state.messages] : [];
+  items.unshift(summary);
+  renderMessages(items);
+}
+
+function composeSenderForSummary() {
+  if (state.compose.fromMode === "manual") {
+    return composeResolvedManualSender();
+  }
+  if (state.compose.fromMode === "identity") {
+    const match = (Array.isArray(state.compose.identities) ? state.compose.identities : [])
+      .find((item) => String(item?.identity_id || "") === String(state.compose.selectedIdentityID || ""));
+    return String(match?.from_email || composeAuthEmailValue()).trim();
+  }
+  return composeAuthEmailValue();
+}
+
+function captureComposeSendSnapshot() {
+  const contextMessageID = String(state.compose.sendContext?.messageID || "").trim();
+  const threadID = contextMessageID && String(state.selectedMessageSummary?.id || "") === contextMessageID
+    ? String(state.selectedMessageSummary?.thread_id || state.selectedMessage?.thread_id || "").trim()
+    : "";
+  return {
+    from: composeSenderForSummary(),
+    subject: String(el.composeSubjectInput?.value || "").trim(),
+    bodyText: composeEditorText(),
+    bodyHTML: composeEditorHTML(),
+    threadID,
+  };
+}
+
+function composeSendStatusMessage(sendMode, result) {
+  let text = "Message sent.";
+  if (sendMode === "reply") text = "Reply sent.";
+  else if (sendMode === "forward") text = "Forward sent.";
+  const savedCopyMailbox = String(result?.saved_copy_mailbox || "").trim();
+  if (String(result?.warning || "").trim()) {
+    return { text: `${text} ${String(result.warning).trim()}`, tone: "info" };
+  }
+  if (savedCopyMailbox) {
+    return { text: `${text} Saved to ${savedCopyMailbox}.`, tone: "ok" };
+  }
+  return { text, tone: "ok" };
 }
 
 function applyLocalMessagePatch(messageID, patch) {
@@ -6242,22 +6676,26 @@ function renderMessages(items) {
   el.messages.innerHTML = "";
   state.messages = Array.isArray(items) ? items : [];
   pruneMailSelectionToVisible();
+  const activeID = String(currentActiveMailMessageID() || "").trim();
+  const hasKnownActive = activeID && state.messages.some((item) => String(item?.id || "") === activeID);
+  if (!hasKnownActive && state.messages.length > 0) {
+    state.mail.activeMessageID = String(state.messages[0]?.id || "");
+  }
   if (state.messages.length === 0) {
     const empty = document.createElement("li");
     empty.className = "message-empty";
     empty.textContent = "No messages to display.";
     el.messages.appendChild(empty);
-    syncMailBulkControls();
+    syncMailSelectionControls();
     applyMailActionAvailability();
     return;
   }
   for (const m of state.messages) {
     const li = document.createElement("li");
     li.dataset.messageId = String(m?.id || "");
-    const checked = selectedMailMessageIDs().has(String(m?.id || ""));
-    const isActive = m.isDraft
-      ? String(state.mail.selectedDraftID || "") === String(m.id || "")
-      : !!(state.selectedMessage && state.selectedMessage.id === m.id);
+    const messageID = String(m?.id || "");
+    const checked = selectedMailMessageIDs().has(messageID);
+    const isActive = messageID === currentActiveMailMessageID();
     li.className = "message-row";
     if (isActive) li.classList.add("active");
     if (checked) li.classList.add("is-selected");
@@ -6266,62 +6704,90 @@ function renderMessages(items) {
     if (m.answered) li.classList.add("is-answered");
     if (m.isDraft) li.classList.add("is-draft");
 
-    if (!m.isDraft) {
-      const selectWrap = document.createElement("label");
-      selectWrap.className = "message-row-select";
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.className = "message-row-check";
-      checkbox.checked = checked;
-      checkbox.dataset.messageSelect = String(m.id || "");
-      checkbox.setAttribute("aria-label", `Select ${String(m.subject || "(no subject)")}`);
-      checkbox.addEventListener("click", (event) => {
-        event.stopPropagation();
-      });
-      checkbox.addEventListener("change", () => {
-        toggleMailMessageSelection(String(m.id || ""), checkbox.checked);
-      });
-      selectWrap.appendChild(checkbox);
-      li.appendChild(selectWrap);
-    }
-
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "message-row-btn";
-    btn.dataset.messageId = m.id;
+    btn.dataset.messageId = messageID;
     btn.dataset.threadId = String(m.thread_id || "");
-    btn.id = safeDomID("message-option-", m.id, "message");
+    btn.id = safeDomID("message-option-", messageID, "message");
     btn.setAttribute("role", "option");
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
     btn.tabIndex = -1;
     const sender = formatSenderDisplayName(m.from);
     const previewText = String(m.preview || "").trim();
-    const previewMarkup = previewText ? escapeHtml(previewText) : "&nbsp;";
-    const previewClass = previewText ? "message-preview" : "message-preview message-preview--empty";
     const contextBadge = m.isDraft && String(m.context_badge || "").trim()
       ? `<span class="message-context-badge">${escapeHtml(m.context_badge)}</span>`
       : "";
     btn.innerHTML = `<span class="message-mark" aria-hidden="true"></span>
       <span class="message-from">${escapeHtml(sender)}</span>
-      <span class="message-subject">${escapeHtml(m.subject || "(no subject)")}${contextBadge}</span>
-      <span class="${previewClass}">${previewMarkup}</span>
+      <span class="message-content">
+        <span class="message-subject">${escapeHtml(m.subject || "(no subject)")}${contextBadge}</span>
+        ${previewText ? `<span class="message-preview-sep" aria-hidden="true">—</span><span class="message-preview">${escapeHtml(previewText)}</span>` : ""}
+      </span>
       <span class="message-date">${escapeHtml(formatListDate(m.date))}</span>`;
-    btn.onclick = () => {
+    const cancelLongPress = () => {
+      if (state.mail.rowLongPressTimer) {
+        window.clearTimeout(state.mail.rowLongPressTimer);
+        state.mail.rowLongPressTimer = 0;
+      }
+    };
+    btn.addEventListener("pointerdown", (event) => {
+      if (m.isDraft || !isActionableMailSummary(m)) return;
+      if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+      cancelLongPress();
+      state.mail.rowLongPressTimer = window.setTimeout(() => {
+        state.mail.rowLongPressTimer = 0;
+        enterMobileMailSelectionMode(messageID);
+      }, 420);
+    });
+    ["pointerup", "pointercancel", "pointerleave", "pointermove"].forEach((eventName) => {
+      btn.addEventListener(eventName, cancelLongPress);
+    });
+    btn.onclick = (event) => {
+      if (
+        Date.now() < Number(state.mail.suppressRowClickUntil || 0)
+        && String(state.mail.suppressRowClickMessageID || "") === messageID
+      ) {
+        state.mail.suppressRowClickMessageID = "";
+        return;
+      }
       if (m.isDraft) {
         clearReaderSelection();
-        state.mail.selectedDraftID = String(m.id || "");
+        state.mail.selectedDraftID = messageID;
+        state.mail.activeMessageID = messageID;
         renderMessages(state.messages);
         void openComposeDraft(m.id, btn);
         return;
       }
+      const isModifierToggle = !isMobileLayout() && (event.metaKey || event.ctrlKey);
+      const isRangeSelect = !isMobileLayout() && event.shiftKey;
+      if (state.mail.mobileSelectionMode) {
+        toggleMailMessageSelection(messageID, !checked, { mobileMode: true });
+        if (selectedMailMessageIDs().size === 0) {
+          state.mail.mobileSelectionMode = false;
+          renderMessages(state.messages);
+        }
+        return;
+      }
+      if (isRangeSelect) {
+        setMailSelectionRange(messageID, { render: true });
+        return;
+      }
+      if (isModifierToggle) {
+        toggleMailMessageSelection(messageID, !checked, { render: true });
+        return;
+      }
+      state.mail.activeMessageID = messageID;
+      state.mail.selectionAnchorID = messageID;
       state.mail.selectedDraftID = "";
+      clearMailMessageSelection({ render: false });
       void openMessage(m.id, m);
     };
     li.appendChild(btn);
     el.messages.appendChild(li);
   }
   syncMessageActiveDescendant();
-  syncMailBulkControls();
+  syncMailSelectionControls();
   applyMailActionAvailability();
 }
 
@@ -6329,8 +6795,14 @@ async function loadMessages(opts = {}) {
   if (!state.user) {
     throw new Error("Sign in required");
   }
+  const searchMode = opts.searchMode === true;
+  if (!searchMode) {
+    state.mail.searchQuery = "";
+  } else {
+    state.mail.searchQuery = String(opts.query ?? state.mail.searchQuery ?? "").trim();
+  }
   if (isDraftsMailboxSelected()) {
-    const query = String(opts.query || "").trim().toLowerCase();
+    const query = String(opts.query ?? state.mail.searchQuery ?? "").trim().toLowerCase();
     if (!Array.isArray(state.mail.drafts) || state.mail.drafts.length === 0 || opts.refreshDrafts) {
       await loadDrafts({ logErrors: false });
     }
@@ -6355,11 +6827,19 @@ async function loadMessages(opts = {}) {
     }
     return;
   }
-  const data = await api(`/api/v1/messages?mailbox=${encodeURIComponent(state.mailbox)}&page=1&page_size=40`);
+  const query = String(opts.query ?? state.mail.searchQuery ?? "").trim();
+  const endpoint = query
+    ? `/api/v1/search?mailbox=${encodeURIComponent(state.mailbox)}&q=${encodeURIComponent(query)}&page=1&page_size=40`
+    : `/api/v1/messages?mailbox=${encodeURIComponent(state.mailbox)}&page=1&page_size=40`;
+  const data = await api(endpoint);
   const selectedID = String(state.selectedMessage?.id || "");
-  renderMessages(data.items || []);
+  reconcileVisibleMessages(data.items || [], { clearMissingReader: true });
   if (selectedID) {
     state.selectedMessageSummary = state.messages.find((item) => String(item?.id || "") === selectedID) || state.selectedMessageSummary;
+    if (state.messages.some((item) => String(item?.id || "") === selectedID)) {
+      state.mail.activeMessageID = selectedID;
+      syncMessageActiveDescendant();
+    }
   }
   if (!opts.quiet) {
     setStatus(`Mailbox ${state.mailbox} loaded.`, "ok");
@@ -6496,8 +6976,6 @@ function applyMailActionAvailability() {
   const actionCount = selectedMailActionCount();
   const hasReaderSelection = !!state.selectedMessage && !bulkSelected;
   const hasActionSelection = actionCount > 0;
-  const hasArchiveMailbox = String(mailboxNameForRole("archive") || "").trim() !== "";
-  const hasTrashMailbox = String(mailboxNameForRole("trash") || "").trim() !== "";
   const hasMoveTarget = String(el.mailMoveTarget?.value || "").trim() !== "";
   [el.btnReply, el.btnForward].forEach((node) => {
     if (!node) return;
@@ -6507,9 +6985,9 @@ function applyMailActionAvailability() {
     if (!node) return;
     node.disabled = !hasActionSelection;
   });
-  if (el.btnArchive) el.btnArchive.disabled = !hasActionSelection || !hasArchiveMailbox;
+  if (el.btnArchive) el.btnArchive.disabled = !hasActionSelection;
   if (el.btnMove) el.btnMove.disabled = !hasActionSelection || !hasMoveTarget;
-  if (el.btnTrash) el.btnTrash.disabled = !hasActionSelection || !hasTrashMailbox;
+  if (el.btnTrash) el.btnTrash.disabled = !hasActionSelection;
   if (el.btnFlag) {
     el.btnFlag.textContent = selectedMailActionFlagMode() === "unflag" ? "Unflag" : "Flag";
   }
@@ -6775,10 +7253,32 @@ async function refreshMailView(opts = {}) {
   if (!state.user) return;
   const preservePane = opts.preservePane !== false;
   const activePane = state.ui.activeMailPane;
-  await Promise.all([
-    loadMailboxes({ quiet: true, logErrors: false }),
-    loadMessages({ quiet: true }),
-  ]);
+  if (isDraftsMailboxSelected()) {
+    await Promise.all([
+      loadMailboxes({ quiet: true, logErrors: false }),
+      loadMessages({
+        quiet: true,
+        refreshDrafts: true,
+        query: state.mail.searchQuery,
+        searchMode: !!String(state.mail.searchQuery || "").trim(),
+      }),
+    ]);
+  } else {
+    const query = String(state.mail.searchQuery || "").trim();
+    const [mailboxes, draftsPayload, data] = await Promise.all([
+      api("/api/v1/mailboxes", { logErrors: false }),
+      api("/api/v2/drafts?page=1&page_size=100", { logErrors: false }).catch(() => ({ items: state.mail.drafts })),
+      api(
+        query
+          ? `/api/v1/search?mailbox=${encodeURIComponent(state.mailbox)}&q=${encodeURIComponent(query)}&page=1&page_size=40`
+          : `/api/v1/messages?mailbox=${encodeURIComponent(state.mailbox)}&page=1&page_size=40`,
+        { logErrors: false },
+      ),
+    ]);
+    state.mail.drafts = Array.isArray(draftsPayload?.items) ? draftsPayload.items : [];
+    reconcileMailboxes(Array.isArray(mailboxes) ? mailboxes : []);
+    reconcileVisibleMessages(data?.items || [], { clearMissingReader: true });
+  }
   await refreshSelectedThreadContext({ quiet: true });
   if (preservePane) {
     setActiveMailPane(activePane || (state.selectedMessage ? "reader" : "messages"), { focus: false });
@@ -6786,6 +7286,8 @@ async function refreshMailView(opts = {}) {
 }
 
 function stopMailPolling() {
+  stopQueuedMailRefresh();
+  state.mail.refreshPending = false;
   if (!state.mail.pollTimer) return;
   clearInterval(state.mail.pollTimer);
   state.mail.pollTimer = 0;
@@ -6796,14 +7298,7 @@ async function pollMailView() {
   if (state.mail.refreshInFlight) return;
   if (document.visibilityState !== "visible") return;
   if (el.viewMail?.classList.contains("hidden")) return;
-  state.mail.refreshInFlight = true;
-  try {
-    await refreshMailView({ preservePane: true });
-  } catch {
-    // Polling failures should not disrupt current mail state.
-  } finally {
-    state.mail.refreshInFlight = false;
-  }
+  await runQueuedMailRefresh({ preservePane: true });
 }
 
 function startMailPolling() {
@@ -6934,28 +7429,34 @@ async function runMailAction(action, options = {}) {
   const failed = [];
   let succeeded = 0;
   for (const id of ids) {
+    const snapshot = snapshotMailState();
     try {
       if (action === "flag") {
+        applyLocalMessagePatch(id, { flagged: true });
         await api(`/api/v1/messages/${encodeURIComponent(id)}/flags`, {
           method: "POST",
           json: { add: ["\\Flagged"] },
         });
       } else if (action === "unflag") {
+        applyLocalMessagePatch(id, { flagged: false });
         await api(`/api/v1/messages/${encodeURIComponent(id)}/flags`, {
           method: "POST",
           json: { remove: ["\\Flagged"] },
         });
       } else if (action === "read") {
+        applyLocalMessagePatch(id, { seen: true });
         await api(`/api/v1/messages/${encodeURIComponent(id)}/flags`, {
           method: "POST",
           json: { add: ["\\Seen"] },
         });
       } else if (action === "unread") {
+        applyLocalMessagePatch(id, { seen: false });
         await api(`/api/v1/messages/${encodeURIComponent(id)}/flags`, {
           method: "POST",
           json: { remove: ["\\Seen"] },
         });
       } else if (action === "move" || action === "archive" || action === "trash") {
+        optimisticMoveMessages([id], targetMailbox);
         await api(`/api/v1/messages/${encodeURIComponent(id)}/move`, {
           method: "POST",
           json: { mailbox: targetMailbox },
@@ -6965,22 +7466,13 @@ async function runMailAction(action, options = {}) {
       }
       succeeded += 1;
     } catch (err) {
+      restoreMailStateSnapshot(snapshot);
       failed.push({ id, message: err.message });
     }
   }
 
   if (succeeded > 0) {
-    if (action === "move" || action === "archive" || action === "trash") {
-      clearMailMessageSelection({ render: false });
-      clearReaderSelection();
-      await Promise.all([
-        loadMailboxes({ quiet: true, logErrors: false }),
-        loadMessages({ quiet: true }),
-      ]);
-      setActiveMailPane("messages");
-    } else {
-      await refreshMailView({ preservePane: true });
-    }
+    queueMailRefresh({ preservePane: true, delay: 120 });
   }
 
   if (failed.length > 0) {
@@ -7038,6 +7530,8 @@ async function openMessage(id, summary = null) {
     throw new Error("Sign in required");
   }
   state.mail.selectedDraftID = "";
+  state.mail.activeMessageID = String(id || "");
+  state.mail.selectionAnchorID = String(id || "");
   const knownSummary = summary || state.messages.find((item) => String(item?.id || "") === String(id || "")) || null;
   state.selectedMessageSummary = knownSummary;
   const m = await api(`/api/v1/messages/${encodeURIComponent(id)}`);
@@ -7045,15 +7539,7 @@ async function openMessage(id, summary = null) {
   renderSelectedMessageChrome(m);
   state.ui.readerViewMode = messageHasHTML(m) ? "html" : "plain";
   renderReaderBody(m);
-
-  el.attachments.innerHTML = "";
-  for (const a of (m.attachments || [])) {
-    const link = document.createElement("a");
-    link.href = `/api/v1/attachments/${encodeURIComponent(a.id)}`;
-    link.textContent = `${a.filename || "attachment"} (${Math.round((a.size || 0) / 1024)} KB)`;
-    link.target = "_blank";
-    el.attachments.appendChild(link);
-  }
+  renderAttachmentLinks(m);
   const threadMailbox = String(knownSummary?.mailbox || m.mailbox || state.mailbox || "INBOX").trim() || "INBOX";
   await loadThreadContext(knownSummary, m.id, threadMailbox);
   if (knownSummary && !knownSummary.seen) {
@@ -7062,12 +7548,8 @@ async function openMessage(id, summary = null) {
       method: "POST",
       json: { add: ["\\Seen"] },
       logErrors: false,
-    }).then(async () => {
-      await Promise.all([
-        loadMailboxes({ quiet: true, logErrors: false }),
-        loadMessages({ quiet: true }),
-      ]);
-      await refreshSelectedThreadContext({ quiet: true });
+    }).then(() => {
+      queueMailRefresh({ preservePane: true, delay: 120 });
     }).catch(() => {
       applyLocalMessagePatch(m.id, { seen: false });
       setStatus("Failed to mark message as read.", "error");
@@ -7083,17 +7565,25 @@ async function searchMessages() {
     throw new Error("Sign in required");
   }
   const q = el.searchInput.value.trim();
+  state.mail.searchQuery = q;
   clearMailMessageSelection({ render: false });
   if (isDraftsMailboxSelected()) {
     clearReaderSelection();
-    await loadMessages({ quiet: true, query: q });
+    await loadMessages({ quiet: true, query: q, searchMode: true });
     setStatus(`Draft search complete (${state.messages.length} results).`, "ok");
+    setActiveMailPane("messages");
+    return;
+  }
+  if (!q) {
+    clearReaderSelection();
+    await loadMessages({ quiet: true });
+    setStatus(`Mailbox ${state.mailbox} loaded.`, "ok");
     setActiveMailPane("messages");
     return;
   }
   const data = await api(`/api/v1/search?mailbox=${encodeURIComponent(state.mailbox)}&q=${encodeURIComponent(q)}&page=1&page_size=40`);
   clearReaderSelection();
-  renderMessages(data.items || []);
+  reconcileVisibleMessages(data.items || [], { clearMissingReader: true });
   setStatus(`Search complete (${(data.items || []).length} results).`, "ok");
   setActiveMailPane("messages");
 }
@@ -7131,7 +7621,7 @@ async function sendCompose(form) {
   commitComposeAllRecipientInputs();
   cleanupComposeInlineReferences();
   syncComposeDraftFields();
-  await flushComposeDraft({ immediate: true, forceCreate: true });
+  await flushComposeDraft({ immediate: true, forceCreate: true, allowWhileSubmitting: true });
   const draftID = String(state.compose.draftID || "").trim();
   if (!draftID) {
     throw new Error("Draft save failed.");
@@ -8369,21 +8859,45 @@ async function moveMailboxSelection(delta) {
   }
 }
 
-async function moveMessageSelection(delta) {
+async function moveMessageSelection(delta, options = {}) {
   const buttons = messageButtons();
   if (buttons.length === 0) return;
-  const currentID = String(state.selectedMessage?.id || "");
+  const currentID = String(currentActiveMailMessageID() || "");
   let index = buttons.findIndex((node) => String(node.dataset.messageId || "") === currentID);
   if (index < 0) index = 0;
   const next = Math.max(0, Math.min(buttons.length - 1, index + delta));
   const nextBtn = buttons[next];
   if (nextBtn) {
+    const nextID = String(nextBtn.dataset.messageId || "");
+    if (options.extendRange && !isDraftsMailboxSelected()) {
+      setMailSelectionRange(nextID, { render: false });
+    } else {
+      setActiveMailMessageID(nextID, { render: false, updateAnchor: !options.preserveAnchor });
+    }
+    nextBtn.scrollIntoView({ block: "nearest" });
     if (el.messages && typeof el.messages.focus === "function") {
       el.messages.focus({ preventScroll: true });
     }
-    nextBtn.click();
     syncMessageActiveDescendant();
   }
+}
+
+async function openActiveMailRow() {
+  const activeID = String(currentActiveMailMessageID() || "").trim();
+  if (!activeID) return;
+  const item = (Array.isArray(state.messages) ? state.messages : []).find((entry) => String(entry?.id || "") === activeID) || null;
+  if (!item) return;
+  if (item.isDraft) {
+    clearReaderSelection();
+    state.mail.selectedDraftID = activeID;
+    renderMessages(state.messages);
+    await openComposeDraft(item.id, el.messages);
+    return;
+  }
+  clearMailMessageSelection({ render: false });
+  state.mail.activeMessageID = activeID;
+  state.mail.selectionAnchorID = activeID;
+  await openMessage(item.id, item);
 }
 
 async function handleMailKeyboard(event) {
@@ -8431,19 +8945,19 @@ async function handleMailKeyboard(event) {
 
   if (k === "f") {
     event.preventDefault();
-    if (state.selectedMessage) el.btnFlag.click();
+    if (selectedMailActionCount() > 0 && el.btnFlag) el.btnFlag.click();
     return;
   }
 
   if (k === "s") {
     event.preventDefault();
-    if (state.selectedMessage) el.btnSeen.click();
+    if (selectedMailActionCount() > 0 && el.btnSeen) el.btnSeen.click();
     return;
   }
 
   if (event.key === "Delete") {
     event.preventDefault();
-    if (state.selectedMessage) el.btnTrash.click();
+    if (selectedMailActionCount() > 0 && el.btnTrash) el.btnTrash.click();
     return;
   }
 
@@ -8458,10 +8972,7 @@ async function handleMailKeyboard(event) {
     }
     if (state.ui.activeKeyboardPane === "messages") {
       event.preventDefault();
-      const activeID = el.messages?.getAttribute("aria-activedescendant") || "";
-      const active = activeID ? document.getElementById(activeID) : null;
-      const current = active || messageButtons().find((node) => String(node.dataset.messageId || "") === String(state.selectedMessage?.id || ""));
-      if (current) current.click();
+      await openActiveMailRow();
     }
   }
 
@@ -8490,12 +9001,12 @@ async function handleMailKeyboard(event) {
   }
   if (state.ui.activeKeyboardPane === "messages" && (k === "j" || event.key === "ArrowDown")) {
     event.preventDefault();
-    await moveMessageSelection(1);
+    await moveMessageSelection(1, { extendRange: event.shiftKey, preserveAnchor: event.shiftKey });
     return;
   }
   if (state.ui.activeKeyboardPane === "messages" && (k === "k" || event.key === "ArrowUp")) {
     event.preventDefault();
-    await moveMessageSelection(-1);
+    await moveMessageSelection(-1, { extendRange: event.shiftKey, preserveAnchor: event.shiftKey });
     return;
   }
   if (state.ui.activeKeyboardPane === "reader" && (k === "j" || event.key === "ArrowDown")) {
@@ -9285,15 +9796,23 @@ function bindUI() {
       updateComposeSubmitState();
       try {
         const sendMode = String(state.compose.sendContext?.mode || "send").toLowerCase();
-        const result = await sendCompose(e.target);
-        let sentMessage = "Message sent.";
-        if (sendMode === "reply") sentMessage = "Reply sent.";
-        else if (sendMode === "forward") sentMessage = "Forward sent.";
-        if (String(result?.warning || "").trim()) {
-          setStatus(`${sentMessage} ${String(result.warning).trim()}`, "info");
-        } else {
-          setStatus(sentMessage, "ok");
+        const sendContextMessageID = String(state.compose.sendContext?.messageID || "").trim();
+        const composeSnapshot = captureComposeSendSnapshot();
+        if (!mailboxNameForRole("sent")) {
+          await ensureSpecialMailbox("sent", el.btnComposeSend || e.target);
         }
+        const result = await sendCompose(e.target);
+        const savedCopyMailbox = String(result?.saved_copy_mailbox || "").trim();
+        const statusInfo = composeSendStatusMessage(sendMode, result);
+        if (sendMode === "reply" && sendContextMessageID) {
+          applyLocalMessagePatch(sendContextMessageID, { answered: true });
+        }
+        if (savedCopyMailbox && savedCopyMailbox === String(state.mailbox || "").trim() && !String(state.mail.searchQuery || "").trim()) {
+          insertOptimisticMailboxSummary(optimisticComposeSummary(composeSnapshot, savedCopyMailbox, {
+            answered: sendMode === "reply",
+          }));
+        }
+        setStatus(statusInfo.text, statusInfo.tone);
         const sentDraftID = String(state.compose.draftID || "").trim();
         e.target.reset();
         state.compose.recipients.to = [];
@@ -9319,7 +9838,7 @@ function bindUI() {
         }
         resetComposeDraftSession();
         closeComposeOverlay({ restoreFocus: true, persistDraft: false });
-        await refreshMailView({ preservePane: true });
+        queueMailRefresh({ preservePane: true, delay: 120 });
       } catch (err) {
         if (err.code === "smtp_sender_rejected") {
           const requestRef = err.requestID ? ` (request ${err.requestID})` : "";
@@ -9939,11 +10458,7 @@ function bindUI() {
   if (el.btnArchive) {
     el.btnArchive.onclick = async () => {
       try {
-        const archiveMailbox = mailboxNameForRole("archive");
-        if (!archiveMailbox) {
-          setStatus("No archive mailbox is available.", "error");
-          return;
-        }
+        const archiveMailbox = await ensureSpecialMailbox("archive", el.btnArchive);
         await runMailAction("archive", { mailbox: archiveMailbox, statusVerb: "Archived" });
       } catch (err) {
         setStatus(err.message, "error");
@@ -9965,7 +10480,7 @@ function bindUI() {
   if (el.btnTrash) {
     el.btnTrash.onclick = async () => {
       try {
-        const trashMailbox = mailboxNameForRole("trash") || "Trash";
+        const trashMailbox = await ensureSpecialMailbox("trash", el.btnTrash);
         await runMailAction("trash", { mailbox: trashMailbox, statusVerb: "Moved to trash" });
       } catch (err) {
         setStatus(err.message, "error");
@@ -9979,29 +10494,10 @@ function bindUI() {
     });
   }
 
-  if (el.btnMailSelectVisible) {
-    el.btnMailSelectVisible.onclick = () => {
-      const next = new Set(visibleActionableMessages().map((item) => String(item?.id || "")).filter(Boolean));
-      state.mail.selectedMessageIDs = next;
-      renderMessages(state.messages);
-    };
-  }
-
   if (el.btnMailClear) {
     el.btnMailClear.onclick = () => {
       clearMailMessageSelection();
     };
-  }
-
-  if (el.mailCheckAll) {
-    el.mailCheckAll.addEventListener("change", () => {
-      if (el.mailCheckAll.checked) {
-        state.mail.selectedMessageIDs = new Set(visibleActionableMessages().map((item) => String(item?.id || "")).filter(Boolean));
-      } else {
-        state.mail.selectedMessageIDs = new Set();
-      }
-      renderMessages(state.messages);
-    });
   }
 
   if (el.btnThreadCollapse) {

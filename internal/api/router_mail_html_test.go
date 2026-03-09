@@ -25,6 +25,10 @@ func (m *mailHTMLRouterTestClient) ListMailboxes(ctx context.Context, user, pass
 	return []mail.Mailbox{{Name: "INBOX", Unread: 1, Messages: 1}}, nil
 }
 
+func (m *mailHTMLRouterTestClient) CreateMailbox(ctx context.Context, user, pass, mailbox string) error {
+	return nil
+}
+
 func (m *mailHTMLRouterTestClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return []mail.MessageSummary{}, nil
 }

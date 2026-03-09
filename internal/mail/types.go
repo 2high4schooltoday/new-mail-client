@@ -78,6 +78,7 @@ type SendRequest struct {
 	References  []string         `json:"-"`
 	MessageID   string           `json:"-"`
 	Attachments []SendAttachment `json:"-"`
+	SentMailbox string           `json:"-"`
 }
 
 type SendResult struct {
@@ -93,6 +94,7 @@ type FlagPatch struct {
 
 type Client interface {
 	ListMailboxes(ctx context.Context, user, pass string) ([]Mailbox, error)
+	CreateMailbox(ctx context.Context, user, pass, mailbox string) error
 	ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]MessageSummary, error)
 	GetMessage(ctx context.Context, user, pass, id string) (Message, error)
 	Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]MessageSummary, error)

@@ -92,6 +92,30 @@ func TestBuildPreviewFromMIMERawSampleFallbackOnLongHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildPreviewFromBodySampleStripsCSSAndMachineNoise(t *testing.T) {
+	sample := `<style>table {border-collapse:collapse} td {font-family:Arial}</style>
+UEsDBAoAAAAIADZJaVy+kxu+8AEAAAMFAAALAAgCW0NvbnRlbnRfVHlwZXNdLnhtbCCiBAIooAAC
+<p>Invoice attached. Please review this week.</p>`
+	got := BuildPreviewFromBodySample(sample, 120)
+	if strings.Contains(strings.ToLower(got), "border-collapse") || strings.Contains(got, "UEsDBA") {
+		t.Fatalf("expected css/base64 noise removed, got %q", got)
+	}
+	if !strings.Contains(got, "Invoice attached") {
+		t.Fatalf("expected human preview text preserved, got %q", got)
+	}
+}
+
+func TestBuildPreviewFromBodySampleDropsTrackingLinks(t *testing.T) {
+	sample := `Read this update: https://example.com/click?utm_source=test&utm_medium=email&token=abcdef1234567890abcdef1234567890 Thanks.`
+	got := BuildPreviewFromBodySample(sample, 120)
+	if strings.Contains(strings.ToLower(got), "utm_source") || strings.Contains(strings.ToLower(got), "token=") {
+		t.Fatalf("expected tracking link noise removed, got %q", got)
+	}
+	if !strings.Contains(got, "Read this update:") {
+		t.Fatalf("expected readable text kept, got %q", got)
+	}
+}
+
 func TestMailboxRoleResolutionSupportsAttributesAndCommonNames(t *testing.T) {
 	if got := MailboxRole("Custom Sent Folder", []string{"\\Sent"}); got != "sent" {
 		t.Fatalf("expected attribute-based sent role, got %q", got)

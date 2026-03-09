@@ -18,6 +18,8 @@ func (NoopClient) ListMailboxes(ctx context.Context, user, pass string) ([]Mailb
 	}, nil
 }
 
+func (NoopClient) CreateMailbox(ctx context.Context, user, pass, mailbox string) error { return nil }
+
 func (NoopClient) ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]MessageSummary, error) {
 	return []MessageSummary{}, nil
 }
