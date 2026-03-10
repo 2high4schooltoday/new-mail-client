@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net"
-	stdmail "net/mail"
 	"net/http"
+	stdmail "net/mail"
 	"net/url"
 	"os"
 	"strconv"
@@ -1256,6 +1256,77 @@ func (h *Handlers) V2GetIndexedMessageRaw(w http.ResponseWriter, r *http.Request
 	_, _ = w.Write([]byte(msg.RawSource))
 }
 
+func (h *Handlers) V2GetIndexedMessageAttachment(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	accountID := strings.TrimSpace(r.URL.Query().Get("account_id"))
+	if accountID == "" {
+		util.WriteError(w, 400, "bad_request", "account_id is required", middleware.RequestID(r.Context()))
+		return
+	}
+	if _, err := h.svc.Store().GetMailAccountByID(r.Context(), u.ID, accountID); err != nil {
+		util.WriteError(w, 403, "forbidden", "account does not belong to current user", middleware.RequestID(r.Context()))
+		return
+	}
+	id := chi.URLParam(r, "id")
+	attachmentID := strings.TrimSpace(chi.URLParam(r, "attachment_id"))
+	if attachmentID == "" {
+		util.WriteError(w, 400, "bad_request", "attachment_id is required", middleware.RequestID(r.Context()))
+		return
+	}
+	msg, err := h.svc.Store().GetIndexedMessageByID(r.Context(), accountID, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, 404, "message_not_found", "message not found", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, 500, "message_get_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	attachments, err := h.svc.Store().GetIndexedMessageAttachments(r.Context(), accountID, id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		util.WriteError(w, 500, "attachment_get_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	meta, body, extractErr := mail.ExtractAttachmentFromRaw([]byte(msg.RawSource), msg.ID, attachmentID)
+	if extractErr != nil {
+		part := 0
+		for i, item := range attachments {
+			if strings.TrimSpace(item.ID) == attachmentID {
+				part = i + 1
+				break
+			}
+		}
+		if part == 0 {
+			util.WriteError(w, 404, "attachment_not_found", "attachment not found", middleware.RequestID(r.Context()))
+			return
+		}
+		meta, body, extractErr = mail.ExtractAttachmentPartFromRaw([]byte(msg.RawSource), msg.ID, part)
+		if extractErr != nil {
+			util.WriteError(w, 404, "attachment_not_found", "attachment not found", middleware.RequestID(r.Context()))
+			return
+		}
+	}
+	contentType := strings.TrimSpace(meta.ContentType)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	filename := strings.TrimSpace(meta.Filename)
+	if filename == "" {
+		filename = "attachment.bin"
+	}
+	w.Header().Set("Content-Type", contentType)
+	disposition := "attachment"
+	if meta.Inline {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", disposition+`; filename="`+filename+`"`)
+	if len(body) > 0 {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 func (h *Handlers) V2BulkMessages(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
 	var req struct {
@@ -1832,6 +1903,12 @@ func (h *Handlers) V2CreateDraft(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if strings.TrimSpace(req.ContextAccountID) != "" {
+		if _, err := h.svc.Store().GetMailAccountByID(r.Context(), u.ID, req.ContextAccountID); err != nil {
+			util.WriteError(w, 403, "forbidden", "context account does not belong to current user", middleware.RequestID(r.Context()))
+			return
+		}
+	}
 	out, err := h.svc.Store().CreateDraft(r.Context(), req)
 	if err != nil {
 		util.WriteError(w, 400, "create_draft_failed", err.Error(), middleware.RequestID(r.Context()))
@@ -1862,6 +1939,12 @@ func (h *Handlers) V2UpdateDraft(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(current.AccountID) != "" {
 		if _, err := h.svc.Store().GetMailAccountByID(r.Context(), u.ID, current.AccountID); err != nil {
 			util.WriteError(w, 403, "forbidden", "account does not belong to current user", middleware.RequestID(r.Context()))
+			return
+		}
+	}
+	if strings.TrimSpace(current.ContextAccountID) != "" {
+		if _, err := h.svc.Store().GetMailAccountByID(r.Context(), u.ID, current.ContextAccountID); err != nil {
+			util.WriteError(w, 403, "forbidden", "context account does not belong to current user", middleware.RequestID(r.Context()))
 			return
 		}
 	}
@@ -1977,7 +2060,17 @@ func (h *Handlers) V2DeleteDraft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) V2ListDraftVersions(w http.ResponseWriter, r *http.Request) {
-	versions, err := h.svc.Store().ListDraftVersions(r.Context(), chi.URLParam(r, "id"), 20)
+	u, _ := middleware.User(r.Context())
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if _, err := h.svc.Store().GetDraftByID(r.Context(), u.ID, id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, 404, "draft_not_found", "draft not found", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, 500, "draft_get_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	versions, err := h.svc.Store().ListDraftVersions(r.Context(), id, 20)
 	if err != nil {
 		util.WriteError(w, 500, "draft_versions_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -2037,7 +2130,7 @@ func (h *Handlers) V2SendDraft(w http.ResponseWriter, r *http.Request) {
 	replyContext := strings.EqualFold(strings.TrimSpace(draft.ComposeMode), "reply") && strings.TrimSpace(draft.ContextMessageID) != ""
 	mailLogin := service.MailIdentity(u)
 	mailPass := ""
-	if replyContext {
+	if replyContext && strings.TrimSpace(draft.ContextAccountID) == "" {
 		mailPass, err = h.sessionMailPasswordFromContext(r.Context())
 		if err != nil {
 			code := "send_failed"
@@ -2078,10 +2171,14 @@ func (h *Handlers) V2SendDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.svc.Store().SetDraftSendState(r.Context(), u.ID, draft.ID, "sent", "")
 	if markAnswered && strings.TrimSpace(draft.ContextMessageID) != "" {
-		pass, passErr := h.sessionMailPasswordFromContext(r.Context())
-		if passErr == nil {
-			login := service.MailIdentity(u)
-			_ = h.svc.Mail().UpdateFlags(r.Context(), login, pass, draft.ContextMessageID, mail.FlagPatch{Add: []string{"\\Answered"}})
+		if contextAccountID := strings.TrimSpace(draft.ContextAccountID); contextAccountID != "" {
+			_ = h.svc.Store().SetIndexedMessageAnswered(r.Context(), contextAccountID, draft.ContextMessageID, true)
+		} else {
+			pass, passErr := h.sessionMailPasswordFromContext(r.Context())
+			if passErr == nil {
+				login := service.MailIdentity(u)
+				_ = h.svc.Mail().UpdateFlags(r.Context(), login, pass, draft.ContextMessageID, mail.FlagPatch{Add: []string{"\\Answered"}})
+			}
 		}
 	}
 	h.invalidateMailCaches(mailLogin)
@@ -3770,6 +3867,9 @@ func mergeDraftPatch(current *models.Draft, patch map[string]any) {
 	}
 	if v, ok := patch["context_message_id"].(string); ok {
 		current.ContextMessageID = strings.TrimSpace(v)
+	}
+	if v, ok := patch["context_account_id"].(string); ok {
+		current.ContextAccountID = strings.TrimSpace(v)
 	}
 	if v, ok := patch["from_mode"].(string); ok {
 		current.FromMode = strings.TrimSpace(v)

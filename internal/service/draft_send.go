@@ -45,6 +45,25 @@ func (s *Service) BuildDraftSendRequest(ctx context.Context, u models.User, logi
 	if strings.ToLower(strings.TrimSpace(draft.ComposeMode)) != "reply" || strings.TrimSpace(draft.ContextMessageID) == "" {
 		return req, sendAccountID, false, nil
 	}
+	contextAccountID := strings.TrimSpace(draft.ContextAccountID)
+	if contextAccountID != "" {
+		if _, err := s.st.GetMailAccountByID(ctx, u.ID, contextAccountID); err != nil {
+			return mail.SendRequest{}, "", false, err
+		}
+		original, err := s.st.GetIndexedMessageByID(ctx, contextAccountID, strings.TrimSpace(draft.ContextMessageID))
+		if err != nil {
+			return mail.SendRequest{}, "", false, err
+		}
+		req.InReplyToID = strings.TrimSpace(original.MessageIDHeader)
+		req.References = append(req.References, parseJSONStringOrMessageIDList(original.ReferencesHeader)...)
+		if replyTo := strings.TrimSpace(original.InReplyToHeader); replyTo != "" && len(req.References) == 0 {
+			req.References = append(req.References, replyTo)
+		}
+		if req.InReplyToID != "" && len(req.References) == 0 {
+			req.References = append(req.References, req.InReplyToID)
+		}
+		return req, sendAccountID, true, nil
+	}
 	original, err := s.mail.GetMessage(ctx, login, pass, strings.TrimSpace(draft.ContextMessageID))
 	if err != nil {
 		return mail.SendRequest{}, "", false, err
@@ -100,4 +119,24 @@ func splitDraftCSV(v string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+func parseJSONStringOrMessageIDList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err == nil {
+		items := make([]string, 0, len(out))
+		for _, item := range out {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				items = append(items, trimmed)
+			}
+		}
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return mail.ParseMessageIDList(raw)
 }

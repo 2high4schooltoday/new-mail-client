@@ -15,6 +15,18 @@ func ParseRawMessage(raw []byte, mailbox string, uid uint32) (Message, error) {
 	return parseMessage(raw, EncodeMessageID(mailbox, uid), mailbox, uid)
 }
 
+func ExtractAttachmentFromRaw(raw []byte, messageID, attachmentID string) (AttachmentMeta, []byte, error) {
+	_, part, err := DecodeAttachmentID(strings.TrimSpace(attachmentID))
+	if err != nil {
+		return AttachmentMeta{}, nil, err
+	}
+	return ExtractAttachmentPartFromRaw(raw, messageID, part)
+}
+
+func ExtractAttachmentPartFromRaw(raw []byte, messageID string, part int) (AttachmentMeta, []byte, error) {
+	return extractAttachment(raw, strings.TrimSpace(messageID), part)
+}
+
 func (c *IMAPSMTPClient) ListMailboxSnapshots(ctx context.Context, user, pass string) ([]MailboxSnapshot, error) {
 	cli, err := c.connectIMAP(ctx, user, pass)
 	if err != nil {

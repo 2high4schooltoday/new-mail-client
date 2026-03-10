@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -252,7 +251,7 @@ func (w *MailWorkers) upsertSyncMessage(ctx context.Context, account models.Mail
 	scopedMessageID := mail.NormalizeIndexedMessageID(account.ID, messageID)
 	bodyText := strings.TrimSpace(msg.Body)
 	bodyHTMLSanitized := ""
-	rawSource := bodyText
+	rawSource := string(item.Raw)
 	fromValue := strings.TrimSpace(msg.From)
 	toValue := strings.Join(msg.To, ", ")
 	ccValue := strings.Join(msg.CC, ", ")
@@ -651,7 +650,7 @@ func convertMessageAttachments(accountID, messageID string, source []mail.Attach
 			Filename:    strings.TrimSpace(a.Filename),
 			ContentType: firstNonEmptyString(strings.TrimSpace(a.ContentType), "application/octet-stream"),
 			SizeBytes:   a.Size,
-			InlinePart:  false,
+			InlinePart:  a.Inline,
 			CreatedAt:   now,
 		})
 	}
@@ -673,7 +672,7 @@ func (w *MailWorkers) parseAndClassifyWithMailSec(ctx context.Context, accountID
 		ToValue:             getMapString(parsedResult, "to"),
 		Snippet:             getMapString(parsedResult, "snippet"),
 		BodyText:            getMapString(parsedResult, "body_text"),
-		RawSource:           rawPreview(raw, 1<<20),
+		RawSource:           string(raw),
 		DKIMStatus:          "unknown",
 		SPFStatus:           "unknown",
 		DMARCStatus:         "unknown",
@@ -764,14 +763,10 @@ func parseMailSecAttachments(accountID, messageID string, values []any, now time
 		if !ok {
 			continue
 		}
-		id := strings.TrimSpace(getMapString(row, "id"))
-		if id == "" {
-			id = messageID + ":part:" + strconv.Itoa(i+1)
-		}
 		size, _ := getMapInt64(row, "size_bytes")
 		inline, _ := getMapBool(row, "inline")
 		out = append(out, models.IndexedAttachment{
-			ID:          id,
+			ID:          mail.EncodeAttachmentID(messageID, i+1),
 			MessageID:   messageID,
 			AccountID:   accountID,
 			Filename:    strings.TrimSpace(getMapString(row, "filename")),

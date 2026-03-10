@@ -111,6 +111,7 @@ const state = {
     sendContext: {
       mode: "send",
       messageID: "",
+      accountID: "",
     },
     sendMode: "send_now",
     scheduledFor: "",
@@ -937,6 +938,7 @@ function composeComparableDraftPayload(raw = {}) {
     identity_id: String(raw.identity_id ?? raw.identityID ?? "").trim(),
     compose_mode: String(raw.compose_mode ?? raw.composeMode ?? "send").trim().toLowerCase() || "send",
     context_message_id: String(raw.context_message_id ?? raw.contextMessageID ?? "").trim(),
+    context_account_id: String(raw.context_account_id ?? raw.contextAccountID ?? "").trim(),
     from_mode: String(raw.from_mode ?? raw.fromMode ?? "default").trim().toLowerCase() || "default",
     from_manual: String(raw.from_manual ?? raw.fromManual ?? "").trim(),
     client_state_json: normalizeComposeClientStateJSON(raw.client_state_json ?? raw.clientStateJSON ?? ""),
@@ -964,6 +966,7 @@ function composeCurrentDraftPayload() {
     identity_id: state.compose.selectedIdentityID || "",
     compose_mode: state.compose.sendContext?.mode || "send",
     context_message_id: state.compose.sendContext?.messageID || "",
+    context_account_id: state.compose.sendContext?.accountID || "",
     from_mode: state.compose.fromMode,
     from_manual: String(el.composeFromManualInput?.value || ""),
     client_state_json: composeClientStateJSON(),
@@ -1815,7 +1818,7 @@ function applyComposeDraftPayload(payload, opts = {}) {
   state.compose.selectedAccountID = draft.account_id || "";
   state.compose.sendMode = draft.send_mode === "scheduled" ? "scheduled" : "send_now";
   state.compose.scheduledFor = composeScheduledLocalValueFromISO(draft.scheduled_for);
-  setComposeSendContext(draft.compose_mode || "send", draft.context_message_id || "");
+  setComposeSendContext(draft.compose_mode || "send", draft.context_message_id || "", draft.context_account_id || "");
   renderComposeFromControls();
   if (state.compose.fromMode === "manual") {
     setComposeFromMode("manual");
@@ -1895,6 +1898,7 @@ async function createServerDraft(payload) {
       identity_id: payload.identity_id,
       compose_mode: payload.compose_mode,
       context_message_id: payload.context_message_id,
+      context_account_id: payload.context_account_id,
       from_mode: payload.from_mode,
       from_manual: payload.from_manual,
       client_state_json: payload.client_state_json,
@@ -1921,6 +1925,7 @@ async function updateServerDraft(draftID, payload) {
       identity_id: payload.identity_id,
       compose_mode: payload.compose_mode,
       context_message_id: payload.context_message_id,
+      context_account_id: payload.context_account_id,
       from_mode: payload.from_mode,
       from_manual: payload.from_manual,
       client_state_json: payload.client_state_json,
@@ -2864,9 +2869,25 @@ function renderComposeFromControls() {
     el.composeFromSelect.appendChild(opt);
   }
 
-  const chosen = state.compose.selectedIdentityID
+  const preferredAccountID = String(
+    state.compose.selectedAccountID
+    || state.compose.sendContext?.accountID
+    || ((state.user?.mail_secret_required === true || activeMailUsesIndexedSource()) ? state.mail.indexedAccountID : "")
+    || "",
+  ).trim();
+  let chosen = state.compose.selectedIdentityID
     ? items.find((item) => String(item.identity_id) === state.compose.selectedIdentityID)
-    : items.find((item) => item.is_default || item.identity_is_default || item.account_is_default || item.is_session) || items[0];
+    : null;
+  if (!chosen && preferredAccountID) {
+    chosen = items.find((item) => String(item.account_id || "") === preferredAccountID && (item.is_default || item.identity_is_default || item.account_is_default))
+      || items.find((item) => String(item.account_id || "") === preferredAccountID && item.is_session !== true)
+      || null;
+  }
+  if (!chosen) {
+    chosen = items.find((item) => item.is_default || item.identity_is_default || item.account_is_default || item.is_session)
+      || items.find((item) => item.is_session !== true)
+      || items[0];
+  }
 
   if (chosen) {
     el.composeFromSelect.value = String(chosen.identity_id || "");
@@ -2892,6 +2913,12 @@ function composeSelectedIdentityItem() {
   if (items.length === 0) return null;
   const selected = composeIdentityByID(state.compose.selectedIdentityID);
   if (selected) return selected;
+  const preferredAccountID = String(state.compose.selectedAccountID || state.compose.sendContext?.accountID || "").trim();
+  if (preferredAccountID) {
+    const preferred = items.find((item) => String(item.account_id || "") === preferredAccountID && (item.is_default || item.identity_is_default || item.account_is_default))
+      || items.find((item) => String(item.account_id || "") === preferredAccountID && item.is_session !== true);
+    if (preferred) return preferred;
+  }
   return items.find((item) => item.is_default || item.identity_is_default || item.account_is_default || item.is_session) || items[0] || null;
 }
 
@@ -3196,11 +3223,12 @@ function focusComposeEditorAtEnd() {
   selection.addRange(range);
 }
 
-function setComposeSendContext(mode = "send", messageID = "") {
+function setComposeSendContext(mode = "send", messageID = "", accountID = "") {
   const normalizedMode = String(mode || "send").trim().toLowerCase();
   state.compose.sendContext = {
     mode: normalizedMode === "reply" || normalizedMode === "forward" ? normalizedMode : "send",
     messageID: String(messageID || "").trim(),
+    accountID: String(accountID || "").trim(),
   };
 }
 
@@ -3245,7 +3273,7 @@ async function openComposeOverlay(trigger = null, opts = {}) {
   const useDraft = opts.useDraft !== false;
   const draftID = String(opts.draftID || "").trim();
   const prefill = opts.prefill && typeof opts.prefill === "object" ? opts.prefill : null;
-  const sendContext = opts.sendContext && typeof opts.sendContext === "object" ? opts.sendContext : { mode: "send", messageID: "" };
+  const sendContext = opts.sendContext && typeof opts.sendContext === "object" ? opts.sendContext : { mode: "send", messageID: "", accountID: "" };
   state.ui.composeOpen = true;
   state.ui.composeLastTrigger = trigger || document.activeElement || null;
   el.composeOverlay.classList.remove("hidden");
@@ -3257,7 +3285,7 @@ async function openComposeOverlay(trigger = null, opts = {}) {
 
   resetComposeDraftSession({ keepCrash: true });
   state.compose.authEmail = String(state.user?.email || "").trim();
-  setComposeSendContext("send", "");
+  setComposeSendContext("send", "", "");
   state.compose.recipients.to = [];
   state.compose.recipients.cc = [];
   state.compose.recipients.bcc = [];
@@ -3310,7 +3338,7 @@ async function openComposeOverlay(trigger = null, opts = {}) {
     preferComposeStartFocus = true;
   }
   if (!draftID) {
-    setComposeSendContext(sendContext.mode, sendContext.messageID);
+    setComposeSendContext(sendContext.mode, sendContext.messageID, sendContext.accountID);
     if (shouldAutoInsertSignature) {
       applyComposeIdentitySignature(composeSelectedIdentityItem(), { replaceUntouched: false });
       state.compose.draftBaselineJSON = composeDraftPayloadJSON(composeCurrentDraftPayload());
@@ -7060,7 +7088,6 @@ async function finalizePrimaryLogin(loginPayload) {
   if (loginStage.auth_stage !== "authenticated") {
     await ensureMFAStageAuthenticated(loginStage);
   }
-  await ensureMailSecretUnlocked(loginPayload);
   let session;
   try {
     session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
@@ -7072,8 +7099,11 @@ async function finalizePrimaryLogin(loginPayload) {
     throw err;
   }
   if (session?.user?.mail_secret_required === true) {
-    await unlockMailSecretForSession();
-    session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
+    const indexedReady = await canUseIndexedMailWithoutSessionSecret({ refreshContext: true, refreshAuthIdentity: true });
+    if (!indexedReady) {
+      await unlockMailSecretForSession();
+      session = await refreshSession({ throwOnFail: true, skipUnauthorizedHandling: true, skipMFAHandling: true });
+    }
   }
   clearReaderSelection();
   await loadMailboxes();
@@ -7251,7 +7281,16 @@ async function ensureSpecialMailbox(role, trigger = null) {
   if (!mailboxName) {
     throw new Error("Mailbox name is required.");
   }
-  const payload = await api(`/api/v1/mailboxes/special/${encodeURIComponent(normalizedRole)}`, {
+  const accountID = String(
+    state.compose.selectedAccountID
+    || state.compose.sendContext?.accountID
+    || (mailUsesIndexedMode() ? state.mail.indexedAccountID : "")
+    || "",
+  ).trim();
+  const endpoint = accountID
+    ? `/api/v2/accounts/${encodeURIComponent(accountID)}/mailboxes/special/${encodeURIComponent(normalizedRole)}`
+    : `/api/v1/mailboxes/special/${encodeURIComponent(normalizedRole)}`;
+  const payload = await api(endpoint, {
     method: "POST",
     json: {
       mailbox_name: mailboxName,
@@ -7354,6 +7393,18 @@ function clearIndexedRuntimeFallback() {
   state.mail.indexedFallbackReason = "";
 }
 
+async function canUseIndexedMailWithoutSessionSecret(opts = {}) {
+  if (!state.user) return false;
+  if (opts.refreshContext !== false) {
+    await refreshIndexedMailContext({
+      logErrors: false,
+      refreshAuthIdentity: opts.refreshAuthIdentity === true,
+    });
+  }
+  return !!String(state.mail.indexedAccountID || "").trim()
+    || ((Array.isArray(state.mail.indexedAccounts) ? state.mail.indexedAccounts : []).length > 0);
+}
+
 function currentIndexedAccount() {
   const accountID = String(state.mail.indexedAccountID || "").trim();
   if (!accountID) return null;
@@ -7372,6 +7423,15 @@ function setIndexedAccountContext(accountID) {
 
 function mailUsesIndexedMode() {
   return !isDraftsMailboxSelected() && !!String(state.mail.indexedAccountID || "").trim();
+}
+
+function mailItemUsesIndexedSource(item) {
+  return String(item?.source || "").trim() === "indexed";
+}
+
+function activeMailUsesIndexedSource(item = state.selectedMessageSummary || state.selectedMessage || null) {
+  return mailItemUsesIndexedSource(item)
+    || (!!String(state.mail.indexedAccountID || "").trim() && !state.mail.indexedRuntimeFallback && mailUsesIndexedMode());
 }
 
 function currentMailFiltersPayload() {
@@ -7552,6 +7612,7 @@ async function refreshIndexedMailContext(opts = {}) {
 function normalizeIndexedMessageSummary(item) {
   return {
     id: String(item?.id || "").trim(),
+    account_id: String(item?.account_id || state.mail.indexedAccountID || "").trim(),
     mailbox: String(item?.mailbox || state.mailbox || "").trim(),
     from: String(item?.from || item?.from_value || "").trim(),
     subject: String(item?.subject || "").trim(),
@@ -7562,6 +7623,41 @@ function normalizeIndexedMessageSummary(item) {
     preview: String(item?.preview || item?.snippet || "").trim(),
     thread_id: String(item?.thread_id || item?.threadID || "").trim(),
     has_attachments: !!(item?.has_attachments || item?.hasAttachments),
+    source: "indexed",
+  };
+}
+
+function normalizeIndexedAttachment(item) {
+  return {
+    id: String(item?.id || "").trim(),
+    filename: String(item?.filename || "attachment.bin").trim() || "attachment.bin",
+    content_type: String(item?.content_type || item?.contentType || "application/octet-stream").trim() || "application/octet-stream",
+    size: Number(item?.size ?? item?.size_bytes ?? item?.sizeBytes ?? 0) || 0,
+    inline: Boolean(item?.inline ?? item?.inline_part ?? item?.inlinePart),
+  };
+}
+
+function normalizeIndexedMessageDetail(payload, accountID = "") {
+  const raw = payload?.message && typeof payload.message === "object" ? payload.message : {};
+  return {
+    id: String(raw?.id || "").trim(),
+    account_id: String(raw?.account_id || accountID || state.mail.indexedAccountID || "").trim(),
+    mailbox: String(raw?.mailbox || state.mailbox || "").trim(),
+    uid: Number(raw?.uid || 0) || 0,
+    thread_id: String(raw?.thread_id || raw?.threadID || "").trim(),
+    from: String(raw?.from || raw?.from_value || "").trim(),
+    to: splitComposeRecipients(raw?.to || raw?.to_value || ""),
+    cc: splitComposeRecipients(raw?.cc || raw?.cc_value || ""),
+    bcc: splitComposeRecipients(raw?.bcc || raw?.bcc_value || ""),
+    subject: String(raw?.subject || "").trim(),
+    date: raw?.date || raw?.date_header || raw?.internal_date || raw?.internalDate || "",
+    seen: !!raw?.seen,
+    flagged: !!raw?.flagged,
+    answered: !!raw?.answered,
+    body: String(raw?.body || raw?.body_text || ""),
+    body_html: String(raw?.body_html || raw?.body_html_sanitized || "").trim(),
+    attachments: (Array.isArray(payload?.attachments) ? payload.attachments : []).map((item) => normalizeIndexedAttachment(item)),
+    source: "indexed",
   };
 }
 
@@ -7718,11 +7814,30 @@ async function loadMailboxes(opts = {}) {
   if (!state.user) {
     throw new Error("Sign in required");
   }
-  const [mailboxes] = await Promise.all([
-    api("/api/v1/mailboxes", { logErrors: opts.logErrors }),
+  await Promise.all([
     loadDrafts({ logErrors: false }).catch(() => state.mail.drafts),
     refreshIndexedMailContext({ logErrors: false }),
   ]);
+  const indexedAccountID = String(state.mail.indexedAccountID || "").trim();
+  let mailboxes = null;
+  let indexedErr = null;
+  if (indexedAccountID) {
+    try {
+      mailboxes = await api(`/api/v2/accounts/${encodeURIComponent(indexedAccountID)}/mailboxes`, { logErrors: false });
+    } catch (err) {
+      indexedErr = err;
+    }
+  }
+  if (!mailboxes) {
+    try {
+      mailboxes = await api("/api/v1/mailboxes", { logErrors: opts.logErrors });
+    } catch (err) {
+      if (indexedErr) {
+        throw indexedErr;
+      }
+      throw err;
+    }
+  }
   reconcileMailboxes(Array.isArray(mailboxes) ? mailboxes : []);
   syncMailSearchInput();
   renderMailIndexStatus();
@@ -7780,7 +7895,11 @@ function renderAttachmentLinks(message = state.selectedMessage) {
   if (!message) return;
   for (const attachment of (message.attachments || [])) {
     const link = document.createElement("a");
-    link.href = `/api/v1/attachments/${encodeURIComponent(attachment.id)}`;
+    if (mailItemUsesIndexedSource(message) && message.account_id) {
+      link.href = `/api/v2/messages/${encodeURIComponent(message.id)}/attachments/${encodeURIComponent(attachment.id)}?account_id=${encodeURIComponent(message.account_id)}`;
+    } else {
+      link.href = `/api/v1/attachments/${encodeURIComponent(attachment.id)}`;
+    }
     link.textContent = `${attachment.filename || "attachment"} (${Math.round((attachment.size || 0) / 1024)} KB)`;
     link.target = "_blank";
     el.attachments.appendChild(link);
@@ -8671,9 +8790,10 @@ async function loadThreadContext(summary, messageID, mailboxHint = "") {
     return;
   }
   const baseMailbox = String(mailboxHint || summary?.mailbox || state.mailbox || "INBOX").trim() || "INBOX";
-  if (mailUsesIndexedMode()) {
+  if (activeMailUsesIndexedSource(summary)) {
     try {
-      const payload = await api(`/api/v2/threads/${encodeURIComponent(threadID)}?account_id=${encodeURIComponent(state.mail.indexedAccountID)}`, { logErrors: false });
+      const accountID = String(summary?.account_id || state.mail.indexedAccountID || "").trim();
+      const payload = await api(`/api/v2/threads/${encodeURIComponent(threadID)}?account_id=${encodeURIComponent(accountID)}`, { logErrors: false });
       const items = (Array.isArray(payload?.items) ? payload.items : []).map((item) => normalizeIndexedMessageSummary(item));
       items.sort((a, b) => new Date(a?.date || 0).getTime() - new Date(b?.date || 0).getTime());
       let index = items.findIndex((it) => String(it?.id || "") === String(messageID || ""));
@@ -9014,7 +9134,11 @@ async function openReplyCompose() {
   await openComposeOverlay(el.btnReply || el.btnComposeOpen, {
     title: "Reply",
     useDraft: false,
-    sendContext: { mode: "reply", messageID: message.id },
+    sendContext: {
+      mode: "reply",
+      messageID: message.id,
+      accountID: String(message?.account_id || (activeMailUsesIndexedSource(message) ? state.mail.indexedAccountID : "") || "").trim(),
+    },
     prefill: {
       to: target,
       subject: withPrefixSubject("Re", message.subject),
@@ -9030,7 +9154,11 @@ async function openForwardCompose() {
   await openComposeOverlay(el.btnForward || el.btnComposeOpen, {
     title: "Forward",
     useDraft: false,
-    sendContext: { mode: "forward", messageID: message.id },
+    sendContext: {
+      mode: "forward",
+      messageID: message.id,
+      accountID: String(message?.account_id || (activeMailUsesIndexedSource(message) ? state.mail.indexedAccountID : "") || "").trim(),
+    },
     prefill: {
       subject: withPrefixSubject("Fwd", message.subject),
       bodyText: buildForwardBodyPrefill(message),
@@ -9057,7 +9185,14 @@ async function openMessage(id, summary = null) {
   state.mail.selectionAnchorID = String(id || "");
   const knownSummary = summary || state.messages.find((item) => String(item?.id || "") === String(id || "")) || null;
   state.selectedMessageSummary = knownSummary;
-  const m = await api(`/api/v1/messages/${encodeURIComponent(id)}`);
+  const shouldUseIndexed = activeMailUsesIndexedSource(knownSummary);
+  const accountID = String(knownSummary?.account_id || state.mail.indexedAccountID || "").trim();
+  const m = shouldUseIndexed
+    ? normalizeIndexedMessageDetail(
+      await api(`/api/v2/messages/${encodeURIComponent(id)}?account_id=${encodeURIComponent(accountID)}`, { logErrors: false }),
+      accountID,
+    )
+    : await api(`/api/v1/messages/${encodeURIComponent(id)}`);
   state.selectedMessage = m;
   renderSelectedMessageChrome(m);
   state.ui.readerViewMode = messageHasHTML(m) ? "html" : "plain";
@@ -9067,11 +9202,18 @@ async function openMessage(id, summary = null) {
   await loadThreadContext(knownSummary, m.id, threadMailbox);
   if (knownSummary && !knownSummary.seen) {
     applyLocalMessagePatch(m.id, { seen: true });
-    void api(`/api/v1/messages/${encodeURIComponent(m.id)}/flags`, {
-      method: "POST",
-      json: { add: ["\\Seen"] },
-      logErrors: false,
-    }).then(() => {
+    const request = shouldUseIndexed
+      ? api("/api/v2/messages/bulk", {
+        method: "POST",
+        json: { account_id: accountID, ids: [m.id], action: "seen" },
+        logErrors: false,
+      })
+      : api(`/api/v1/messages/${encodeURIComponent(m.id)}/flags`, {
+        method: "POST",
+        json: { add: ["\\Seen"] },
+        logErrors: false,
+      });
+    void request.then(() => {
       queueMailRefresh({ preservePane: true, delay: 120 });
     }).catch(() => {
       applyLocalMessagePatch(m.id, { seen: false });
@@ -9211,7 +9353,7 @@ async function sendCompose(form) {
     removeLocalDraft(draftID);
   }
   clearComposeDraft();
-  setComposeSendContext("send", "");
+  setComposeSendContext("send", "", "");
   return result;
 }
 
@@ -9238,7 +9380,7 @@ async function discardComposeDraft() {
     clearComposeCrashBuffer("");
   }
   resetComposeDraftSession();
-  setComposeSendContext("send", "");
+  setComposeSendContext("send", "", "");
   setComposeDraftNote("");
   closeComposeOverlay({ restoreFocus: true, persistDraft: false });
   if (hadContent) {
@@ -11991,15 +12133,18 @@ function bindUI() {
     }
     if (state.user.mail_secret_required === true) {
       try {
-        await unlockMailSecretForSession();
-        const refreshed = await refreshSession({
-          throwOnFail: true,
-          skipUnauthorizedHandling: true,
-          skipMFAHandling: true,
-        });
-        if (!refreshed.ok || refreshed.user?.mail_secret_required === true) {
-          routeToAuthWithMessage("Mailbox password unlock failed. Sign in again.", "mail_secret_required");
-          return;
+        const indexedReady = await canUseIndexedMailWithoutSessionSecret({ refreshContext: true, refreshAuthIdentity: true });
+        if (!indexedReady) {
+          await unlockMailSecretForSession();
+          const refreshed = await refreshSession({
+            throwOnFail: true,
+            skipUnauthorizedHandling: true,
+            skipMFAHandling: true,
+          });
+          if (!refreshed.ok || refreshed.user?.mail_secret_required === true) {
+            routeToAuthWithMessage("Mailbox password unlock failed. Sign in again.", "mail_secret_required");
+            return;
+          }
         }
       } catch (err) {
         presentAPIError(err, "Mailbox password is required before opening mail.");
@@ -12338,15 +12483,18 @@ async function bootstrap() {
 
   if (state.user && state.user.mail_secret_required === true) {
     try {
-      await unlockMailSecretForSession();
-      const refreshed = await refreshSession({
-        skipUnauthorizedHandling: true,
-        throwOnFail: true,
-        skipMFAHandling: true,
-      });
-      if (!refreshed.ok || refreshed.user?.mail_secret_required === true) {
-        routeToAuthWithMessage("Mailbox password unlock failed. Sign in again.", "mail_secret_required");
-        return;
+      const indexedReady = await canUseIndexedMailWithoutSessionSecret({ refreshContext: true, refreshAuthIdentity: true });
+      if (!indexedReady) {
+        await unlockMailSecretForSession();
+        const refreshed = await refreshSession({
+          skipUnauthorizedHandling: true,
+          throwOnFail: true,
+          skipMFAHandling: true,
+        });
+        if (!refreshed.ok || refreshed.user?.mail_secret_required === true) {
+          routeToAuthWithMessage("Mailbox password unlock failed. Sign in again.", "mail_secret_required");
+          return;
+        }
       }
     } catch (err) {
       routeToAuthWithMessage(formatAPIError(err, "Mailbox password is required to continue."), "mail_secret_required");

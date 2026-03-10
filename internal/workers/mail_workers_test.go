@@ -343,6 +343,7 @@ func newMailWorkerTestEnv(t *testing.T) (*store.Store, *sql.DB, models.MailAccou
 		filepath.Join("..", "..", "migrations", "023_drafts_nullable_account.sql"),
 		filepath.Join("..", "..", "migrations", "024_draft_attachments_and_send_errors.sql"),
 		filepath.Join("..", "..", "migrations", "025_session_mail_profiles.sql"),
+		filepath.Join("..", "..", "migrations", "026_draft_context_account.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)

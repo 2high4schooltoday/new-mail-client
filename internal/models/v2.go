@@ -144,6 +144,7 @@ type Draft struct {
 	IdentityID       string    `json:"identity_id"`
 	ComposeMode      string    `json:"compose_mode"`
 	ContextMessageID string    `json:"context_message_id"`
+	ContextAccountID string    `json:"context_account_id"`
 	FromMode         string    `json:"from_mode"`
 	FromManual       string    `json:"from_manual"`
 	ClientStateJSON  string    `json:"client_state_json"`

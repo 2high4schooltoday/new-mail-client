@@ -225,6 +225,67 @@ func TestV2SuggestRecipientsRanksSentRecipientsAndDedupes(t *testing.T) {
 	}
 }
 
+func TestV2GetIndexedMessageAttachmentStreamsRawSource(t *testing.T) {
+	router, st, account := newIndexedRouterWithStore(t)
+	raw := "From: sender@example.com\r\n" +
+		"To: account@example.com\r\n" +
+		"Subject: Attachment\r\n" +
+		"Message-ID: <attachment@example.com>\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=\"mix\"\r\n" +
+		"\r\n" +
+		"--mix\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"Body text.\r\n" +
+		"--mix\r\n" +
+		"Content-Type: text/plain\r\n" +
+		"Content-Disposition: attachment; filename=\"report.txt\"\r\n" +
+		"\r\n" +
+		"hello attachment\r\n" +
+		"--mix--\r\n"
+
+	seedIndexedTestMessage(t, st, models.IndexedMessage{
+		ID:             "msg-attach",
+		AccountID:      account.ID,
+		Mailbox:        "INBOX",
+		UID:            7,
+		ThreadID:       mail.ScopeIndexedThreadID(account.ID, "thread-attach"),
+		FromValue:      "Sender <sender@example.com>",
+		ToValue:        "account@example.com",
+		Subject:        "Attachment",
+		Snippet:        "Body text.",
+		BodyText:       "Body text.",
+		RawSource:      raw,
+		HasAttachments: true,
+		DateHeader:     time.Date(2026, 3, 10, 9, 30, 0, 0, time.UTC),
+		InternalDate:   time.Date(2026, 3, 10, 9, 30, 0, 0, time.UTC),
+	})
+	attachmentID := mail.EncodeAttachmentID(mail.NormalizeIndexedMessageID(account.ID, "msg-attach"), 1)
+	if err := st.ReplaceIndexedAttachments(context.Background(), account.ID, "msg-attach", []models.IndexedAttachment{{
+		ID:          attachmentID,
+		MessageID:   mail.NormalizeIndexedMessageID(account.ID, "msg-attach"),
+		AccountID:   account.ID,
+		Filename:    "report.txt",
+		ContentType: "text/plain",
+		SizeBytes:   int64(len("hello attachment")),
+	}}); err != nil {
+		t.Fatalf("replace indexed attachments: %v", err)
+	}
+
+	sessionCookie, csrfCookie := loginForSend(t, router)
+	rec := authedV1Get(t, router, "/api/v2/messages/msg-attach/attachments/"+url.PathEscape(attachmentID)+"?account_id="+url.QueryEscape(account.ID), sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); body != "hello attachment" {
+		t.Fatalf("expected attachment body, got %q", body)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain" {
+		t.Fatalf("expected text/plain content-type, got %q", got)
+	}
+}
+
 func newIndexedRouterWithStore(t *testing.T) (http.Handler, *store.Store, models.MailAccount) {
 	t.Helper()
 	ctx := context.Background()
@@ -259,6 +320,7 @@ func newIndexedRouterWithStore(t *testing.T) (http.Handler, *store.Store, models
 		filepath.Join("..", "..", "migrations", "023_drafts_nullable_account.sql"),
 		filepath.Join("..", "..", "migrations", "024_draft_attachments_and_send_errors.sql"),
 		filepath.Join("..", "..", "migrations", "025_session_mail_profiles.sql"),
+		filepath.Join("..", "..", "migrations", "026_draft_context_account.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)

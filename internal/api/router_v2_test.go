@@ -94,6 +94,7 @@ func newV2RouterWithMailClientAndStoreDB(t *testing.T, despatch mail.Client, mut
 		filepath.Join("..", "..", "migrations", "023_drafts_nullable_account.sql"),
 		filepath.Join("..", "..", "migrations", "024_draft_attachments_and_send_errors.sql"),
 		filepath.Join("..", "..", "migrations", "025_session_mail_profiles.sql"),
+		filepath.Join("..", "..", "migrations", "026_draft_context_account.sql"),
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			t.Fatalf("apply migration %s: %v", migration, err)
@@ -427,6 +428,44 @@ func doV2AuthedMultipart(t *testing.T, router http.Handler, method, path string,
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+func createV2TestAccount(t *testing.T, router http.Handler, sess, csrf *http.Cookie, login string) models.MailAccount {
+	t.Helper()
+	rec := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts", map[string]any{
+		"display_name": "Primary",
+		"login":        login,
+		"password":     "mailbox-secret",
+		"imap_host":    "imap.example.com",
+		"imap_port":    993,
+		"smtp_host":    "smtp.example.com",
+		"smtp_port":    587,
+	}, sess, csrf)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected account create 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var account models.MailAccount
+	if err := json.Unmarshal(rec.Body.Bytes(), &account); err != nil {
+		t.Fatalf("decode account response: %v", err)
+	}
+	return account
+}
+
+func createV2TestIdentity(t *testing.T, router http.Handler, sess, csrf *http.Cookie, accountID, fromEmail string) models.MailIdentity {
+	t.Helper()
+	rec := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts/"+accountID+"/identities", map[string]any{
+		"display_name": "Primary Alias",
+		"from_email":   fromEmail,
+		"is_default":   true,
+	}, sess, csrf)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected identity create 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var identity models.MailIdentity
+	if err := json.Unmarshal(rec.Body.Bytes(), &identity); err != nil {
+		t.Fatalf("decode identity response: %v", err)
+	}
+	return identity
 }
 
 func setTestLoopbackOrigin(req *http.Request) {
@@ -1713,6 +1752,249 @@ func TestV2DraftCRUDPersistsComposeContext(t *testing.T) {
 	missing := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/drafts/"+draft.ID, nil, sess, csrf)
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("expected deleted draft to return 404, got %d body=%s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestV2DraftCRUDPersistsContextAccountID(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+	account := createV2TestAccount(t, router, sess, csrf, "context@example.com")
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"compose_mode":       "reply",
+		"context_message_id": "msg-123",
+		"context_account_id": account.ID,
+		"from_mode":          "manual",
+		"from_manual":        "admin@example.com",
+		"to":                 "alice@example.com",
+		"subject":            "Draft subject",
+		"body_text":          "Draft body",
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", create.Code, create.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(create.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+	if draft.ContextAccountID != account.ID {
+		t.Fatalf("expected context_account_id to persist, got %+v", draft)
+	}
+
+	update := doV2AuthedJSON(t, router, http.MethodPatch, "/api/v2/drafts/"+draft.ID, map[string]any{
+		"context_account_id": "",
+	}, sess, csrf)
+	if update.Code != http.StatusOK {
+		t.Fatalf("expected draft update 200, got %d body=%s", update.Code, update.Body.String())
+	}
+	var updated models.Draft
+	if err := json.Unmarshal(update.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode updated draft: %v", err)
+	}
+	if updated.ContextAccountID != "" {
+		t.Fatalf("expected context_account_id to clear, got %+v", updated)
+	}
+}
+
+func TestV2ListDraftVersionsRequiresDraftOwnership(t *testing.T) {
+	router, st := newV2RouterWithConfigAndStore(t, nil)
+	sess, csrf := loginV2(t, router)
+	otherHash, err := auth.HashPassword("OtherPass123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	otherUser, err := st.CreateUser(context.Background(), "other@example.com", otherHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	draft, err := st.CreateDraft(context.Background(), models.Draft{
+		UserID:   otherUser.ID,
+		ToValue:  "someone@example.com",
+		Subject:  "Private draft",
+		BodyText: "Private draft body",
+		Status:   "active",
+	})
+	if err != nil {
+		t.Fatalf("create draft: %v", err)
+	}
+
+	rec := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/drafts/"+draft.ID+"/versions", nil, sess, csrf)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for foreign draft versions, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestV2ListAccountMailboxesAndUpsertSpecialMailbox(t *testing.T) {
+	client := &mailRouterTestClient{
+		mailboxes: []mail.Mailbox{
+			{Name: "INBOX", Role: "inbox", Unread: 2, Messages: 7},
+		},
+	}
+	withMailClientFactory(t, func(cfg config.Config) mail.Client { return client })
+	router, st := newV2RouterWithMailClientAndStore(t, mail.NoopClient{}, nil)
+	sess, csrf := loginV2(t, router)
+	account := createV2TestAccount(t, router, sess, csrf, "account@example.com")
+
+	if _, err := st.UpsertMailboxMapping(context.Background(), models.MailboxMapping{
+		ID:          "map-inbox",
+		AccountID:   account.ID,
+		Role:        "archive",
+		MailboxName: "Archive",
+		Source:      "manual",
+		Priority:    100,
+	}); err != nil {
+		t.Fatalf("seed mailbox mapping: %v", err)
+	}
+
+	list := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts/"+account.ID+"/mailboxes", nil, sess, csrf)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected mailbox list 200, got %d body=%s", list.Code, list.Body.String())
+	}
+	var mailboxes []mail.Mailbox
+	if err := json.Unmarshal(list.Body.Bytes(), &mailboxes); err != nil {
+		t.Fatalf("decode mailbox list: %v", err)
+	}
+	if len(mailboxes) != 1 || mailboxes[0].Name != "INBOX" {
+		t.Fatalf("unexpected account mailboxes: %+v", mailboxes)
+	}
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/accounts/"+account.ID+"/mailboxes/special/sent", map[string]any{
+		"mailbox_name":      "Sent",
+		"create_if_missing": true,
+	}, sess, csrf)
+	if create.Code != http.StatusOK {
+		t.Fatalf("expected special mailbox upsert 200, got %d body=%s", create.Code, create.Body.String())
+	}
+	var payload struct {
+		MailboxName string         `json:"mailbox_name"`
+		Created     bool           `json:"created"`
+		Mailboxes   []mail.Mailbox `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(create.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode special mailbox payload: %v", err)
+	}
+	if payload.MailboxName != "Sent" || !payload.Created {
+		t.Fatalf("expected created Sent mailbox, got %+v", payload)
+	}
+	if len(client.createdMailboxes) != 1 || client.createdMailboxes[0] != "Sent" {
+		t.Fatalf("expected account-scoped mailbox creation, got %+v", client.createdMailboxes)
+	}
+	mappings, err := st.ListMailboxMappings(context.Background(), account.ID)
+	if err != nil {
+		t.Fatalf("list mailbox mappings: %v", err)
+	}
+	if resolveMappedMailboxByRole(mappings, "sent") != "Sent" {
+		t.Fatalf("expected sent mailbox mapping to persist, got %+v", mappings)
+	}
+}
+
+func TestV2SendDraftReplyUsesIndexedContextHeadersWithoutSessionGetMessage(t *testing.T) {
+	client := &sendTestDespatch{}
+	withMailClientFactory(t, func(cfg config.Config) mail.Client { return client })
+	router, st := newV2RouterWithMailClientAndStore(t, client, nil)
+	sess, csrf := loginV2(t, router)
+	account := createV2TestAccount(t, router, sess, csrf, "indexed@example.com")
+	identity := createV2TestIdentity(t, router, sess, csrf, account.ID, "alias@example.com")
+
+	seedIndexedTestMessage(t, st, models.IndexedMessage{
+		ID:               "indexed-reply",
+		AccountID:        account.ID,
+		Mailbox:          "INBOX",
+		UID:              42,
+		ThreadID:         mail.ScopeIndexedThreadID(account.ID, "thread-indexed"),
+		FromValue:        "Sender <sender@example.com>",
+		ToValue:          "alias@example.com",
+		Subject:          "Indexed reply",
+		Snippet:          "Indexed body",
+		BodyText:         "Indexed body",
+		MessageIDHeader:  "<indexed-original@example.com>",
+		ReferencesHeader: `["<root@example.com>"]`,
+		InReplyToHeader:  "<parent@example.com>",
+		DateHeader:       time.Date(2026, 3, 10, 8, 0, 0, 0, time.UTC),
+		InternalDate:     time.Date(2026, 3, 10, 8, 0, 0, 0, time.UTC),
+	})
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"account_id":         account.ID,
+		"identity_id":        identity.ID,
+		"compose_mode":       "reply",
+		"context_message_id": "indexed-reply",
+		"context_account_id": account.ID,
+		"from_mode":          "identity",
+		"to":                 "sender@example.com",
+		"subject":            "Re: Indexed reply",
+		"body_text":          "Thanks",
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", create.Code, create.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(create.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+
+	send := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts/"+draft.ID+"/send", nil, sess, csrf)
+	if send.Code != http.StatusOK {
+		t.Fatalf("expected draft send 200, got %d body=%s", send.Code, send.Body.String())
+	}
+	if client.getMessageCallCount() != 0 {
+		t.Fatalf("expected indexed reply send to avoid session GetMessage, got %d calls", client.getMessageCallCount())
+	}
+	user, req := client.snapshot()
+	if user != account.Login {
+		t.Fatalf("expected account-backed send user %q, got %q", account.Login, user)
+	}
+	if req.InReplyToID != "indexed-original@example.com" {
+		t.Fatalf("expected indexed in-reply-to header, got %+v", req)
+	}
+	if len(req.References) != 1 || req.References[0] != "root@example.com" {
+		t.Fatalf("expected indexed references header, got %+v", req.References)
+	}
+}
+
+func TestV2SendDraftReplyWithoutContextAccountUsesSessionFallback(t *testing.T) {
+	client := &sendTestDespatch{
+		messageByID: map[string]mail.Message{
+			"legacy-msg": {
+				ID:         "legacy-msg",
+				MessageID:  "<legacy@example.com>",
+				References: []string{"<seed@example.com>"},
+			},
+		},
+	}
+	router := newV2RouterWithMailClient(t, client, nil)
+	sess, csrf := loginV2(t, router)
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"compose_mode":       "reply",
+		"context_message_id": "legacy-msg",
+		"from_mode":          "manual",
+		"from_manual":        "admin@example.com",
+		"to":                 "legacy@example.com",
+		"subject":            "Re: Legacy reply",
+		"body_text":          "Thanks",
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", create.Code, create.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(create.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+
+	send := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts/"+draft.ID+"/send", nil, sess, csrf)
+	if send.Code != http.StatusOK {
+		t.Fatalf("expected draft send 200, got %d body=%s", send.Code, send.Body.String())
+	}
+	if client.getMessageCallCount() != 1 {
+		t.Fatalf("expected session fallback GetMessage call, got %d", client.getMessageCallCount())
+	}
+	_, req := client.snapshot()
+	if req.InReplyToID != "<legacy@example.com>" {
+		t.Fatalf("expected session fallback in-reply-to header, got %+v", req)
+	}
+	if len(req.References) != 1 || req.References[0] != "<seed@example.com>" {
+		t.Fatalf("expected session fallback references, got %+v", req.References)
 	}
 }
 

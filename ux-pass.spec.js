@@ -188,6 +188,95 @@ function composeReliabilityFixture() {
   };
 }
 
+function indexedLockedFixture() {
+  return {
+    user: {
+      email: 'admin@example.com',
+      role: 'admin',
+      recovery_email: 'recovery@example.net',
+      needs_recovery_email: false,
+      auth_stage: 'authenticated',
+      mail_secret_required: true,
+    },
+    account: {
+      id: 'acct-indexed',
+      user_id: 'user-admin',
+      display_name: 'Indexed Mail',
+      login: 'indexed@example.com',
+      is_default: true,
+      status: 'active',
+      last_sync_at: '2026-03-10T09:00:00.000Z',
+      last_error: '',
+    },
+    identities: [
+      {
+        account_id: '',
+        account_display_name: 'Session sender',
+        account_login: 'admin@example.com',
+        account_is_default: true,
+        identity_id: 'session-admin',
+        identity_display_name: 'Admin Session',
+        from_email: 'admin@example.com',
+        reply_to: '',
+        signature_text: '',
+        signature_html: '',
+        identity_is_default: true,
+        is_default: true,
+        is_session: true,
+      },
+      {
+        account_id: 'acct-indexed',
+        account_display_name: 'Indexed Mail',
+        account_login: 'indexed@example.com',
+        account_is_default: true,
+        identity_id: 'ident-indexed',
+        identity_display_name: 'Indexed Sender',
+        from_email: 'indexed@example.com',
+        reply_to: '',
+        signature_text: '',
+        signature_html: '<p>Indexed Signature</p>',
+        identity_is_default: true,
+        is_default: true,
+        is_session: false,
+      },
+    ],
+    mailboxes: [
+      { name: 'INBOX', role: 'inbox', unread: 1, messages: 1 },
+    ],
+    messageSummary: {
+      id: 'idx-msg-1',
+      mailbox: 'INBOX',
+      from: 'Sender <sender@example.com>',
+      subject: 'Indexed reply target',
+      date: '2026-03-10T08:00:00.000Z',
+      seen: false,
+      answered: false,
+      flagged: false,
+      preview: 'Please send the latest indexed update.',
+      thread_id: 'idx-thread-1',
+      account_id: 'acct-indexed',
+    },
+    messageDetail: {
+      id: 'idx-msg-1',
+      account_id: 'acct-indexed',
+      mailbox: 'INBOX',
+      uid: 11,
+      thread_id: 'idx-thread-1',
+      from: 'Sender <sender@example.com>',
+      to: 'indexed@example.com',
+      cc: '',
+      bcc: '',
+      subject: 'Indexed reply target',
+      date: '2026-03-10T08:00:00.000Z',
+      seen: false,
+      flagged: false,
+      answered: false,
+      body: 'Please send the latest indexed update.',
+      body_html: '',
+    },
+  };
+}
+
 function mailIdentityFixture() {
   return {
     user: {
@@ -629,6 +718,176 @@ async function mockComposeReliabilityScenario(page) {
       body: JSON.stringify({ error: path }),
     });
   });
+}
+
+async function mockIndexedAccountLockedScenario(page) {
+  const fixture = indexedLockedFixture();
+  const drafts = new Map();
+  const counters = {
+    unlockCalls: 0,
+    legacyMailboxCalls: 0,
+    legacyMessageCalls: 0,
+    accountSpecialCalls: 0,
+  };
+  let draftSeq = 1;
+  let sentConfigured = false;
+
+  const draftList = () => Array
+    .from(drafts.values())
+    .filter((item) => String(item.status || '').toLowerCase() !== 'sent')
+    .sort((a, b) => new Date(b.updated_at || b.created_at || 0).getTime() - new Date(a.updated_at || a.created_at || 0).getTime());
+
+  const accountMailboxes = () => {
+    const items = fixture.mailboxes.map((item) => ({ ...item }));
+    if (sentConfigured && !items.some((item) => item.name === 'Sent')) {
+      items.push({ name: 'Sent', role: 'sent', unread: 0, messages: 0 });
+    }
+    return items;
+  };
+
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const ok = async (body, extra = {}) => {
+      await route.fulfill({
+        status: extra.status || 200,
+        contentType: extra.contentType || 'application/json',
+        body: extra.rawBody ?? JSON.stringify(body),
+      });
+    };
+
+    if (path === '/api/v1/public/captcha/config') return ok({ enabled: false });
+    if (path === '/api/v1/public/password-reset/capabilities') return ok({ enabled: false, reason: 'disabled' });
+    if (path === '/api/v1/public/auth/capabilities') {
+      return ok({
+        passkey_mfa_available: false,
+        passkey_passwordless_available: false,
+        passkey_usernameless_enabled: true,
+        reason: 'disabled',
+      });
+    }
+    if (path === '/api/v1/setup/status') {
+      return ok({
+        required: false,
+        base_domain: 'example.com',
+        default_admin_email: 'webmaster@example.com',
+        auth_mode: 'sql',
+        password_min_length: 12,
+        password_max_length: 128,
+        password_class_min: 3,
+        automatic_updates_enabled: true,
+        passkey_primary_sign_in_enabled: true,
+      });
+    }
+    if (path === '/api/v1/me') return ok(fixture.user);
+    if (path === '/api/v2/security/mfa/webauthn') return ok({ items: [] });
+    if (path === '/api/v2/security/mfa/trusted-devices') return ok({ items: [] });
+    if (path === '/api/v2/security/sessions') return ok({ items: [] });
+    if (path === '/api/v2/accounts') return ok({ items: [fixture.account] });
+    if (path === '/api/v2/saved-searches') return ok({ items: [] });
+    if (path === '/api/v1/compose/identities') {
+      return ok({
+        auth_email: fixture.user.email,
+        manual_fallback_required: false,
+        items: fixture.identities,
+      });
+    }
+    if (path === '/api/v1/session/mail-secret/unlock') {
+      counters.unlockCalls += 1;
+      return ok({ error: 'unlock should not be required' }, { status: 500 });
+    }
+    if (path === '/api/v1/mailboxes') {
+      counters.legacyMailboxCalls += 1;
+      return ok({ error: 'legacy mailbox path should not be used' }, { status: 500 });
+    }
+    if (path === '/api/v1/messages' || path === '/api/v1/search') {
+      counters.legacyMessageCalls += 1;
+      return ok({ error: 'legacy message path should not be used' }, { status: 500 });
+    }
+    if (path === `/api/v2/accounts/${fixture.account.id}/mailboxes`) return ok(accountMailboxes());
+    if (path === `/api/v2/accounts/${fixture.account.id}/mailboxes/special/sent`) {
+      counters.accountSpecialCalls += 1;
+      sentConfigured = true;
+      return ok({
+        status: 'ok',
+        role: 'sent',
+        mailbox_name: 'Sent',
+        created: true,
+        items: [{ role: 'sent', mailbox_name: 'Sent' }],
+        mailboxes: accountMailboxes(),
+      });
+    }
+    if (path === '/api/v2/messages') {
+      return ok({ items: [fixture.messageSummary], total: 1 });
+    }
+    if (path === `/api/v2/messages/${fixture.messageSummary.id}`) {
+      return ok({ message: fixture.messageDetail, attachments: [] });
+    }
+    if (path === '/api/v2/messages/bulk') {
+      return ok({ status: 'ok', applied: [fixture.messageSummary.id], failed: [] });
+    }
+    if (path === `/api/v2/threads/${fixture.messageSummary.thread_id}`) {
+      return ok({ id: fixture.messageSummary.thread_id, items: [fixture.messageSummary] });
+    }
+    if (path === '/api/v2/drafts' && route.request().method() === 'GET') {
+      return ok({ items: draftList(), page: 1, page_size: 100, total: draftList().length });
+    }
+    if (path === '/api/v2/drafts' && route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON();
+      const draft = {
+        id: `draft-${draftSeq++}`,
+        account_id: payload.account_id || '',
+        identity_id: payload.identity_id || '',
+        compose_mode: payload.compose_mode || 'send',
+        context_message_id: payload.context_message_id || '',
+        context_account_id: payload.context_account_id || '',
+        from_mode: payload.from_mode || 'default',
+        from_manual: payload.from_manual || '',
+        client_state_json: payload.client_state_json || '',
+        to: payload.to || '',
+        cc: payload.cc || '',
+        bcc: payload.bcc || '',
+        subject: payload.subject || '',
+        body_text: payload.body_text || '',
+        body_html: payload.body_html || '',
+        attachments_json: '[]',
+        status: payload.status || 'active',
+        last_send_error: '',
+        created_at: '2026-03-10T09:00:00.000Z',
+        updated_at: new Date().toISOString(),
+      };
+      drafts.set(draft.id, draft);
+      return ok(draft, { status: 201 });
+    }
+    const draftMatch = path.match(/^\/api\/v2\/drafts\/([^/]+)$/);
+    if (draftMatch && route.request().method() === 'PATCH') {
+      const draftID = decodeURIComponent(draftMatch[1]);
+      const draft = drafts.get(draftID);
+      if (!draft) return ok({ error: 'draft_not_found' }, { status: 404 });
+      Object.assign(draft, route.request().postDataJSON(), { updated_at: new Date().toISOString() });
+      drafts.set(draftID, draft);
+      return ok(draft);
+    }
+    const draftSendMatch = path.match(/^\/api\/v2\/drafts\/([^/]+)\/send$/);
+    if (draftSendMatch) {
+      const draftID = decodeURIComponent(draftSendMatch[1]);
+      const draft = drafts.get(draftID);
+      if (!draft) return ok({ error: 'draft_not_found' }, { status: 404 });
+      draft.status = 'sent';
+      draft.updated_at = new Date().toISOString();
+      drafts.set(draftID, draft);
+      sentConfigured = true;
+      return ok({ status: 'sent', saved_copy: true, saved_copy_mailbox: 'Sent' });
+    }
+
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: path }),
+    });
+  });
+
+  return counters;
 }
 
 async function mockMailIdentityScenario(page) {
@@ -1737,6 +1996,39 @@ test('compose drafts keep media and retry send after temporary failure', async (
   await page.click('#btn-compose-send');
   await expect(page.locator('#compose-overlay')).toHaveClass(/hidden/);
   await expect(page.locator('.message-row-btn')).toHaveCount(0);
+});
+
+test('indexed account mail opens and sends without unlocking session mail', async ({ page }) => {
+  const counters = await mockIndexedAccountLockedScenario(page);
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.goto('http://127.0.0.1:18081/', { waitUntil: 'networkidle' });
+
+  await expect(page.locator('#view-mail')).toBeVisible();
+  await expect(page.locator('#mail-index-status')).toContainText(/Indexed/i);
+  await expect(page.locator('#ui-modal-overlay')).toHaveClass(/hidden/);
+  await expect(page.locator('.message-row-btn')).toHaveCount(1);
+
+  await page.locator('.message-row-btn').first().click();
+  await expect(page.locator('#message-subject-anchor')).toContainText('Indexed reply target');
+
+  await page.click('#btn-reply');
+  await expect(page.locator('#compose-overlay')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#compose-from-select')).toHaveValue('ident-indexed');
+  await expect(page.locator('#compose-subject-input')).toHaveValue('Re: Indexed reply target');
+
+  await page.click('#btn-compose-send');
+  await expect(page.locator('#ui-modal-overlay')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#ui-modal-title')).toHaveText(/Choose Sent Mailbox/i);
+  await page.fill('#ui-modal-input', 'Sent');
+  await page.click('#ui-modal-confirm');
+
+  await expect(page.locator('#compose-overlay')).toHaveClass(/hidden/);
+  await expect(page.locator('#status-line')).toContainText(/Saved to Sent/i);
+  await expect(page.locator('#mailboxes .mailbox-row button', { hasText: /^Sent/i })).toBeVisible();
+  expect(counters.unlockCalls).toBe(0);
+  expect(counters.legacyMailboxCalls).toBe(0);
+  expect(counters.legacyMessageCalls).toBe(0);
+  expect(counters.accountSpecialCalls).toBe(1);
 });
 
 test('mail identities and signatures stay editable, replace untouched inserts, and reopen without duplication', async ({ page }) => {

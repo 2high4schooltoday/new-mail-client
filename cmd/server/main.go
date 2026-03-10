@@ -84,6 +84,7 @@ func main() {
 		"migrations/023_drafts_nullable_account.sql",
 		"migrations/024_draft_attachments_and_send_errors.sql",
 		"migrations/025_session_mail_profiles.sql",
+		"migrations/026_draft_context_account.sql",
 	} {
 		if err := db.ApplyMigrationFile(sqdb, migration); err != nil {
 			log.Fatalf("migration %s: %v", migration, err)

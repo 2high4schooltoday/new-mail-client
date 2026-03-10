@@ -29,14 +29,15 @@ import (
 )
 
 type sendTestDespatch struct {
-	mu           sync.Mutex
-	sendErr      error
-	sendResult   mail.SendResult
-	capturedReq  mail.SendRequest
-	capturedUser string
-	messageByID  map[string]mail.Message
-	patches      map[string]mail.FlagPatch
-	mailboxes    []mail.Mailbox
+	mu              sync.Mutex
+	sendErr         error
+	sendResult      mail.SendResult
+	capturedReq     mail.SendRequest
+	capturedUser    string
+	messageByID     map[string]mail.Message
+	getMessageCalls int
+	patches         map[string]mail.FlagPatch
+	mailboxes       []mail.Mailbox
 }
 
 func (m *sendTestDespatch) ListMailboxes(ctx context.Context, user, pass string) ([]mail.Mailbox, error) {
@@ -55,6 +56,9 @@ func (m *sendTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox
 }
 
 func (m *sendTestDespatch) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
+	m.mu.Lock()
+	m.getMessageCalls++
+	m.mu.Unlock()
 	if msg, ok := m.messageByID[id]; ok {
 		return msg, nil
 	}
@@ -116,6 +120,12 @@ func (m *sendTestDespatch) patchFor(id string) (mail.FlagPatch, bool) {
 	defer m.mu.Unlock()
 	patch, ok := m.patches[id]
 	return patch, ok
+}
+
+func (m *sendTestDespatch) getMessageCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getMessageCalls
 }
 
 const sendTestSessionEncryptKey = "this_is_a_valid_long_session_encrypt_key_123456"

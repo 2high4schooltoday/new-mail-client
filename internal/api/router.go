@@ -262,6 +262,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.RequireMFAStageAuthenticated(h.svc))
 				r.Get("/accounts", h.V2ListAccounts)
+				r.Get("/accounts/{id}/mailboxes", h.V2ListAccountMailboxes)
 				r.Get("/accounts/{id}/identities", h.V2ListIdentities)
 				r.Get("/mail/session-profile", h.V2GetSessionMailProfile)
 				r.Get("/mailboxes", h.V2ListMailboxMappings)
@@ -269,6 +270,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 				r.Get("/threads/{id}", h.V2GetThread)
 				r.Get("/messages", h.V2ListMessages)
 				r.Get("/messages/{id}", h.V2GetIndexedMessage)
+				r.Get("/messages/{id}/attachments/{attachment_id}", h.V2GetIndexedMessageAttachment)
 				r.Get("/messages/{id}/raw", h.V2GetIndexedMessageRaw)
 				r.Get("/recipients/suggest", h.V2SuggestRecipients)
 				r.Get("/search", h.V2Search)
@@ -292,6 +294,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 					r.Patch("/accounts/{id}", h.V2UpdateAccount)
 					r.Delete("/accounts/{id}", h.V2DeleteAccount)
 					r.Post("/accounts/{id}/activate", h.V2ActivateAccount)
+					r.Post("/accounts/{id}/mailboxes/special/{role}", h.V2UpsertAccountSpecialMailbox)
 					r.Post("/accounts/{id}/identities", h.V2CreateIdentity)
 					r.Patch("/identities/{id}", h.V2UpdateIdentity)
 					r.Delete("/identities/{id}", h.V2DeleteIdentity)

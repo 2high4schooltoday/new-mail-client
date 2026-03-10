@@ -2,16 +2,19 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"despatch/internal/mail"
 	"despatch/internal/middleware"
 	"despatch/internal/models"
 	"despatch/internal/service"
+	"despatch/internal/store"
 	"despatch/internal/util"
 )
 
@@ -111,6 +114,102 @@ func resolveMappedMailboxByRole(items []models.MailboxMapping, role string) stri
 		}
 	}
 	return ""
+}
+
+func mailboxMappingsOverlay(items []models.MailboxMapping) map[string]string {
+	out := map[string]string{}
+	for _, role := range specialMailboxRoles {
+		if mapped := resolveMappedMailboxByRole(items, role); mapped != "" {
+			out[role] = mapped
+		}
+	}
+	return out
+}
+
+func accountMailboxCacheKey(account models.MailAccount) string {
+	return "account:" + strings.TrimSpace(account.ID) + "\x00" + strings.TrimSpace(account.Login)
+}
+
+func mergeMailboxCounts(mailboxes []mail.Mailbox, counts []mail.Mailbox) []mail.Mailbox {
+	out := make([]mail.Mailbox, len(mailboxes))
+	copy(out, mailboxes)
+	byName := map[string]mail.Mailbox{}
+	for _, item := range counts {
+		byName[strings.ToLower(strings.TrimSpace(item.Name))] = item
+	}
+	seen := map[string]struct{}{}
+	for i := range out {
+		key := strings.ToLower(strings.TrimSpace(out[i].Name))
+		if key == "" {
+			continue
+		}
+		if count, ok := byName[key]; ok {
+			out[i].Unread = count.Unread
+			out[i].Messages = count.Messages
+			seen[key] = struct{}{}
+		}
+	}
+	extras := make([]mail.Mailbox, 0, len(byName))
+	for key, count := range byName {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		extras = append(extras, count)
+	}
+	sort.Slice(extras, func(i, j int) bool {
+		return strings.ToLower(strings.TrimSpace(extras[i].Name)) < strings.ToLower(strings.TrimSpace(extras[j].Name))
+	})
+	return append(out, extras...)
+}
+
+func (h *Handlers) accountMailClient(account models.MailAccount) mail.Client {
+	cfg := h.cfg
+	cfg.IMAPHost = account.IMAPHost
+	cfg.IMAPPort = account.IMAPPort
+	cfg.IMAPTLS = account.IMAPTLS
+	cfg.IMAPStartTLS = account.IMAPStartTLS
+	cfg.SMTPHost = account.SMTPHost
+	cfg.SMTPPort = account.SMTPPort
+	cfg.SMTPTLS = account.SMTPTLS
+	cfg.SMTPStartTLS = account.SMTPStartTLS
+	return mailClientFactory(cfg)
+}
+
+func (h *Handlers) accountMailSecret(account models.MailAccount) (string, error) {
+	return util.DecryptString(util.Derive32ByteKey(h.cfg.SessionEncryptKey), account.SecretEnc)
+}
+
+func (h *Handlers) rawAccountMailboxes(ctx context.Context, account models.MailAccount, pass string) ([]mail.Mailbox, error) {
+	cacheKey := accountMailboxCacheKey(account)
+	cli := h.accountMailClient(account)
+	return h.mailboxCache.get(ctx, cacheKey, func(ctx context.Context) ([]mail.Mailbox, error) {
+		return cli.ListMailboxes(ctx, account.Login, pass)
+	})
+}
+
+func (h *Handlers) listAccountMailboxesWithRoles(ctx context.Context, u models.User, accountID string) ([]mail.Mailbox, []models.MailboxMapping, models.MailAccount, string, error) {
+	account, err := h.svc.Store().GetMailAccountByID(ctx, u.ID, strings.TrimSpace(accountID))
+	if err != nil {
+		return nil, nil, models.MailAccount{}, "", err
+	}
+	pass, err := h.accountMailSecret(account)
+	if err != nil {
+		return nil, nil, models.MailAccount{}, "", err
+	}
+	items, err := h.rawAccountMailboxes(ctx, account, pass)
+	if err != nil {
+		return nil, nil, account, pass, err
+	}
+	counts, err := h.svc.Store().ListIndexedMailboxCounts(ctx, account.ID)
+	if err != nil {
+		return nil, nil, account, pass, err
+	}
+	mappings, err := h.svc.Store().ListMailboxMappings(ctx, account.ID)
+	if err != nil {
+		return nil, nil, account, pass, err
+	}
+	items = mergeMailboxCounts(items, counts)
+	return applySpecialMailboxRoles(items, mailboxMappingsOverlay(mappings)), mappings, account, pass, nil
 }
 
 func (h *Handlers) resolveAccountSpecialMailboxByRole(ctx context.Context, account models.MailAccount, pass, role string, client mail.Client) (string, error) {
@@ -213,6 +312,118 @@ func (h *Handlers) UpsertSpecialMailbox(w http.ResponseWriter, r *http.Request) 
 		return responseItems[i].Role < responseItems[j].Role
 	})
 	util.WriteJSON(w, 200, map[string]any{
+		"status":       "ok",
+		"role":         role,
+		"mailbox_name": actualName,
+		"created":      created,
+		"items":        responseItems,
+		"mailboxes":    items,
+	})
+}
+
+func (h *Handlers) V2ListAccountMailboxes(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	items, _, _, _, err := h.listAccountMailboxesWithRoles(r.Context(), u, chi.URLParam(r, "id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, http.StatusNotFound, "account_not_found", "account not found", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, http.StatusInternalServerError, "account_mailboxes_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, items)
+}
+
+func (h *Handlers) V2UpsertAccountSpecialMailbox(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	role := strings.ToLower(strings.TrimSpace(chi.URLParam(r, "role")))
+	if role != "sent" && role != "archive" && role != "trash" {
+		util.WriteError(w, http.StatusBadRequest, "bad_request", "unsupported mailbox role", middleware.RequestID(r.Context()))
+		return
+	}
+	var req struct {
+		MailboxName     string `json:"mailbox_name"`
+		CreateIfMissing bool   `json:"create_if_missing"`
+	}
+	if err := decodeJSON(w, r, &req, jsonLimitMutation, false); err != nil {
+		writeJSONDecodeError(w, r, err)
+		return
+	}
+	target := strings.TrimSpace(req.MailboxName)
+	if target == "" {
+		util.WriteError(w, http.StatusBadRequest, "bad_request", "mailbox_name is required", middleware.RequestID(r.Context()))
+		return
+	}
+	items, mappings, account, pass, err := h.listAccountMailboxesWithRoles(r.Context(), u, chi.URLParam(r, "id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			util.WriteError(w, http.StatusNotFound, "account_not_found", "account not found", middleware.RequestID(r.Context()))
+			return
+		}
+		util.WriteError(w, http.StatusInternalServerError, "account_mailboxes_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+
+	actualName := target
+	found := false
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Name), target) {
+			actualName = strings.TrimSpace(item.Name)
+			found = true
+			break
+		}
+	}
+	created := false
+	if !found {
+		if !req.CreateIfMissing {
+			util.WriteError(w, http.StatusNotFound, "mailbox_not_found", "mailbox does not exist", middleware.RequestID(r.Context()))
+			return
+		}
+		cli := h.accountMailClient(account)
+		if err := cli.CreateMailbox(r.Context(), account.Login, pass, target); err != nil {
+			util.WriteError(w, http.StatusBadGateway, "imap_error", err.Error(), middleware.RequestID(r.Context()))
+			return
+		}
+		actualName = target
+		created = true
+	}
+
+	mappingID := ""
+	for _, item := range mappings {
+		if strings.EqualFold(strings.TrimSpace(item.Role), role) {
+			mappingID = strings.TrimSpace(item.ID)
+			break
+		}
+	}
+	if mappingID == "" {
+		mappingID = uuid.NewString()
+	}
+	if _, err := h.svc.Store().UpsertMailboxMapping(r.Context(), models.MailboxMapping{
+		ID:          mappingID,
+		AccountID:   account.ID,
+		Role:        role,
+		MailboxName: actualName,
+		Source:      "manual",
+		Priority:    100,
+	}); err != nil {
+		util.WriteError(w, http.StatusInternalServerError, "account_mailboxes_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+
+	h.mailboxCache.invalidate(accountMailboxCacheKey(account))
+	h.mailboxCache.invalidate(account.Login)
+
+	items, mappings, _, _, err = h.listAccountMailboxesWithRoles(r.Context(), u, account.ID)
+	if err != nil {
+		util.WriteError(w, http.StatusInternalServerError, "account_mailboxes_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	responseItems := specialMailboxMappingsForResponse(mailboxMappingsOverlay(mappings))
+	sort.Slice(responseItems, func(i, j int) bool {
+		return responseItems[i].Role < responseItems[j].Role
+	})
+	util.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":       "ok",
 		"role":         role,
 		"mailbox_name": actualName,

@@ -416,6 +416,33 @@ func (s *Store) DeleteMailboxMapping(ctx context.Context, accountID, id string) 
 	return nil
 }
 
+func (s *Store) ListIndexedMailboxCounts(ctx context.Context, accountID string) ([]mail.Mailbox, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT mailbox,
+		        SUM(CASE WHEN seen=0 THEN 1 ELSE 0 END) AS unread_count,
+		        COUNT(1) AS message_count
+		   FROM message_index
+		  WHERE account_id=?
+		  GROUP BY mailbox
+		  ORDER BY mailbox ASC`,
+		accountID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]mail.Mailbox, 0, 12)
+	for rows.Next() {
+		var item mail.Mailbox
+		if err := rows.Scan(&item.Name, &item.Unread, &item.Messages); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetUserPreferences(ctx context.Context, userID string) (models.UserPreferences, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT user_id,theme,density,layout_mode,keymap_json,remote_image_policy,timezone,page_size,grouping_mode,updated_at
@@ -605,7 +632,7 @@ func (s *Store) ListDrafts(ctx context.Context, userID, accountID string, limit,
 	limit = clampLimit(limit)
 	offset = clampOffset(offset)
 	query := fmt.Sprintf(
-		`SELECT id,user_id,account_id,identity_id,compose_mode,context_message_id,from_mode,from_manual,client_state_json,to_value,cc_value,bcc_value,subject,body_text,body_html,attachments_json,crypto_options_json,send_mode,scheduled_for,status,last_send_error,created_at,updated_at
+		`SELECT id,user_id,account_id,identity_id,compose_mode,context_message_id,context_account_id,from_mode,from_manual,client_state_json,to_value,cc_value,bcc_value,subject,body_text,body_html,attachments_json,crypto_options_json,send_mode,scheduled_for,status,last_send_error,created_at,updated_at
 		 FROM drafts
 		 WHERE %s
 		 ORDER BY updated_at DESC
@@ -632,7 +659,7 @@ func (s *Store) ListDrafts(ctx context.Context, userID, accountID string, limit,
 
 func (s *Store) GetDraftByID(ctx context.Context, userID, id string) (models.Draft, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,user_id,account_id,identity_id,compose_mode,context_message_id,from_mode,from_manual,client_state_json,to_value,cc_value,bcc_value,subject,body_text,body_html,attachments_json,crypto_options_json,send_mode,scheduled_for,status,last_send_error,created_at,updated_at
+		`SELECT id,user_id,account_id,identity_id,compose_mode,context_message_id,context_account_id,from_mode,from_manual,client_state_json,to_value,cc_value,bcc_value,subject,body_text,body_html,attachments_json,crypto_options_json,send_mode,scheduled_for,status,last_send_error,created_at,updated_at
 		 FROM drafts
 		 WHERE user_id=? AND id=?`,
 		userID, id,
@@ -667,14 +694,15 @@ func (s *Store) CreateDraft(ctx context.Context, in models.Draft) (models.Draft,
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO drafts(
-		  id,user_id,account_id,identity_id,compose_mode,context_message_id,from_mode,from_manual,client_state_json,to_value,cc_value,bcc_value,subject,body_text,body_html,attachments_json,crypto_options_json,send_mode,scheduled_for,status,last_send_error,created_at,updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  id,user_id,account_id,identity_id,compose_mode,context_message_id,context_account_id,from_mode,from_manual,client_state_json,to_value,cc_value,bcc_value,subject,body_text,body_html,attachments_json,crypto_options_json,send_mode,scheduled_for,status,last_send_error,created_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		in.ID,
 		in.UserID,
 		nullStringValue(in.AccountID),
 		in.IdentityID,
 		in.ComposeMode,
 		in.ContextMessageID,
+		in.ContextAccountID,
 		in.FromMode,
 		in.FromManual,
 		in.ClientStateJSON,
@@ -713,12 +741,13 @@ func (s *Store) UpdateDraft(ctx context.Context, in models.Draft) (models.Draft,
 	in.LastSendError = strings.TrimSpace(in.LastSendError)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE drafts SET
-		  account_id=?,identity_id=?,compose_mode=?,context_message_id=?,from_mode=?,from_manual=?,client_state_json=?,to_value=?,cc_value=?,bcc_value=?,subject=?,body_text=?,body_html=?,attachments_json=?,crypto_options_json=?,send_mode=?,scheduled_for=?,status=?,last_send_error=?,updated_at=?
+		  account_id=?,identity_id=?,compose_mode=?,context_message_id=?,context_account_id=?,from_mode=?,from_manual=?,client_state_json=?,to_value=?,cc_value=?,bcc_value=?,subject=?,body_text=?,body_html=?,attachments_json=?,crypto_options_json=?,send_mode=?,scheduled_for=?,status=?,last_send_error=?,updated_at=?
 		 WHERE user_id=? AND id=?`,
 		nullStringValue(in.AccountID),
 		in.IdentityID,
 		in.ComposeMode,
 		in.ContextMessageID,
+		in.ContextAccountID,
 		in.FromMode,
 		in.FromManual,
 		in.ClientStateJSON,
@@ -1832,6 +1861,10 @@ func (s *Store) SetIndexedMessageFlagged(ctx context.Context, accountID, id stri
 	return s.updateIndexedMessageBool(ctx, accountID, id, "flagged", flagged)
 }
 
+func (s *Store) SetIndexedMessageAnswered(ctx context.Context, accountID, id string, answered bool) error {
+	return s.updateIndexedMessageBool(ctx, accountID, id, "answered", answered)
+}
+
 func (s *Store) MoveIndexedMessageMailbox(ctx context.Context, accountID, id, mailbox string) error {
 	candidates := indexedMessageIDCandidates(accountID, id)
 	if len(candidates) == 0 {
@@ -2793,7 +2826,7 @@ func (s *Store) AddRemoteImageAllowlist(ctx context.Context, userID, messageID, 
 }
 
 func (s *Store) updateIndexedMessageBool(ctx context.Context, accountID, id, column string, value bool) error {
-	if column != "seen" && column != "flagged" {
+	if column != "seen" && column != "flagged" && column != "answered" {
 		return fmt.Errorf("unsupported message boolean column")
 	}
 	candidates := indexedMessageIDCandidates(accountID, id)
@@ -3107,6 +3140,7 @@ func scanDraft(scanner interface{ Scan(dest ...any) error }) (models.Draft, erro
 		&item.IdentityID,
 		&item.ComposeMode,
 		&item.ContextMessageID,
+		&item.ContextAccountID,
 		&item.FromMode,
 		&item.FromManual,
 		&item.ClientStateJSON,
