@@ -11,6 +11,7 @@ import (
 	netmail "net/mail"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,13 +98,14 @@ func (e *PAMCredentialsInvalidError) Error() string {
 }
 
 type Service struct {
-	cfg         config.Config
-	st          *store.Store
-	mail        mail.Client
-	provision   mail.AuthProvisioner
-	sender      notify.Sender
-	pamResetter pamPasswordResetter
-	encryptKey  []byte
+	cfg           config.Config
+	st            *store.Store
+	mail          mail.Client
+	provision     mail.AuthProvisioner
+	sender        notify.Sender
+	pamResetter   pamPasswordResetter
+	encryptKey    []byte
+	mailAccountMu sync.Mutex
 }
 
 type pamPasswordResetter interface {
@@ -243,6 +245,9 @@ func (s *Service) Login(ctx context.Context, email, password, ip, userAgent stri
 	if err := s.st.UpsertUserMailSecret(ctx, u.ID, mailSecret); err != nil {
 		return "", models.User{}, err
 	}
+	if err := s.EnsureAuthenticatedMailAccount(ctx, u); err != nil {
+		log.Printf("auth mail account bootstrap failed user=%s: %v", u.ID, err)
+	}
 
 	now := time.Now().UTC()
 	stage, err := s.ResolveMFAStage(ctx, u, nil)
@@ -330,6 +335,10 @@ func (s *Service) UnlockSessionMailSecret(ctx context.Context, userID, sessionID
 			if err := s.st.UpdateUserMailLogin(ctx, u.ID, acceptedLogin); err != nil {
 				return err
 			}
+			acceptedCopy := strings.TrimSpace(acceptedLogin)
+			if acceptedCopy != "" {
+				u.MailLogin = &acceptedCopy
+			}
 		}
 	} else {
 		if !auth.VerifyPassword(u.PasswordHash, password) {
@@ -345,6 +354,9 @@ func (s *Service) UnlockSessionMailSecret(ctx context.Context, userID, sessionID
 	}
 	if err := s.st.UpdateSessionMailSecret(ctx, sessionID, mailSecret); err != nil {
 		return err
+	}
+	if err := s.EnsureAuthenticatedMailAccount(ctx, u); err != nil {
+		log.Printf("mail account bootstrap after unlock failed user=%s session=%s: %v", u.ID, sessionID, err)
 	}
 	meta, _ := json.Marshal(map[string]string{
 		"session_id": sessionID,

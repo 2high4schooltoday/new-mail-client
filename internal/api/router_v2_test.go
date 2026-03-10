@@ -572,6 +572,57 @@ func TestV2AccountsCreateAndList(t *testing.T) {
 	}
 }
 
+func TestV2AccountsListBackfillsPAMSessionAccount(t *testing.T) {
+	router, st := newV2RouterWithMailClientAndStore(t, pamLoginTestDespatch{
+		acceptPassword: "SecretPass123!",
+		acceptedUsers:  map[string]bool{"admin": true},
+	}, func(cfg *config.Config) {
+		cfg.DovecotAuthMode = "pam"
+		cfg.IMAPHost = "127.0.0.1"
+		cfg.IMAPPort = 993
+		cfg.IMAPTLS = true
+		cfg.SMTPHost = "127.0.0.1"
+		cfg.SMTPPort = 25
+		cfg.SMTPTLS = false
+		cfg.SMTPStartTLS = false
+	})
+
+	sess, csrf, _ := loginV2WithResponse(t, router)
+	admin, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	accounts, err := st.ListMailAccounts(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatalf("list accounts after login: %v", err)
+	}
+	for _, account := range accounts {
+		if err := st.DeleteMailAccount(context.Background(), admin.ID, account.ID); err != nil {
+			t.Fatalf("delete account %s: %v", account.ID, err)
+		}
+	}
+
+	list := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/accounts", nil, sess, csrf)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", list.Code, list.Body.String())
+	}
+	var out struct {
+		Items []models.MailAccount `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected 1 bootstrapped account got=%d body=%s", len(out.Items), list.Body.String())
+	}
+	if out.Items[0].Login != "admin" {
+		t.Fatalf("expected bootstrapped login admin, got %q", out.Items[0].Login)
+	}
+	if !out.Items[0].IsDefault {
+		t.Fatalf("expected bootstrapped account to be default")
+	}
+}
+
 func TestV2TOTPFlowWithMailSecVerifier(t *testing.T) {
 	socketPath := startFakeMailSecServer(t)
 	router := newV2RouterWithConfig(t, func(cfg *config.Config) {
@@ -1793,6 +1844,42 @@ func TestV2DraftCRUDPersistsContextAccountID(t *testing.T) {
 	}
 	if updated.ContextAccountID != "" {
 		t.Fatalf("expected context_account_id to clear, got %+v", updated)
+	}
+}
+
+func TestV2CreateDraftAcceptsBlankScheduledForFromComposeClient(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/drafts", map[string]any{
+		"account_id":         "",
+		"identity_id":        "",
+		"compose_mode":       "send",
+		"context_message_id": "",
+		"context_account_id": "",
+		"from_mode":          "default",
+		"from_manual":        "",
+		"client_state_json":  `{"cc_visible":false}`,
+		"to":                 "alice@example.com",
+		"cc":                 "",
+		"bcc":                "",
+		"subject":            "Draft subject",
+		"body_text":          "Draft body",
+		"body_html":          "<p>Draft body</p>",
+		"send_mode":          "",
+		"scheduled_for":      "",
+		"status":             "active",
+		"last_send_error":    "",
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected draft create 201, got %d body=%s", create.Code, create.Body.String())
+	}
+	var draft models.Draft
+	if err := json.Unmarshal(create.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("decode draft response: %v body=%s", err, create.Body.String())
+	}
+	if !draft.ScheduledFor.IsZero() {
+		t.Fatalf("expected blank scheduled_for to decode as zero time, got %+v", draft)
 	}
 }
 

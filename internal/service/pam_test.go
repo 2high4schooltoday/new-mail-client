@@ -116,6 +116,9 @@ func newPAMTestService(t *testing.T, acceptedPass string, acceptedUsers ...strin
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "006_users_recovery_email.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
+	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "007_mail_accounts.sql")); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 	if err := db.ApplyMigrationFile(sqdb, filepath.Join("..", "..", "migrations", "021_password_reset_token_reservations.sql")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
@@ -131,6 +134,13 @@ func newPAMTestService(t *testing.T, acceptedPass string, acceptedUsers ...strin
 		PasswordResetPublicEnabled:      true,
 		PasswordResetTokenTTLMinutes:    30,
 		PasswordResetRequireMappedLogin: true,
+		IMAPHost:                        "127.0.0.1",
+		IMAPPort:                        993,
+		IMAPTLS:                         true,
+		SMTPHost:                        "127.0.0.1",
+		SMTPPort:                        25,
+		SMTPTLS:                         false,
+		SMTPStartTLS:                    false,
 	}
 	accepted := map[string]bool{}
 	for _, v := range acceptedUsers {
@@ -161,6 +171,95 @@ func TestPAMModeLoginUsesMailCredentials(t *testing.T) {
 	}
 	if _, _, err := svc.Login(ctx, "alice@example.com", "PamPass123!", "127.0.0.1", "test-agent"); err != nil {
 		t.Fatalf("expected PAM-backed login success, got: %v", err)
+	}
+}
+
+func TestPAMModeLoginBootstrapsIndexedAccount(t *testing.T) {
+	ctx := context.Background()
+	svc, st := newPAMTestService(t, "PamPass123!", "alice")
+
+	localHash, err := auth.HashPassword("LocalOnly123!")
+	if err != nil {
+		t.Fatalf("hash local: %v", err)
+	}
+	u, err := st.CreateUser(ctx, "alice@example.com", localHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := st.UpdateProvisionState(ctx, u.ID, "ok", nil); err != nil {
+		t.Fatalf("set provision state: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, _, err := svc.Login(ctx, "alice@example.com", "PamPass123!", "127.0.0.1", "test-agent"); err != nil {
+			t.Fatalf("login %d failed: %v", i+1, err)
+		}
+	}
+
+	accounts, err := st.ListMailAccounts(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("list mail accounts: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 indexed account, got %d", len(accounts))
+	}
+	account := accounts[0]
+	if account.Login != "alice" {
+		t.Fatalf("expected account login alice, got %q", account.Login)
+	}
+	if !account.IsDefault {
+		t.Fatalf("expected bootstrapped account to be default")
+	}
+	if account.IMAPHost != "127.0.0.1" || account.IMAPPort != 993 {
+		t.Fatalf("unexpected IMAP settings: %s:%d", account.IMAPHost, account.IMAPPort)
+	}
+	if account.SMTPHost != "127.0.0.1" || account.SMTPPort != 25 {
+		t.Fatalf("unexpected SMTP settings: %s:%d", account.SMTPHost, account.SMTPPort)
+	}
+	if account.SecretEnc == "" {
+		t.Fatalf("expected bootstrapped account to persist encrypted secret")
+	}
+}
+
+func TestPAMUnlockBootstrapsIndexedAccountUsingAcceptedLogin(t *testing.T) {
+	ctx := context.Background()
+	svc, st := newPAMTestService(t, "PamPass123!", "alice")
+
+	localHash, err := auth.HashPassword("LocalOnly123!")
+	if err != nil {
+		t.Fatalf("hash local: %v", err)
+	}
+	u, err := st.CreateUser(ctx, "alice@example.com", localHash, "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := st.CreateSession(ctx, models.Session{
+		ID:            "session-1",
+		UserID:        u.ID,
+		TokenHash:     "token-hash-1",
+		AuthMethod:    "password",
+		ExpiresAt:     now.Add(time.Hour),
+		IdleExpiresAt: now.Add(time.Hour),
+		CreatedAt:     now,
+		LastSeenAt:    now,
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if err := svc.UnlockSessionMailSecret(ctx, u.ID, "session-1", "PamPass123!"); err != nil {
+		t.Fatalf("unlock mail secret: %v", err)
+	}
+
+	accounts, err := st.ListMailAccounts(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("list mail accounts: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 indexed account, got %d", len(accounts))
+	}
+	if accounts[0].Login != "alice" {
+		t.Fatalf("expected unlock bootstrap login alice, got %q", accounts[0].Login)
 	}
 }
 

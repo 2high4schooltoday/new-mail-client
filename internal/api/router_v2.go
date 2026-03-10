@@ -681,6 +681,10 @@ func (h *Handlers) V2MFARecoveryCodeVerify(w http.ResponseWriter, r *http.Reques
 
 func (h *Handlers) V2ListAccounts(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
+	if err := h.svc.EnsureAuthenticatedMailAccount(r.Context(), u); err != nil {
+		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
 	items, err := h.svc.Store().ListMailAccounts(r.Context(), u.ID)
 	if err != nil {
 		util.WriteError(w, 500, "internal_error", err.Error(), middleware.RequestID(r.Context()))
@@ -1890,11 +1894,13 @@ func (h *Handlers) V2GetDraftAttachment(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handlers) V2CreateDraft(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
-	var req models.Draft
-	if err := decodeJSON(w, r, &req, jsonLimitLarge, false); err != nil {
+	var patch map[string]any
+	if err := decodeJSON(w, r, &patch, jsonLimitLarge, false); err != nil {
 		writeJSONDecodeError(w, r, err)
 		return
 	}
+	var req models.Draft
+	mergeDraftPatch(&req, patch)
 	req.ID = uuid.NewString()
 	req.UserID = u.ID
 	if strings.TrimSpace(req.AccountID) != "" {
