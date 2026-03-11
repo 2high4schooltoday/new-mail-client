@@ -61,6 +61,10 @@ func (m pamLoginTestDespatch) GetMessage(ctx context.Context, user, pass, id str
 	return mail.Message{}, nil
 }
 
+func (m pamLoginTestDespatch) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	return []byte(""), nil
+}
+
 func (m pamLoginTestDespatch) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }

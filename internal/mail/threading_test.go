@@ -116,6 +116,36 @@ func TestBuildPreviewFromBodySampleDropsTrackingLinks(t *testing.T) {
 	}
 }
 
+func TestBestAvailablePreviewFallsBackFromNoisySnippet(t *testing.T) {
+	raw := strings.Join([]string{
+		"From: Alice <alice@example.com>",
+		"To: Bob <bob@example.com>",
+		"Subject: Invoice",
+		"MIME-Version: 1.0",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<html><body><p>Invoice attached. Please review this week.</p></body></html>",
+	}, "\r\n")
+
+	got := BestAvailablePreview(
+		`table {border-collapse:collapse} td {font-family:Arial}`,
+		"",
+		"",
+		raw,
+		120,
+	)
+	if got != "Invoice attached. Please review this week." {
+		t.Fatalf("expected raw-source fallback preview, got %q", got)
+	}
+}
+
+func TestBestAvailablePreviewKeepsCleanedSnippet(t *testing.T) {
+	got := BestAvailablePreview("<p>Hello <strong>team</strong></p>", "", "", "", 120)
+	if got != "Hello team" {
+		t.Fatalf("expected cleaned snippet to be preserved, got %q", got)
+	}
+}
+
 func TestMailboxRoleResolutionSupportsAttributesAndCommonNames(t *testing.T) {
 	if got := MailboxRole("Custom Sent Folder", []string{"\\Sent"}); got != "sent" {
 		t.Fatalf("expected attribute-based sent role, got %q", got)

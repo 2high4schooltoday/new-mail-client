@@ -48,6 +48,10 @@ func (m *mailHTMLRouterTestClient) GetMessage(ctx context.Context, user, pass, i
 	return mail.Message{ID: id}, nil
 }
 
+func (m *mailHTMLRouterTestClient) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	return []byte("From: test@example.com\r\n\r\nbody"), nil
+}
+
 func (m *mailHTMLRouterTestClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return []mail.MessageSummary{}, nil
 }

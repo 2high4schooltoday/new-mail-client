@@ -185,6 +185,7 @@ func NewRouter(cfg config.Config, svc *service.Service) http.Handler {
 				r.Get("/mailboxes/special", h.ListSpecialMailboxes)
 				r.Get("/messages", h.ListMessages)
 				r.Get("/messages/{id}", h.GetMessage)
+				r.Get("/messages/{id}/raw", h.GetMessageRaw)
 				r.Get("/messages/{id}/remote-image", h.GetMessageRemoteImage)
 				r.Get("/threads/{id}/messages", h.ListThreadMessages)
 				r.Get("/compose/identities", h.ComposeIdentities)
@@ -908,6 +909,23 @@ func (h *Handlers) GetMessage(w http.ResponseWriter, r *http.Request) {
 		msg.BodyHTML = rewriteMessageHTML(id, msg.BodyHTML, msg.Attachments)
 	}
 	util.WriteJSON(w, 200, msg)
+}
+
+func (h *Handlers) GetMessageRaw(w http.ResponseWriter, r *http.Request) {
+	u, _ := middleware.User(r.Context())
+	pass, err := h.sessionMailPassword(r)
+	if err != nil {
+		h.writeMailAuthError(w, r, err)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	mailLogin := service.MailAuthLogin(u)
+	raw, err := h.svc.Mail().GetRawMessage(r.Context(), mailLogin, pass, id)
+	if err != nil {
+		util.WriteError(w, 404, "not_found", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	writeRawMessageResponse(w, r, raw, id)
 }
 
 func (h *Handlers) GetMessageRemoteImage(w http.ResponseWriter, r *http.Request) {

@@ -123,6 +123,7 @@ type Client interface {
 	DeleteMailbox(ctx context.Context, user, pass, mailbox string) error
 	ListMessages(ctx context.Context, user, pass, mailbox string, page, pageSize int) ([]MessageSummary, error)
 	GetMessage(ctx context.Context, user, pass, id string) (Message, error)
+	GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error)
 	Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]MessageSummary, error)
 	Send(ctx context.Context, user, pass string, req SendRequest) (SendResult, error)
 	SetFlags(ctx context.Context, user, pass, id string, flags []string) error

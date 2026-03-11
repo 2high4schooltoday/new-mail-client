@@ -136,6 +136,10 @@ func (m *sendTestDespatch) getMessageCallCount() int {
 	return m.getMessageCalls
 }
 
+func (m *sendTestDespatch) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	return []byte("From: sender@example.com\r\n\r\nbody"), nil
+}
+
 const sendTestSessionEncryptKey = "this_is_a_valid_long_session_encrypt_key_123456"
 
 func newSendRouterWithStore(t *testing.T, despatch mail.Client, mailLogin string) (http.Handler, *store.Store, config.Config) {

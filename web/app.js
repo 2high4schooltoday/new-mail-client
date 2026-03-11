@@ -10,6 +10,24 @@ function createThreadState(overrides = {}) {
   };
 }
 
+function createMailFilterState(overrides = {}) {
+  const accountIDs = Array.isArray(overrides?.accountIDs) ? overrides.accountIDs : [];
+  return {
+    query: "",
+    from: "",
+    to: "",
+    subject: "",
+    dateFrom: "",
+    dateTo: "",
+    unread: false,
+    flagged: false,
+    hasAttachments: false,
+    waiting: false,
+    accountIDs: accountIDs.map((item) => String(item || "").trim()).filter(Boolean),
+    ...overrides,
+  };
+}
+
 const state = {
   user: null,
   mailbox: "INBOX",
@@ -45,6 +63,7 @@ const state = {
     refreshTimer: 0,
     refreshPending: false,
     searchQuery: "",
+    filters: createMailFilterState(),
   },
   selectedMessage: null,
   selectedMessageSummary: null,
@@ -272,11 +291,32 @@ const el = {
   btnThreadNext: document.getElementById("btn-thread-next"),
   btnReaderViewHTML: document.getElementById("btn-reader-view-html"),
   btnReaderViewPlain: document.getElementById("btn-reader-view-plain"),
+  readerInspectMenu: document.getElementById("reader-inspect-menu"),
+  readerInspectSummary: document.getElementById("reader-inspect-summary"),
+  btnReaderViewSource: document.getElementById("btn-reader-view-source"),
+  btnReaderViewHeaders: document.getElementById("btn-reader-view-headers"),
+  btnReaderPrint: document.getElementById("btn-reader-print"),
+  btnReaderDownloadEml: document.getElementById("btn-reader-download-eml"),
   bodyHTMLWrap: document.getElementById("message-body-html-wrap"),
   bodyHTMLFrame: document.getElementById("message-body-html"),
   bodyPlain: document.getElementById("message-body-plain"),
   attachments: document.getElementById("attachment-list"),
   searchInput: document.getElementById("search-input"),
+  mailFilterAdvanced: document.getElementById("mail-filter-advanced"),
+  mailFilterFrom: document.getElementById("mail-filter-from"),
+  mailFilterTo: document.getElementById("mail-filter-to"),
+  mailFilterSubject: document.getElementById("mail-filter-subject"),
+  mailFilterDateFrom: document.getElementById("mail-filter-date-from"),
+  mailFilterDateTo: document.getElementById("mail-filter-date-to"),
+  btnMailFilterUnread: document.getElementById("btn-mail-filter-unread"),
+  btnMailFilterFlagged: document.getElementById("btn-mail-filter-flagged"),
+  btnMailFilterAttachments: document.getElementById("btn-mail-filter-attachments"),
+  mailFilterAccountRow: document.getElementById("mail-filter-account-row"),
+  mailFilterAccountChips: document.getElementById("mail-filter-account-chips"),
+  mailFilterActiveRow: document.getElementById("mail-filter-active-row"),
+  mailFilterActiveChips: document.getElementById("mail-filter-active-chips"),
+  btnMailClearFilters: document.getElementById("btn-mail-clear-filters"),
+  mailFilterLiveHint: document.getElementById("mail-filter-live-hint"),
   btnSearch: document.getElementById("btn-search"),
   mailAccountSwitcherWrap: document.getElementById("mail-account-switcher-wrap"),
   mailAccountSwitcher: document.getElementById("mail-account-switcher"),
@@ -359,6 +399,7 @@ const el = {
   uiModalInput: document.getElementById("ui-modal-input"),
   uiModalSelect: document.getElementById("ui-modal-select"),
   uiModalDatalist: document.getElementById("ui-modal-datalist"),
+  uiModalDocument: document.getElementById("ui-modal-document"),
   uiModalCancel: document.getElementById("ui-modal-cancel"),
   uiModalConfirm: document.getElementById("ui-modal-confirm"),
   mfaModalOverlay: document.getElementById("mfa-modal-overlay"),
@@ -3436,6 +3477,16 @@ function closeUIModal(result = null) {
   state.ui.modalOpen = false;
   el.uiModalOverlay.classList.add("hidden");
   el.uiModalOverlay.setAttribute("aria-hidden", "true");
+  if (el.uiModalCard) {
+    el.uiModalCard.classList.remove("ui-modal-card--document");
+  }
+  if (el.uiModalDocument) {
+    el.uiModalDocument.textContent = "";
+    el.uiModalDocument.classList.add("hidden");
+  }
+  if (el.uiModalCancel) {
+    el.uiModalCancel.classList.remove("hidden");
+  }
   document.body.style.overflow = state.ui.composeOpen || state.ui.mfaModalOpen ? "hidden" : "";
   if (modalState.resolver) {
     modalState.resolver(result);
@@ -3469,6 +3520,8 @@ function openUIModal(options) {
     selectedValue = "",
     mode = "confirm",
     trigger = null,
+    documentText = "",
+    hideCancel = false,
   } = options || {};
 
   state.ui.modalOpen = true;
@@ -3511,12 +3564,26 @@ function openUIModal(options) {
   }
   const hasInput = mode === "prompt";
   const hasSelect = mode === "select";
+  const hasDocument = mode === "document" || String(documentText || "") !== "";
+  if (el.uiModalCard) {
+    el.uiModalCard.classList.toggle("ui-modal-card--document", hasDocument);
+  }
+  if (el.uiModalBody) {
+    el.uiModalBody.classList.toggle("hidden", hasDocument && !body);
+  }
   el.uiModalInputWrap.classList.toggle("hidden", !hasInput && !hasSelect);
   if (el.uiModalInput) {
     el.uiModalInput.classList.toggle("hidden", !hasInput);
   }
   if (el.uiModalSelect) {
     el.uiModalSelect.classList.toggle("hidden", !hasSelect);
+  }
+  if (el.uiModalDocument) {
+    el.uiModalDocument.textContent = String(documentText || "");
+    el.uiModalDocument.classList.toggle("hidden", !hasDocument);
+  }
+  if (el.uiModalCancel) {
+    el.uiModalCancel.classList.toggle("hidden", !!hideCancel);
   }
   el.uiModalOverlay.classList.remove("hidden");
   el.uiModalOverlay.setAttribute("aria-hidden", "false");
@@ -3576,6 +3643,19 @@ async function showConfirmModal(opts) {
     trigger: opts?.trigger || null,
   });
   return !!(out && out.confirmed);
+}
+
+async function showDocumentModal(opts) {
+  await openUIModal({
+    mode: "document",
+    title: opts?.title || "Document",
+    body: opts?.body || "",
+    confirmText: opts?.confirmText || "Close",
+    cancelText: opts?.cancelText || "Cancel",
+    hideCancel: opts?.hideCancel !== false,
+    documentText: opts?.documentText || "",
+    trigger: opts?.trigger || null,
+  });
 }
 
 function closeOpenRowMenus(except = null) {
@@ -4659,6 +4739,88 @@ async function api(path, opts = {}) {
     throw error;
   }
   return payload;
+}
+
+async function fetchAPIResource(path, opts = {}) {
+  const method = opts.method || "GET";
+  const headers = Object.assign({}, opts.headers || {});
+  const init = { method, credentials: "include", headers };
+
+  if (opts.json !== undefined) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(opts.json);
+  } else if (opts.body !== undefined) {
+    init.body = opts.body;
+  }
+
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const csrf = getCookie("despatch_csrf");
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+  }
+
+  const res = await fetch(path, init);
+  if (res.ok) {
+    return res;
+  }
+
+  const text = await res.text();
+  const payload = text ? (() => {
+    try { return JSON.parse(text); } catch { return {}; }
+  })() : {};
+  const error = new Error(payload.message || payload.code || `HTTP ${res.status}`);
+  error.code = payload.code || "request_failed";
+  error.retryAfterSec = Number(res.headers.get("Retry-After") || "0");
+  error.status = res.status;
+  error.requestID = payload.request_id || res.headers.get("X-Request-ID") || "";
+  if (opts.logErrors !== false && window && window.console && typeof window.console.error === "function") {
+    console.error("API request failed", {
+      path,
+      method,
+      status: error.status,
+      code: error.code,
+      message: error.message,
+      request_id: error.requestID,
+    });
+  }
+  const shouldHandleUnauthorized = error.status === 401
+    && isSessionErrorCode(error.code)
+    && isProtectedAPIPath(path)
+    && !opts.skipUnauthorizedHandling
+    && !state.setup.required
+    && !!state.user;
+  if (shouldHandleUnauthorized) {
+    routeToAuthWithMessage(reauthMessageForCode(error.code), error.code);
+  }
+  const shouldHandleMFAStage = error.status === 401
+    && isMFAStageCode(error.code)
+    && isProtectedAPIPath(path)
+    && !opts.skipMFAHandling
+    && !state.setup.required;
+  if (shouldHandleMFAStage) {
+    try {
+      await ensureMFAStageAuthenticated(payload);
+      return fetchAPIResource(path, Object.assign({}, opts, {
+        skipMFAHandling: true,
+        skipUnauthorizedHandling: true,
+      }));
+    } catch (mfaErr) {
+      error.message = formatAPIError(mfaErr, "Multi-factor authentication is required.");
+    }
+  }
+  throw error;
+}
+
+async function apiText(path, opts = {}) {
+  const res = await fetchAPIResource(path, opts);
+  return res.text();
+}
+
+async function apiBlob(path, opts = {}) {
+  const res = await fetchAPIResource(path, opts);
+  return {
+    blob: await res.blob(),
+    contentDisposition: String(res.headers.get("Content-Disposition") || ""),
+  };
 }
 
 function ensureSlashSuffix(v) {
@@ -7614,12 +7776,17 @@ function setMailScope(scope, accountID = "") {
     nextScope = "account";
   }
   state.mail.mailScope = nextScope;
+  if (nextScope !== "all") {
+    state.mail.filters = createMailFilterState({ ...state.mail.filters, accountIDs: [] });
+    state.mail.searchQuery = String(state.mail.filters.query || "").trim();
+  }
   if (resolvedID) {
     state.mail.lastConcreteIndexedAccountID = resolvedID;
   }
   persistMailScopePreference();
   renderMailScopeSwitcher();
   renderMailIndexStatus();
+  renderMailFilterBar();
 }
 
 function shouldShowOwningAccountChip(item) {
@@ -7639,6 +7806,75 @@ function visibleSavedSearches() {
   });
 }
 
+function normalizeMailFilterAccountIDs(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function normalizeMailFilterState(raw = {}) {
+  return createMailFilterState({
+    query: String(raw?.query || "").trim(),
+    from: String(raw?.from || "").trim(),
+    to: String(raw?.to || "").trim(),
+    subject: String(raw?.subject || "").trim(),
+    dateFrom: String(raw?.dateFrom || raw?.date_from || "").trim(),
+    dateTo: String(raw?.dateTo || raw?.date_to || "").trim(),
+    unread: !!raw?.unread,
+    flagged: !!raw?.flagged,
+    hasAttachments: !!(raw?.hasAttachments || raw?.has_attachments),
+    waiting: !!raw?.waiting,
+    accountIDs: normalizeMailFilterAccountIDs(raw?.accountIDs || raw?.account_ids),
+  });
+}
+
+function cloneMailFilterState(raw = state.mail.filters) {
+  return normalizeMailFilterState(raw);
+}
+
+function applySmartViewPresetToFilters(filters, viewID) {
+  const next = normalizeMailFilterState(filters);
+  next.unread = false;
+  next.flagged = false;
+  next.hasAttachments = false;
+  next.waiting = false;
+  switch (String(viewID || "").trim().toLowerCase()) {
+    case "unread":
+      next.unread = true;
+      break;
+    case "flagged":
+      next.flagged = true;
+      break;
+    case "attachments":
+      next.hasAttachments = true;
+      break;
+    case "waiting":
+      next.waiting = true;
+      break;
+    default:
+      break;
+  }
+  return next;
+}
+
+function derivedSmartViewFromFilters(filters) {
+  const current = normalizeMailFilterState(filters);
+  const enabled = [
+    current.unread ? "unread" : "",
+    current.flagged ? "flagged" : "",
+    current.hasAttachments ? "attachments" : "",
+    current.waiting ? "waiting" : "",
+  ].filter(Boolean);
+  if (enabled.length !== 1) return "";
+  return enabled[0];
+}
+
 function parseSavedSearchFilters(raw) {
   let parsed = {};
   try {
@@ -7652,30 +7888,240 @@ function parseSavedSearchFilters(raw) {
     viewKind = smartView ? "smart" : "mailbox";
   }
   const accountScope = String(parsed.account_scope || parsed.accountScope || "").trim().toLowerCase();
+  let filters = normalizeMailFilterState(parsed.filters || {});
+  filters.query = String(parsed.query || filters.query || "").trim();
+  if ((!parsed.filters || typeof parsed.filters !== "object") && smartView) {
+    filters = applySmartViewPresetToFilters(filters, smartView);
+  }
   return {
     accountScope: accountScope === "all" || accountScope === "account" ? accountScope : "",
     viewKind,
     mailbox: String(parsed.mailbox || "").trim(),
     smartView,
-    query: String(parsed.query || "").trim(),
+    query: filters.query,
+    filters,
   };
 }
 
+function appliedMailFilters() {
+  return normalizeMailFilterState(state.mail.filters);
+}
+
+function commitAppliedMailFilters(nextFilters, options = {}) {
+  state.mail.filters = normalizeMailFilterState(nextFilters);
+  state.mail.searchQuery = String(state.mail.filters.query || "").trim();
+  if (options.preserveSavedView !== true && state.mail.viewKind !== "saved") {
+    const smartView = derivedSmartViewFromFilters(state.mail.filters);
+    state.mail.smartView = smartView;
+    state.mail.viewKind = smartView ? "smart" : "mailbox";
+  }
+}
+
+function setMailFilterToggleButton(button, active) {
+  if (!button) return;
+  button.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
+function mailFilterTogglePressed(button) {
+  return button?.getAttribute("aria-pressed") === "true";
+}
+
+function selectedPendingMailFilterAccountIDs() {
+  if (!el.mailFilterAccountChips) return [];
+  return Array.from(el.mailFilterAccountChips.querySelectorAll("button[aria-pressed='true'][data-account-id]"))
+    .map((node) => String(node.dataset.accountId || "").trim())
+    .filter(Boolean);
+}
+
+function readPendingMailFilterControls() {
+  return normalizeMailFilterState({
+    query: String(el.searchInput?.value || "").trim(),
+    from: String(el.mailFilterFrom?.value || "").trim(),
+    to: String(el.mailFilterTo?.value || "").trim(),
+    subject: String(el.mailFilterSubject?.value || "").trim(),
+    dateFrom: String(el.mailFilterDateFrom?.value || "").trim(),
+    dateTo: String(el.mailFilterDateTo?.value || "").trim(),
+    unread: mailFilterTogglePressed(el.btnMailFilterUnread),
+    flagged: mailFilterTogglePressed(el.btnMailFilterFlagged),
+    hasAttachments: mailFilterTogglePressed(el.btnMailFilterAttachments),
+    waiting: !!appliedMailFilters().waiting,
+    accountIDs: currentMailScope() === "all" ? selectedPendingMailFilterAccountIDs() : [],
+  });
+}
+
+function renderMailFilterAccountChips(selectedIDs = []) {
+  if (!el.mailFilterAccountRow || !el.mailFilterAccountChips) return;
+  const show = mailUsesIndexedMode() && currentMailScope() === "all" && indexedAccountsList().length > 1;
+  el.mailFilterAccountRow.classList.toggle("hidden", !show);
+  el.mailFilterAccountChips.replaceChildren();
+  if (!show) return;
+  const selected = new Set(normalizeMailFilterAccountIDs(selectedIDs));
+  for (const account of indexedAccountsList()) {
+    const accountID = String(account?.id || "").trim();
+    if (!accountID) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip chip-btn";
+    button.dataset.accountId = accountID;
+    button.textContent = indexedAccountLabel(account);
+    setMailFilterToggleButton(button, selected.has(accountID));
+    button.onclick = () => {
+      setMailFilterToggleButton(button, !mailFilterTogglePressed(button));
+    };
+    el.mailFilterAccountChips.appendChild(button);
+  }
+}
+
+function writeMailFilterControls(filters = appliedMailFilters()) {
+  const current = normalizeMailFilterState(filters);
+  if (el.searchInput) el.searchInput.value = current.query;
+  if (el.mailFilterFrom) el.mailFilterFrom.value = current.from;
+  if (el.mailFilterTo) el.mailFilterTo.value = current.to;
+  if (el.mailFilterSubject) el.mailFilterSubject.value = current.subject;
+  if (el.mailFilterDateFrom) el.mailFilterDateFrom.value = current.dateFrom;
+  if (el.mailFilterDateTo) el.mailFilterDateTo.value = current.dateTo;
+  setMailFilterToggleButton(el.btnMailFilterUnread, current.unread);
+  setMailFilterToggleButton(el.btnMailFilterFlagged, current.flagged);
+  setMailFilterToggleButton(el.btnMailFilterAttachments, current.hasAttachments);
+  renderMailFilterAccountChips(current.accountIDs);
+}
+
+function hasAppliedAdvancedMailFilters(filters = appliedMailFilters()) {
+  const current = normalizeMailFilterState(filters);
+  return !!(current.from
+    || current.to
+    || current.subject
+    || current.dateFrom
+    || current.dateTo
+    || current.unread
+    || current.flagged
+    || current.hasAttachments
+    || current.waiting
+    || current.accountIDs.length > 0);
+}
+
+async function removeAppliedMailFilterChip(kind, value = "") {
+  const next = cloneMailFilterState();
+  switch (kind) {
+    case "query":
+      next.query = "";
+      break;
+    case "from":
+      next.from = "";
+      break;
+    case "to":
+      next.to = "";
+      break;
+    case "subject":
+      next.subject = "";
+      break;
+    case "dateFrom":
+      next.dateFrom = "";
+      break;
+    case "dateTo":
+      next.dateTo = "";
+      break;
+    case "unread":
+      next.unread = false;
+      break;
+    case "flagged":
+      next.flagged = false;
+      break;
+    case "hasAttachments":
+      next.hasAttachments = false;
+      break;
+    case "waiting":
+      next.waiting = false;
+      break;
+    case "accountID":
+      next.accountIDs = next.accountIDs.filter((item) => item !== String(value || "").trim());
+      break;
+    default:
+      break;
+  }
+  if (state.mail.viewKind === "saved") {
+    state.mail.viewKind = "mailbox";
+    state.mail.savedSearchID = "";
+  }
+  commitAppliedMailFilters(next, { preserveSavedView: false });
+  writeMailFilterControls(state.mail.filters);
+  renderMailFilterBar({ syncControls: false });
+  clearMailMessageSelection({ render: false });
+  clearReaderSelection();
+  await loadMessages({ quiet: true });
+  setActiveMailPane("messages");
+}
+
+function renderAppliedMailFilterChips() {
+  if (!el.mailFilterActiveRow || !el.mailFilterActiveChips) return;
+  const filters = appliedMailFilters();
+  const entries = [];
+  if (filters.query) entries.push({ kind: "query", label: `Query: ${filters.query}` });
+  if (filters.from) entries.push({ kind: "from", label: `From: ${filters.from}` });
+  if (filters.to) entries.push({ kind: "to", label: `To: ${filters.to}` });
+  if (filters.subject) entries.push({ kind: "subject", label: `Subject: ${filters.subject}` });
+  if (filters.dateFrom) entries.push({ kind: "dateFrom", label: `Date from: ${filters.dateFrom}` });
+  if (filters.dateTo) entries.push({ kind: "dateTo", label: `Date to: ${filters.dateTo}` });
+  if (filters.unread) entries.push({ kind: "unread", label: "Unread" });
+  if (filters.flagged) entries.push({ kind: "flagged", label: "Flagged" });
+  if (filters.hasAttachments) entries.push({ kind: "hasAttachments", label: "Attachments" });
+  if (filters.waiting) entries.push({ kind: "waiting", label: "Waiting" });
+  for (const accountID of filters.accountIDs) {
+    entries.push({ kind: "accountID", value: accountID, label: `Account: ${mailAccountChipLabel(accountID)}` });
+  }
+  el.mailFilterActiveChips.replaceChildren();
+  for (const entry of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip mail-filter-chip-remove";
+    button.innerHTML = `<span>${escapeHtml(entry.label)}</span><strong aria-hidden="true">×</strong>`;
+    button.onclick = async () => {
+      try {
+        await removeAppliedMailFilterChip(entry.kind, entry.value || "");
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to update filters."), "error");
+      }
+    };
+    el.mailFilterActiveChips.appendChild(button);
+  }
+  const show = entries.length > 0;
+  el.mailFilterActiveRow.classList.toggle("hidden", !show);
+}
+
+function renderMailFilterBar(options = {}) {
+  const syncControls = options.syncControls !== false;
+  const advancedAvailable = mailUsesIndexedMode() && !state.mail.indexedRuntimeFallback;
+  if (el.mailFilterAdvanced) {
+    el.mailFilterAdvanced.classList.toggle("hidden", !advancedAvailable);
+    el.mailFilterAdvanced.dataset.waiting = appliedMailFilters().waiting ? "true" : "false";
+  }
+  if (el.mailFilterLiveHint) {
+    const showHint = !advancedAvailable && !isDraftsMailboxSelected() && state.user;
+    el.mailFilterLiveHint.classList.toggle("hidden", !showHint);
+  }
+  if (syncControls) {
+    writeMailFilterControls(appliedMailFilters());
+  } else {
+    renderMailFilterAccountChips(currentMailScope() === "all" ? selectedPendingMailFilterAccountIDs() : []);
+  }
+  renderAppliedMailFilterChips();
+}
+
 function syncMailSearchInput() {
-  if (!el.searchInput) return;
-  if (document.activeElement === el.searchInput) return;
-  el.searchInput.value = String(state.mail.searchQuery || "");
+  renderMailFilterBar();
 }
 
 function setIndexedRuntimeFallback(reason = "") {
   state.mail.indexedRuntimeFallback = true;
   state.mail.indexedFallbackReason = String(reason || "indexed view unavailable").trim();
   renderMailIndexStatus();
+  renderMailFilterBar();
 }
 
 function clearIndexedRuntimeFallback() {
   state.mail.indexedRuntimeFallback = false;
   state.mail.indexedFallbackReason = "";
+  renderMailFilterBar();
 }
 
 async function canUseIndexedMailWithoutSessionSecret(opts = {}) {
@@ -7982,34 +8428,28 @@ function activeMailUsesIndexedSource(item = state.selectedMessageSummary || stat
 }
 
 function currentMailFiltersPayload() {
+  const filters = appliedMailFilters();
   if (state.mail.viewKind === "saved") {
     const record = selectedSavedSearchRecord();
     if (record) {
       const parsed = parseSavedSearchFilters(record.filters_json);
       return {
         accountScope: parsed.accountScope || currentMailScope(),
-        viewKind: parsed.viewKind,
+        viewKind: "mailbox",
         mailbox: parsed.mailbox || state.mailbox || "INBOX",
         smartView: parsed.smartView,
-        query: String(state.mail.searchQuery || parsed.query || "").trim(),
+        query: String(filters.query || parsed.query || "").trim(),
+        filters,
       };
     }
   }
-  if (state.mail.viewKind === "smart") {
-    return {
-      accountScope: currentMailScope(),
-      viewKind: "smart",
-      mailbox: "",
-      smartView: String(state.mail.smartView || "").trim(),
-      query: String(state.mail.searchQuery || "").trim(),
-    };
-  }
   return {
     accountScope: currentMailScope(),
-    viewKind: "mailbox",
-    mailbox: String(state.mailbox || "INBOX").trim() || "INBOX",
-    smartView: "",
-    query: String(state.mail.searchQuery || "").trim(),
+    viewKind: state.mail.viewKind === "smart" ? "smart" : "mailbox",
+    mailbox: state.mail.viewKind === "smart" ? "" : (String(state.mailbox || "INBOX").trim() || "INBOX"),
+    smartView: String(state.mail.smartView || "").trim(),
+    query: String(filters.query || "").trim(),
+    filters,
   };
 }
 
@@ -8029,9 +8469,7 @@ function setMailSourceMailbox(name, options = {}) {
   state.mail.smartView = "";
   state.mail.savedSearchID = "";
   state.mailbox = String(name || "INBOX").trim() || "INBOX";
-  if (options.keepQuery !== true) {
-    state.mail.searchQuery = "";
-  }
+  commitAppliedMailFilters(options.keepFilters === true ? state.mail.filters : createMailFilterState(), { preserveSavedView: false });
   syncMailSearchInput();
   renderMailboxes();
 }
@@ -8040,7 +8478,7 @@ function setMailSourceSmart(viewID) {
   state.mail.viewKind = "smart";
   state.mail.smartView = String(viewID || "").trim();
   state.mail.savedSearchID = "";
-  state.mail.searchQuery = "";
+  commitAppliedMailFilters(applySmartViewPresetToFilters(createMailFilterState(), state.mail.smartView), { preserveSavedView: false });
   syncMailSearchInput();
   renderMailboxes();
 }
@@ -8059,7 +8497,7 @@ function applySavedSearchSelection(record) {
   if (parsed.mailbox) {
     state.mailbox = parsed.mailbox;
   }
-  state.mail.searchQuery = parsed.query;
+  commitAppliedMailFilters(parsed.filters, { preserveSavedView: true });
   syncMailSearchInput();
   renderMailboxes();
 }
@@ -8234,16 +8672,19 @@ async function refreshIndexedMailContext(opts = {}) {
     }
     renderMailScopeSwitcher();
     renderMailIndexStatus();
+    renderMailFilterBar();
     renderMailboxes();
     return chosen || null;
   } catch {
     renderMailScopeSwitcher();
     renderMailIndexStatus();
+    renderMailFilterBar();
     return currentIndexedAccount();
   }
 }
 
 function normalizeIndexedMessageSummary(item) {
+  const rawPreview = String(item?.preview || item?.snippet || "").trim();
   return {
     id: String(item?.id || "").trim(),
     account_id: String(item?.account_id || currentIndexedAccountID() || "").trim(),
@@ -8254,11 +8695,43 @@ function normalizeIndexedMessageSummary(item) {
     seen: !!item?.seen,
     flagged: !!item?.flagged,
     answered: !!item?.answered,
-    preview: String(item?.preview || item?.snippet || "").trim(),
+    preview: safeMailPreviewText(rawPreview),
     thread_id: String(item?.thread_id || item?.threadID || "").trim(),
     has_attachments: !!(item?.has_attachments || item?.hasAttachments),
     source: "indexed",
   };
+}
+
+function normalizeMailPreviewWhitespace(raw) {
+  return String(raw || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizeMailPreviewText(raw) {
+  let text = String(raw || "");
+  if (!text) return "";
+  text = text
+    .replace(/<(style|script|head|svg|noscript)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/(?:^|[\s;])(?:@[\w-]+\s+)?[#.\w[\]\-:,\s>+*()]+\{[^{}]{0,400}\}/gi, " ")
+    .replace(/<\/?[^>]+>/g, " ")
+    .replace(/\bhttps?:\/\/[^\s<>"']+/gi, " ");
+  return normalizeMailPreviewWhitespace(text);
+}
+
+function mailPreviewLooksNoisy(raw, normalized = sanitizeMailPreviewText(raw)) {
+  if (!normalized) return true;
+  if (/(?:border-collapse|font-family|font-size|line-height|cellpadding|cellspacing|mso-|mime-version|content-transfer-encoding|content-type|quoted-printable|return-path|dkim-signature|authentication-results)/i.test(normalized)) {
+    return true;
+  }
+  return !(/[\p{L}\p{N}]/u.test(normalized));
+}
+
+function safeMailPreviewText(raw) {
+  const normalized = sanitizeMailPreviewText(raw);
+  return mailPreviewLooksNoisy(raw, normalized) ? "" : normalized;
 }
 
 function normalizeIndexedAttachment(item) {
@@ -9003,7 +9476,7 @@ function renderMessages(items) {
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
     btn.tabIndex = -1;
     const sender = formatSenderDisplayName(m.from);
-    const previewText = String(m.preview || "").trim();
+    const previewText = safeMailPreviewText(m.preview);
     const contextBadge = m.isDraft && String(m.context_badge || "").trim()
       ? `<span class="message-context-badge">${escapeHtml(m.context_badge)}</span>`
       : "";
@@ -9112,43 +9585,46 @@ async function loadLegacyMailMessages(query) {
   return api(endpoint);
 }
 
+function appendIndexedMailFilterParams(params, filters) {
+  const current = normalizeMailFilterState(filters);
+  if (current.from) params.set("from", current.from);
+  if (current.to) params.set("to", current.to);
+  if (current.subject) params.set("subject", current.subject);
+  if (current.dateFrom) params.set("date_from", current.dateFrom);
+  if (current.dateTo) params.set("date_to", current.dateTo);
+  if (current.unread) params.set("unread", "1");
+  if (current.flagged) params.set("flagged", "1");
+  if (current.hasAttachments) params.set("has_attachments", "1");
+  if (current.waiting) params.set("waiting", "1");
+  for (const accountID of currentMailScope() === "all" ? current.accountIDs : []) {
+    params.append("filter_account_id", accountID);
+  }
+}
+
 async function loadIndexedMailMessages(query) {
   const scope = currentMailScope();
   const accountID = currentIndexedAccountID();
   if (scope !== "all" && !accountID) {
     throw new Error("indexed account unavailable");
   }
-  const filters = currentMailFiltersPayload();
+  const payloadFilters = currentMailFiltersPayload();
+  const filters = normalizeMailFilterState(payloadFilters.filters || {});
   const params = new URLSearchParams({ page: "1", page_size: "40" });
   if (scope === "all") {
     params.set("account_scope", "all");
   } else {
     params.set("account_id", accountID);
   }
-
+  if (payloadFilters.mailbox) {
+    params.set("mailbox", payloadFilters.mailbox);
+  }
+  appendIndexedMailFilterParams(params, filters);
   if (query) {
     params.set("q", query);
-    if (filters.viewKind === "mailbox" && filters.mailbox) {
-      params.set("mailbox", filters.mailbox);
-    }
-    const payload = await api(`/api/v2/search?${params.toString()}`, { logErrors: false });
-    let items = (Array.isArray(payload?.items) ? payload.items : []).map((item) => normalizeIndexedMessageSummary(item));
-    if (filters.viewKind === "smart") {
-      items = filterIndexedSummariesForSmartView(items, filters.smartView);
-    }
-    return { items, total: Number(payload?.total || items.length) };
   }
-
-  if (filters.viewKind === "smart" && filters.smartView) {
-    params.set("view", filters.smartView);
-  } else {
-    params.set("mailbox", filters.mailbox || state.mailbox || "INBOX");
-  }
-  const payload = await api(`/api/v2/messages?${params.toString()}`, { logErrors: false });
-  let items = (Array.isArray(payload?.items) ? payload.items : []).map((item) => normalizeIndexedMessageSummary(item));
-  if (filters.viewKind === "smart") {
-    items = filterIndexedSummariesForSmartView(items, filters.smartView);
-  }
+  const endpoint = query ? "/api/v2/search" : "/api/v2/messages";
+  const payload = await api(`${endpoint}?${params.toString()}`, { logErrors: false });
+  const items = (Array.isArray(payload?.items) ? payload.items : []).map((item) => normalizeIndexedMessageSummary(item));
   return { items, total: Number(payload?.total || items.length) };
 }
 
@@ -9157,11 +9633,13 @@ async function loadMessages(opts = {}) {
     throw new Error("Sign in required");
   }
   if (Object.prototype.hasOwnProperty.call(opts, "query")) {
-    state.mail.searchQuery = String(opts.query ?? "").trim();
+    commitAppliedMailFilters({ ...state.mail.filters, query: String(opts.query ?? "").trim() }, {
+      preserveSavedView: state.mail.viewKind === "saved",
+    });
   }
   syncMailSearchInput();
   if (isDraftsMailboxSelected()) {
-    const query = String(state.mail.searchQuery || "").trim().toLowerCase();
+    const query = String(appliedMailFilters().query || "").trim().toLowerCase();
     if (!Array.isArray(state.mail.drafts) || state.mail.drafts.length === 0 || opts.refreshDrafts) {
       await loadDrafts({ logErrors: false });
     }
@@ -9261,10 +9739,181 @@ function readerStatusText(message) {
   return states.join(" · ");
 }
 
+function closeReaderInspectMenu() {
+  if (el.readerInspectMenu) {
+    el.readerInspectMenu.removeAttribute("open");
+  }
+}
+
+function renderReaderInspectControls(message = state.selectedMessage) {
+  const hasMessage = !!message;
+  if (el.readerInspectMenu && !hasMessage) {
+    el.readerInspectMenu.removeAttribute("open");
+  }
+  if (el.readerInspectMenu) {
+    el.readerInspectMenu.classList.toggle("is-disabled", !hasMessage);
+  }
+  if (el.readerInspectSummary) {
+    el.readerInspectSummary.setAttribute("aria-disabled", hasMessage ? "false" : "true");
+    el.readerInspectSummary.tabIndex = hasMessage ? 0 : -1;
+  }
+  for (const node of [
+    el.btnReaderViewSource,
+    el.btnReaderViewHeaders,
+    el.btnReaderPrint,
+    el.btnReaderDownloadEml,
+  ]) {
+    if (!node) continue;
+    node.disabled = !hasMessage;
+  }
+}
+
+function currentReaderMessageContext() {
+  const message = state.selectedMessage || null;
+  const summary = state.selectedMessageSummary || message || null;
+  const usesIndexed = activeMailUsesIndexedSource(summary || message || null);
+  return {
+    message,
+    summary,
+    usesIndexed,
+    id: String(message?.id || summary?.id || "").trim(),
+    accountID: String(summary?.account_id || message?.account_id || currentIndexedAccountID() || "").trim(),
+  };
+}
+
+function currentReaderRawPath(options = {}) {
+  const ctx = currentReaderMessageContext();
+  if (!ctx.id) {
+    throw new Error("Select a message.");
+  }
+  const params = new URLSearchParams();
+  if (options.download) {
+    params.set("download", "1");
+  }
+  if (ctx.usesIndexed) {
+    if (!ctx.accountID) {
+      throw new Error("Indexed account context is missing.");
+    }
+    params.set("account_id", ctx.accountID);
+    return `/api/v2/messages/${encodeURIComponent(ctx.id)}/raw?${params.toString()}`;
+  }
+  const query = params.toString();
+  return `/api/v1/messages/${encodeURIComponent(ctx.id)}/raw${query ? `?${query}` : ""}`;
+}
+
+function extractRawMessageHeaders(raw) {
+  const source = String(raw || "");
+  if (!source) return "";
+  const crlfIndex = source.indexOf("\r\n\r\n");
+  if (crlfIndex >= 0) {
+    return source.slice(0, crlfIndex);
+  }
+  const lfIndex = source.indexOf("\n\n");
+  if (lfIndex >= 0) {
+    return source.slice(0, lfIndex);
+  }
+  return source;
+}
+
+function filenameFromContentDisposition(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const utf8 = raw.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (utf8 && utf8[1]) {
+    try {
+      return decodeURIComponent(utf8[1]).trim();
+    } catch {}
+  }
+  const quoted = raw.match(/filename\s*=\s*"([^"]+)"/i);
+  if (quoted && quoted[1]) {
+    return quoted[1].trim();
+  }
+  const plain = raw.match(/filename\s*=\s*([^;]+)/i);
+  if (plain && plain[1]) {
+    return plain[1].trim();
+  }
+  return "";
+}
+
+async function openReaderInspectDocument(kind, trigger = null) {
+  const raw = await apiText(currentReaderRawPath(), { logErrors: false });
+  const documentText = kind === "headers" ? extractRawMessageHeaders(raw) : raw;
+  await showDocumentModal({
+    title: kind === "headers" ? "Message Headers" : "Message Source",
+    body: kind === "headers"
+      ? "Shown exactly as received before the message body."
+      : "Shown exactly as received from the mailbox.",
+    documentText: documentText || "(empty)",
+    trigger,
+  });
+}
+
+function buildReaderPrintDocument(message) {
+  const subject = String(message?.subject || "").trim() || "(no subject)";
+  const metaRows = [
+    ["From", String(message?.from || "-").trim() || "-"],
+    ["To", Array.isArray(message?.to) ? message.to.join(", ") || "-" : "-"],
+    ["Date", formatDate(message?.date) || "-"],
+  ];
+  if (shouldShowOwningAccountChip(message)) {
+    metaRows.splice(2, 0, ["Account", mailAccountChipLabel(message?.account_id)]);
+  }
+  const status = readerStatusText(message);
+  if (status) {
+    metaRows.push(["Status", status]);
+  }
+  const bodyHTML = messageHasHTML(message) && state.ui.readerViewMode === "html"
+    ? String(message?.body_html || "")
+    : `<pre>${escapeHtml(formatReaderPlainBody(String(message?.body || "(empty)")))}</pre>`;
+  const metaHTML = metaRows
+    .map(([label, value]) => `<p><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</p>`)
+    .join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(subject)}</title><style>
+html,body{margin:0;padding:0;background:#fff;color:#000;font:14px/1.45 Georgia,"Times New Roman",serif;}
+main{padding:24px;}
+h1{font:700 22px/1.2 Georgia,"Times New Roman",serif;margin:0 0 16px;}
+.meta{margin:0 0 20px;padding:0 0 16px;border-bottom:1px solid #d0d0d0;}
+.meta p{margin:0 0 6px;}
+pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;}
+img,svg,video,canvas{max-width:100%;height:auto;}
+blockquote{margin:0 0 0 8px;padding-left:10px;border-left:2px solid #d0d0d0;}
+</style></head><body><main><h1>${escapeHtml(subject)}</h1><section class="meta">${metaHTML}</section><section>${bodyHTML}</section></main></body></html>`;
+}
+
+function printSelectedMessage() {
+  const message = state.selectedMessage;
+  if (!message) {
+    throw new Error("Select a message.");
+  }
+  const popup = window.open("", "_blank", "noopener,noreferrer");
+  if (!popup) {
+    throw new Error("Popup blocked. Allow popups to print the selected message.");
+  }
+  popup.document.write(buildReaderPrintDocument(message));
+  popup.document.close();
+  popup.focus();
+  popup.print();
+}
+
+async function downloadSelectedMessageEml() {
+  const result = await apiBlob(currentReaderRawPath({ download: true }), { logErrors: false });
+  const blob = result?.blob || new Blob([]);
+  const filename = filenameFromContentDisposition(result?.contentDisposition) || "message.eml";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function renderSelectedMessageChrome(message = state.selectedMessage) {
   if (!message) {
     if (el.messageSubjectAnchor) el.messageSubjectAnchor.textContent = "(no subject)";
     renderMessageMeta([]);
+    renderReaderInspectControls(null);
     applyMailActionAvailability();
     return;
   }
@@ -9284,6 +9933,7 @@ function renderSelectedMessageChrome(message = state.selectedMessage) {
     metaRows.push(["Status", status]);
   }
   renderMessageMeta(metaRows);
+  renderReaderInspectControls(message);
   applyMailActionAvailability();
 }
 
@@ -9392,8 +10042,10 @@ function clearReaderSelection() {
   state.selectedMessageSummary = null;
   state.mail.selectedDraftID = "";
   state.thread = createThreadState({ expanded });
+  closeReaderInspectMenu();
   if (el.messageSubjectAnchor) el.messageSubjectAnchor.textContent = "(no subject)";
   renderMessageMeta([]);
+  renderReaderInspectControls(null);
   renderReaderBody(null);
   if (el.attachments) el.attachments.textContent = "";
   renderThreadContext();
@@ -9506,7 +10158,7 @@ function renderThreadList() {
     btn.setAttribute("role", "option");
     btn.tabIndex = -1;
     const sender = formatSenderDisplayName(item?.from);
-    const previewText = String(item?.preview || "").trim();
+    const previewText = safeMailPreviewText(item?.preview);
     const previewClass = previewText ? "thread-row-preview" : "thread-row-preview thread-row-preview--empty";
     const mailboxLabel = threadMailboxBadgeLabel(item, currentMailbox);
     const mailboxChip = mailboxLabel
@@ -9522,7 +10174,7 @@ function renderThreadList() {
         previewSepClass: "thread-row-preview-sep",
         sender,
         subject: item?.subject,
-        previewText: previewText || "No preview available.",
+        previewText,
         dateText: formatListDate(item?.date),
         senderAfterHTML: mailboxChip,
       })}`;
@@ -10134,11 +10786,17 @@ async function searchMessages() {
   if (!state.user) {
     throw new Error("Sign in required");
   }
-  const q = el.searchInput.value.trim();
+  const nextFilters = readPendingMailFilterControls();
+  if (state.mail.viewKind === "saved") {
+    state.mail.viewKind = "mailbox";
+    state.mail.savedSearchID = "";
+  }
+  commitAppliedMailFilters(nextFilters, { preserveSavedView: false });
+  renderMailFilterBar({ syncControls: false });
   clearMailMessageSelection({ render: false });
   clearReaderSelection();
-  await loadMessages({ quiet: true, query: q });
-  if (q) {
+  await loadMessages({ quiet: true });
+  if (nextFilters.query) {
     setStatus(`Search complete (${state.messages.length} results).`, "ok");
   } else {
     setStatus(`${currentMailViewLabel()} loaded.`, "ok");
@@ -10146,14 +10804,42 @@ async function searchMessages() {
   setActiveMailPane("messages");
 }
 
+async function clearAllMailFilters() {
+  if (state.mail.viewKind === "saved") {
+    state.mail.viewKind = "mailbox";
+    state.mail.savedSearchID = "";
+  }
+  commitAppliedMailFilters(createMailFilterState(), { preserveSavedView: false });
+  writeMailFilterControls(state.mail.filters);
+  renderMailFilterBar({ syncControls: false });
+  clearMailMessageSelection({ render: false });
+  clearReaderSelection();
+  await loadMessages({ quiet: true });
+  setStatus(`${currentMailViewLabel()} loaded.`, "ok");
+  setActiveMailPane("messages");
+}
+
 function currentSavedSearchFiltersJSON() {
   const filters = currentMailFiltersPayload();
+  const normalized = normalizeMailFilterState(filters.filters || {});
   return JSON.stringify({
     account_scope: String(filters.accountScope || currentMailScope() || "account").trim(),
-    view_kind: filters.viewKind,
-    mailbox: filters.viewKind === "mailbox" ? String(filters.mailbox || state.mailbox || "INBOX").trim() : "",
-    smart_view: filters.viewKind === "smart" ? String(filters.smartView || "").trim() : "",
-    query: String(filters.query || state.mail.searchQuery || "").trim(),
+    view_kind: "mailbox",
+    mailbox: String(filters.mailbox || "").trim(),
+    smart_view: "",
+    query: String(normalized.query || "").trim(),
+    filters: {
+      from: normalized.from,
+      to: normalized.to,
+      subject: normalized.subject,
+      date_from: normalized.dateFrom,
+      date_to: normalized.dateTo,
+      unread: normalized.unread,
+      flagged: normalized.flagged,
+      has_attachments: normalized.hasAttachments,
+      waiting: normalized.waiting,
+      account_ids: normalizeMailFilterAccountIDs(normalized.accountIDs),
+    },
   });
 }
 
@@ -10208,7 +10894,7 @@ async function deleteCurrentSavedView(trigger = null) {
   state.mail.savedSearchID = "";
   await refreshIndexedMailContext({ logErrors: false });
   renderMailboxes();
-  await loadMessages({ quiet: true, query: state.mail.searchQuery });
+  await loadMessages({ quiet: true });
   setStatus("Saved view deleted.", "ok");
 }
 
@@ -12522,7 +13208,11 @@ function bindUI() {
         if (!scheduled && sendMode === "reply" && sendContextMessageID) {
           applyLocalMessagePatch(sendContextMessageID, { answered: true });
         }
-        if (!scheduled && savedCopyMailbox && savedCopyMailbox === String(state.mailbox || "").trim() && !String(state.mail.searchQuery || "").trim()) {
+        if (!scheduled
+          && savedCopyMailbox
+          && savedCopyMailbox === String(state.mailbox || "").trim()
+          && !String(state.mail.searchQuery || "").trim()
+          && !hasAppliedAdvancedMailFilters()) {
           insertOptimisticMailboxSummary(optimisticComposeSummary(composeSnapshot, savedCopyMailbox, {
             answered: sendMode === "reply",
           }));
@@ -13170,6 +13860,36 @@ function bindUI() {
     }
   };
 
+  for (const input of [
+    el.searchInput,
+    el.mailFilterFrom,
+    el.mailFilterTo,
+    el.mailFilterSubject,
+    el.mailFilterDateFrom,
+    el.mailFilterDateTo,
+  ]) {
+    if (!input) continue;
+    input.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      try {
+        await searchMessages();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Search failed."), "error");
+      }
+    });
+  }
+
+  if (el.btnMailClearFilters) {
+    el.btnMailClearFilters.onclick = async () => {
+      try {
+        await clearAllMailFilters();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to clear filters."), "error");
+      }
+    };
+  }
+
   if (el.btnMailSaveSearch) {
     el.btnMailSaveSearch.onclick = async () => {
       try {
@@ -13201,6 +13921,66 @@ function bindUI() {
     el.btnReaderViewPlain.onclick = () => {
       state.ui.readerViewMode = "plain";
       renderReaderBody(state.selectedMessage);
+    };
+  }
+
+  if (el.readerInspectMenu) {
+    el.readerInspectMenu.addEventListener("toggle", () => {
+      if (el.readerInspectMenu.open) {
+        closeOpenRowMenus(el.readerInspectMenu);
+      }
+    });
+  }
+
+  if (el.readerInspectSummary) {
+    el.readerInspectSummary.addEventListener("click", (event) => {
+      if (el.readerInspectSummary.getAttribute("aria-disabled") === "true") {
+        event.preventDefault();
+      }
+    });
+  }
+
+  if (el.btnReaderViewSource) {
+    el.btnReaderViewSource.onclick = async () => {
+      closeReaderInspectMenu();
+      try {
+        await openReaderInspectDocument("source", el.btnReaderViewSource);
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to load message source."), "error");
+      }
+    };
+  }
+
+  if (el.btnReaderViewHeaders) {
+    el.btnReaderViewHeaders.onclick = async () => {
+      closeReaderInspectMenu();
+      try {
+        await openReaderInspectDocument("headers", el.btnReaderViewHeaders);
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to load message headers."), "error");
+      }
+    };
+  }
+
+  if (el.btnReaderPrint) {
+    el.btnReaderPrint.onclick = () => {
+      closeReaderInspectMenu();
+      try {
+        printSelectedMessage();
+      } catch (err) {
+        setStatus(err.message, "error");
+      }
+    };
+  }
+
+  if (el.btnReaderDownloadEml) {
+    el.btnReaderDownloadEml.onclick = async () => {
+      closeReaderInspectMenu();
+      try {
+        await downloadSelectedMessageEml();
+      } catch (err) {
+        setStatus(formatAPIError(err, "Failed to download .eml."), "error");
+      }
     };
   }
 
@@ -13348,6 +14128,7 @@ function bindUI() {
 
   applyMailActionAvailability();
   renderThreadContext();
+  renderReaderInspectControls(null);
   renderReaderBody(null);
 }
 

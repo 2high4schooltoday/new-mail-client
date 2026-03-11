@@ -74,6 +74,9 @@ func (m pamTestDespatch) ListMessages(ctx context.Context, user, pass, mailbox s
 func (m pamTestDespatch) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
 	return mail.Message{}, nil
 }
+func (m pamTestDespatch) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	return []byte(""), nil
+}
 func (m pamTestDespatch) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
 	return nil, nil
 }

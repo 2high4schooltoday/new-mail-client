@@ -19,6 +19,7 @@ type mailRouterTestClient struct {
 	listByMailboxPage map[string]map[int][]mail.MessageSummary
 	search            []mail.MessageSummary
 	mailboxes         []mail.Mailbox
+	rawByID           map[string][]byte
 	createdMailboxes  []string
 	renamedMailboxes  [][2]string
 	deletedMailboxes  []string
@@ -97,6 +98,13 @@ func (m *mailRouterTestClient) ListMessages(ctx context.Context, user, pass, mai
 
 func (m *mailRouterTestClient) GetMessage(ctx context.Context, user, pass, id string) (mail.Message, error) {
 	return mail.Message{ID: id}, nil
+}
+
+func (m *mailRouterTestClient) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	if raw, ok := m.rawByID[id]; ok {
+		return append([]byte(nil), raw...), nil
+	}
+	return []byte("From: test@example.com\r\n\r\nbody"), nil
 }
 
 func (m *mailRouterTestClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]mail.MessageSummary, error) {
@@ -758,5 +766,56 @@ func TestV1ThreadMessagesSetsTruncatedWhenScanCapReached(t *testing.T) {
 	}
 	if len(payload.Items) != 0 {
 		t.Fatalf("expected no items, got %+v", payload.Items)
+	}
+}
+
+func TestV1GetMessageRawReturnsRFC822(t *testing.T) {
+	messageID := mail.EncodeMessageID("INBOX", 42)
+	router := newSendRouter(t, &mailRouterTestClient{
+		rawByID: map[string][]byte{
+			messageID: []byte("From: sender@example.com\r\nSubject: Raw\r\n\r\nbody"),
+		},
+	}, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	rec := authedV1Get(t, router, "/api/v1/messages/"+url.PathEscape(messageID)+"/raw", sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "message/rfc822" {
+		t.Fatalf("expected message/rfc822 content-type, got %q", got)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "Subject: Raw") {
+		t.Fatalf("expected raw RFC822 body, got %q", body)
+	}
+}
+
+func TestV1GetMessageRawDownloadSetsAttachmentFilename(t *testing.T) {
+	messageID := mail.EncodeMessageID("INBOX", 7)
+	router := newSendRouter(t, &mailRouterTestClient{
+		rawByID: map[string][]byte{
+			messageID: []byte("From: sender@example.com\r\n\r\nbody"),
+		},
+	}, "")
+	sessionCookie, csrfCookie := loginForSend(t, router)
+
+	rec := authedV1Get(t, router, "/api/v1/messages/"+url.PathEscape(messageID)+"/raw?download=1", sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(strings.ToLower(got), "attachment") || !strings.Contains(strings.ToLower(got), ".eml") {
+		t.Fatalf("expected attachment .eml content-disposition, got %q", got)
+	}
+}
+
+func TestV1GetMessageRawRequiresAuth(t *testing.T) {
+	messageID := mail.EncodeMessageID("INBOX", 9)
+	router := newSendRouter(t, &mailRouterTestClient{}, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/"+url.PathEscape(messageID)+"/raw", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }

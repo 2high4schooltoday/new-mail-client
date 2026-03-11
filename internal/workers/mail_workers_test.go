@@ -256,6 +256,56 @@ func TestMailWorkersUIDValidityResetPurgesMailboxAndFullRebuilds(t *testing.T) {
 	}
 }
 
+func TestMailWorkersStoreCleanPreviewForHTMLNoise(t *testing.T) {
+	ctx := context.Background()
+	st, _, account := newMailWorkerTestEnv(t)
+	fake := &fakeMailSyncClient{
+		snapshots: []mail.MailboxSnapshot{{
+			Mailbox:     mail.Mailbox{Name: "INBOX"},
+			UIDValidity: 1,
+			UIDNext:     2,
+		}},
+		recentUIDs: map[string][]uint32{
+			"INBOX": {1},
+		},
+		messages: map[string]map[uint32]mail.SyncMessage{
+			"INBOX": {
+				1: {
+					Mailbox: "INBOX",
+					UID:     1,
+					Raw: []byte(strings.Join([]string{
+						"From: Alice <alice@example.com>",
+						"To: user@example.com",
+						"Subject: HTML Preview",
+						"Date: Tue, 10 Mar 2026 12:00:00 +0000",
+						"MIME-Version: 1.0",
+						"Content-Type: text/html; charset=utf-8",
+						"",
+						"<html><body><style>table {border-collapse:collapse} td {font-family:Arial}</style><p>Quarterly forecast attached.</p></body></html>",
+					}, "\r\n")),
+					InternalDate: time.Date(2026, 3, 10, 12, 0, 1, 0, time.UTC),
+				},
+			},
+		},
+	}
+	worker := newTestMailWorker(st, fake, time.Now)
+
+	if _, err := worker.syncAccount(ctx, account); err != nil {
+		t.Fatalf("syncAccount: %v", err)
+	}
+
+	msg, err := st.GetIndexedMessageByID(ctx, account.ID, mail.EncodeMessageID("INBOX", 1))
+	if err != nil {
+		t.Fatalf("load indexed message: %v", err)
+	}
+	if strings.Contains(strings.ToLower(msg.Snippet), "border-collapse") {
+		t.Fatalf("expected cleaned preview, got %q", msg.Snippet)
+	}
+	if msg.Snippet != "Quarterly forecast attached." {
+		t.Fatalf("expected human preview text, got %q", msg.Snippet)
+	}
+}
+
 func TestMailWorkersFailureBackoffStaggersRetries(t *testing.T) {
 	ctx := context.Background()
 	st, _, _ := newMailWorkerTestEnv(t)

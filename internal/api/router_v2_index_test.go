@@ -519,6 +519,85 @@ func TestV2GetIndexedMessageRebuildsHTMLAndDecodesHeaders(t *testing.T) {
 	}
 }
 
+func TestV2ListMessagesRepairsNoisyStoredPreview(t *testing.T) {
+	router, st, account := newIndexedRouterWithStore(t)
+	raw := strings.Join([]string{
+		"From: Alice <alice@example.com>",
+		"To: account@example.com",
+		"Subject: Forecast",
+		"MIME-Version: 1.0",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<html><body><p>Quarterly forecast attached.</p></body></html>",
+	}, "\r\n")
+	seedIndexedTestMessage(t, st, models.IndexedMessage{
+		ID:                "msg-noisy-preview",
+		AccountID:         account.ID,
+		Mailbox:           "INBOX",
+		UID:               14,
+		ThreadID:          mail.ScopeIndexedThreadID(account.ID, "thread-noisy-preview"),
+		FromValue:         "Alice <alice@example.com>",
+		ToValue:           "account@example.com",
+		Subject:           "Forecast",
+		Snippet:           "table {border-collapse:collapse} td {font-family:Arial}",
+		BodyText:          "",
+		BodyHTMLSanitized: "<p>Quarterly forecast attached.</p>",
+		RawSource:         raw,
+		DateHeader:        time.Date(2026, 3, 10, 10, 30, 0, 0, time.UTC),
+		InternalDate:      time.Date(2026, 3, 10, 10, 30, 0, 0, time.UTC),
+	})
+
+	sessionCookie, csrfCookie := loginForSend(t, router)
+	rec := authedV1Get(t, router, "/api/v2/messages?account_id="+url.QueryEscape(account.ID)+"&mailbox=INBOX&page=1&page_size=10", sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []mail.MessageSummary `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v body=%s", err, rec.Body.String())
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("expected 1 item, got %+v", payload.Items)
+	}
+	if payload.Items[0].Preview != "Quarterly forecast attached." {
+		t.Fatalf("expected repaired preview, got %q", payload.Items[0].Preview)
+	}
+}
+
+func TestV2GetIndexedMessageRawDownloadSetsAttachmentFilename(t *testing.T) {
+	router, st, account := newIndexedRouterWithStore(t)
+	seedIndexedTestMessage(t, st, models.IndexedMessage{
+		ID:           "msg-raw-download",
+		AccountID:    account.ID,
+		Mailbox:      "INBOX",
+		UID:          15,
+		ThreadID:     mail.ScopeIndexedThreadID(account.ID, "thread-raw-download"),
+		FromValue:    "Alice <alice@example.com>",
+		ToValue:      "account@example.com",
+		Subject:      "Monthly Report",
+		Snippet:      "Report",
+		BodyText:     "Report",
+		RawSource:    "From: Alice <alice@example.com>\r\nSubject: Monthly Report\r\n\r\nbody",
+		DateHeader:   time.Date(2026, 3, 10, 11, 0, 0, 0, time.UTC),
+		InternalDate: time.Date(2026, 3, 10, 11, 0, 0, 0, time.UTC),
+	})
+
+	sessionCookie, csrfCookie := loginForSend(t, router)
+	rec := authedV1Get(t, router, "/api/v2/messages/msg-raw-download/raw?account_id="+url.QueryEscape(account.ID)+"&download=1", sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "message/rfc822" {
+		t.Fatalf("expected message/rfc822 content-type, got %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(strings.ToLower(got), "attachment") || !strings.Contains(strings.ToLower(got), "monthly-report.eml") {
+		t.Fatalf("expected attachment filename, got %q", got)
+	}
+}
+
 func TestV2ListAggregateMailboxesMergesAccountsByRoleAndName(t *testing.T) {
 	router, st, accountA := newIndexedRouterWithStore(t)
 	ctx := context.Background()
@@ -725,6 +804,87 @@ func TestV2SearchAllScopeIncludesAccountIDs(t *testing.T) {
 	}
 	if payload.Items[0].AccountID != accountB.ID || payload.Items[1].AccountID != accountA.ID {
 		t.Fatalf("expected account ids in search results, got %+v", payload.Items)
+	}
+}
+
+func TestV2MessagesAdvancedFiltersRespectScopeAndDateRange(t *testing.T) {
+	router, st, accountA := newIndexedRouterWithStore(t)
+	ctx := context.Background()
+	admin, err := st.GetUserByEmail(ctx, "admin@example.com")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	accountB := createIndexedTestMailAccount(t, st, admin.ID, "backup@example.com", "Backup")
+
+	seedIndexedTestMessage(t, st, models.IndexedMessage{
+		ID:             "filter-a",
+		AccountID:      accountA.ID,
+		Mailbox:        "INBOX",
+		UID:            1,
+		ThreadID:       mail.ScopeIndexedThreadID(accountA.ID, "thread-filter-a"),
+		FromValue:      "Alice <alice@example.com>",
+		ToValue:        "admin@example.com",
+		Subject:        "Launch plan",
+		Snippet:        "launch notes",
+		BodyText:       "launch notes",
+		Seen:           false,
+		Flagged:        true,
+		HasAttachments: true,
+		DateHeader:     time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC),
+		InternalDate:   time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC),
+	})
+	seedIndexedTestMessage(t, st, models.IndexedMessage{
+		ID:           "filter-b",
+		AccountID:    accountB.ID,
+		Mailbox:      "INBOX",
+		UID:          1,
+		ThreadID:     mail.ScopeIndexedThreadID(accountB.ID, "thread-filter-b"),
+		FromValue:    "Bob <bob@example.com>",
+		ToValue:      "admin@example.com",
+		Subject:      "Launch plan",
+		Snippet:      "launch notes",
+		BodyText:     "launch notes",
+		Seen:         false,
+		Flagged:      true,
+		DateHeader:   time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC),
+		InternalDate: time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC),
+	})
+
+	sessionCookie, csrfCookie := loginForSend(t, router)
+	path := "/api/v2/messages?account_scope=all"
+	path += "&mailbox=INBOX"
+	path += "&from=alice@example.com"
+	path += "&to=admin@example.com"
+	path += "&subject=launch"
+	path += "&date_from=2026-03-10&date_to=2026-03-10"
+	path += "&unread=1&flagged=1&has_attachments=1"
+	path += "&filter_account_id=" + url.QueryEscape(accountA.ID)
+	path += "&page=1&page_size=20"
+	rec := authedV1Get(t, router, path, sessionCookie, csrfCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []mail.MessageSummary `json:"items"`
+		Total int                   `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode filtered messages: %v body=%s", err, rec.Body.String())
+	}
+	if payload.Total != 1 || len(payload.Items) != 1 {
+		t.Fatalf("expected one filtered message, got total=%d len=%d body=%s", payload.Total, len(payload.Items), rec.Body.String())
+	}
+	if payload.Items[0].AccountID != accountA.ID || payload.Items[0].ID != "filter-a" {
+		t.Fatalf("expected account A filtered message, got %+v", payload.Items[0])
+	}
+}
+
+func TestV2SearchRejectsForeignFilterAccount(t *testing.T) {
+	router, _, _ := newIndexedRouterWithStore(t)
+	sessionCookie, csrfCookie := loginForSend(t, router)
+	rec := authedV1Get(t, router, "/api/v2/search?account_scope=all&q=alpha&filter_account_id=foreign-account&page=1&page_size=20", sessionCookie, csrfCookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

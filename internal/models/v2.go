@@ -113,6 +113,22 @@ type RecipientSuggestion struct {
 	Label string `json:"label"`
 }
 
+type IndexedMessageFilter struct {
+	Query          string
+	From           string
+	To             string
+	Subject        string
+	DateFrom       time.Time
+	DateTo         time.Time
+	HasDateFrom    bool
+	HasDateTo      bool
+	Unread         bool
+	Flagged        bool
+	HasAttachments bool
+	Waiting        bool
+	AccountIDs     []string
+}
+
 type UserPreferences struct {
 	UserID            string    `json:"user_id"`
 	Theme             string    `json:"theme"`

@@ -257,7 +257,7 @@ func (w *MailWorkers) upsertSyncMessage(ctx context.Context, account models.Mail
 	ccValue := strings.Join(msg.CC, ", ")
 	bccValue := strings.Join(msg.BCC, ", ")
 	subject := strings.TrimSpace(msg.Subject)
-	snippetValue := snippet(bodyText, 180)
+	snippetValue := mail.BestAvailablePreview("", bodyText, bodyHTMLSanitized, rawSource, mail.DefaultPreviewMaxChars)
 	dkimStatus := "unknown"
 	spfStatus := "unknown"
 	dmarcStatus := "unknown"
@@ -284,13 +284,9 @@ func (w *MailWorkers) upsertSyncMessage(ctx context.Context, account models.Mail
 			if v := strings.TrimSpace(analysis.BodyText); v != "" {
 				bodyText = v
 			}
-			if v := strings.TrimSpace(analysis.Snippet); v != "" {
-				snippetValue = v
-			} else {
-				snippetValue = snippet(bodyText, 180)
-			}
 			bodyHTMLSanitized = analysis.BodyHTMLSanitized
 			rawSource = analysis.RawSource
+			snippetValue = mail.BestAvailablePreview(analysis.Snippet, bodyText, bodyHTMLSanitized, rawSource, mail.DefaultPreviewMaxChars)
 			dkimStatus = analysis.DKIMStatus
 			spfStatus = analysis.SPFStatus
 			dmarcStatus = analysis.DMARCStatus
@@ -520,17 +516,6 @@ done:
 	base := strings.ToLower(strings.TrimSpace(mailbox)) + "\x00" + normalized
 	sum := sha256.Sum256([]byte(base))
 	return strings.ToLower(strings.TrimSpace(mailbox)) + ":" + hex.EncodeToString(sum[:10])
-}
-
-func snippet(body string, max int) string {
-	if max <= 0 {
-		max = 180
-	}
-	compact := strings.Join(strings.Fields(body), " ")
-	if len(compact) <= max {
-		return compact
-	}
-	return compact[:max]
 }
 
 func chooseTime(values ...time.Time) time.Time {

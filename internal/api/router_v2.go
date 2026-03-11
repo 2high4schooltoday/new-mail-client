@@ -1195,7 +1195,7 @@ func (h *Handlers) resolveIndexedMailboxFilters(ctx context.Context, accounts []
 
 func (h *Handlers) V2ListMessages(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
-	accounts, allScope, err := h.resolveIndexedScopeAccounts(
+	accounts, _, err := h.resolveIndexedScopeAccounts(
 		r.Context(),
 		u,
 		r.URL.Query().Get("account_id"),
@@ -1214,76 +1214,41 @@ func (h *Handlers) V2ListMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
-	view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view")))
 	sortOrder := strings.TrimSpace(r.URL.Query().Get("sort"))
 	page, pageSize := parsePaginationV2(r)
-	offset := (page - 1) * pageSize
-	accountIDs := indexedScopeAccountIDs(accounts)
-	mailboxFilters, err := h.resolveIndexedMailboxFilters(r.Context(), accounts, mailbox)
+	filter, filteredAccounts, err := h.parseIndexedMessageFilter(r.Context(), u, r, accounts)
+	if err != nil {
+		util.WriteError(w, 400, "bad_request", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	mailboxFilters, err := h.resolveIndexedMailboxFilters(r.Context(), filteredAccounts, mailbox)
 	if err != nil {
 		util.WriteError(w, 500, "mailbox_filter_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
 
-	var items []models.IndexedMessage
-	var total int
-	switch view {
-	case "waiting":
-		selfEmails := indexedAccountsSelfEmails(r.Context(), h, u, accounts)
-		sampleLimit := pageSize * page
-		if sampleLimit < 200 {
-			sampleLimit = 200
-		}
-		if sampleLimit > 600 {
-			sampleLimit = 600
-		}
-		var recent []models.IndexedMessage
-		var listErr error
-		if allScope {
-			recent, _, listErr = h.svc.Store().ListIndexedMessagesByAccounts(r.Context(), accountIDs, mailboxFilters, "", sortOrder, sampleLimit, 0)
-		} else {
-			recent, _, listErr = h.svc.Store().ListIndexedMessages(r.Context(), accountIDs[0], mailbox, "", sortOrder, sampleLimit, 0)
-		}
-		if listErr != nil {
-			util.WriteError(w, 500, "messages_list_failed", listErr.Error(), middleware.RequestID(r.Context()))
-			return
-		}
-		filtered := filterWaitingIndexedMessages(recent, selfEmails)
-		total = len(filtered)
-		if offset > total {
-			offset = total
-		}
-		end := offset + pageSize
-		if end > total {
-			end = total
-		}
-		if offset < end {
-			items = filtered[offset:end]
-		} else {
-			items = []models.IndexedMessage{}
-		}
-	default:
-		if allScope {
-			items, total, err = h.svc.Store().ListIndexedMessagesByAccounts(r.Context(), accountIDs, mailboxFilters, view, sortOrder, pageSize, offset)
-		} else {
-			items, total, err = h.svc.Store().ListIndexedMessages(r.Context(), accountIDs[0], mailbox, view, sortOrder, pageSize, offset)
-		}
-		if err != nil {
-			util.WriteError(w, 500, "messages_list_failed", err.Error(), middleware.RequestID(r.Context()))
-			return
-		}
-	}
-
-	out := make([]mail.MessageSummary, 0, len(items))
-	for _, item := range items {
-		out = append(out, indexedMessageSummary(item))
+	items, total, err := h.queryIndexedMessages(
+		r.Context(),
+		u,
+		filteredAccounts,
+		mailbox,
+		mailboxFilters,
+		filter,
+		page,
+		pageSize,
+		sortOrder,
+		false,
+	)
+	if err != nil {
+		util.WriteError(w, 500, "messages_list_failed", err.Error(), middleware.RequestID(r.Context()))
+		return
 	}
 	util.WriteJSON(w, 200, map[string]any{
-		"items":     out,
+		"items":     presentIndexedMessageSummaries(items),
 		"page":      page,
 		"page_size": pageSize,
 		"total":     total,
-		"view":      view,
+		"view":      strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view"))),
 	})
 }
 
@@ -1387,9 +1352,7 @@ func (h *Handlers) V2GetIndexedMessageRaw(w http.ResponseWriter, r *http.Request
 		util.WriteError(w, 500, "message_get_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(msg.RawSource))
+	writeRawMessageResponse(w, r, []byte(msg.RawSource), msg.Subject)
 }
 
 func (h *Handlers) V2GetIndexedMessageAttachment(w http.ResponseWriter, r *http.Request) {
@@ -1775,7 +1738,7 @@ func (h *Handlers) V2VerifyIndexedMessage(w http.ResponseWriter, r *http.Request
 
 func (h *Handlers) V2Search(w http.ResponseWriter, r *http.Request) {
 	u, _ := middleware.User(r.Context())
-	accounts, allScope, err := h.resolveIndexedScopeAccounts(
+	accounts, _, err := h.resolveIndexedScopeAccounts(
 		r.Context(),
 		u,
 		r.URL.Query().Get("account_id"),
@@ -1792,22 +1755,30 @@ func (h *Handlers) V2Search(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	page, pageSize := parsePaginationV2(r)
 	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
-	accountIDs := indexedScopeAccountIDs(accounts)
-	mailboxFilters, err := h.resolveIndexedMailboxFilters(r.Context(), accounts, mailbox)
+	filter, filteredAccounts, err := h.parseIndexedMessageFilter(r.Context(), u, r, accounts)
+	if err != nil {
+		util.WriteError(w, 400, "bad_request", err.Error(), middleware.RequestID(r.Context()))
+		return
+	}
+	mailboxFilters, err := h.resolveIndexedMailboxFilters(r.Context(), filteredAccounts, mailbox)
 	if err != nil {
 		util.WriteError(w, 500, "mailbox_filter_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
 	}
-	var items []models.IndexedMessage
-	var total int
-	if allScope {
-		items, total, err = h.svc.Store().SearchIndexedMessagesByAccounts(r.Context(), accountIDs, mailboxFilters, q, pageSize, (page-1)*pageSize)
-	} else {
-		items, total, err = h.svc.Store().SearchIndexedMessages(r.Context(), accountIDs[0], mailbox, q, pageSize, (page-1)*pageSize)
-	}
+	items, total, err := h.queryIndexedMessages(
+		r.Context(),
+		u,
+		filteredAccounts,
+		mailbox,
+		mailboxFilters,
+		filter,
+		page,
+		pageSize,
+		"",
+		true,
+	)
 	if err != nil {
 		util.WriteError(w, 500, "search_failed", err.Error(), middleware.RequestID(r.Context()))
 		return
@@ -1874,6 +1845,7 @@ func presentIndexedMessage(item models.IndexedMessage) models.IndexedMessage {
 	item.CCValue = mail.DecodeAddressListValue(item.CCValue)
 	item.BCCValue = mail.DecodeAddressListValue(item.BCCValue)
 	item.Subject = mail.DecodeHeaderText(item.Subject)
+	item.Snippet = mail.BestAvailablePreview(item.Snippet, item.BodyText, item.BodyHTMLSanitized, item.RawSource, mail.DefaultPreviewMaxChars)
 	return item
 }
 

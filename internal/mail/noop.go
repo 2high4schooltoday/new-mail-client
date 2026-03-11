@@ -34,6 +34,10 @@ func (NoopClient) GetMessage(ctx context.Context, user, pass, id string) (Messag
 	return Message{ID: id, Subject: "Noop", Date: time.Now().UTC()}, fmt.Errorf("message not found")
 }
 
+func (NoopClient) GetRawMessage(ctx context.Context, user, pass, id string) ([]byte, error) {
+	return nil, fmt.Errorf("message not found")
+}
+
 func (NoopClient) Search(ctx context.Context, user, pass, mailbox, query string, page, pageSize int) ([]MessageSummary, error) {
 	return []MessageSummary{}, nil
 }

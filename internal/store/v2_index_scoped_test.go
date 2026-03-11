@@ -297,7 +297,7 @@ func TestListIndexedMessagesByAccountsMergesAndFiltersPerAccount(t *testing.T) {
 	seed("acct-b", "shared", "INBOX", "From B", sharedDate.Add(2*time.Hour))
 	seed("acct-a", "custom-a", "Projects/Alpha", "Alpha notes", sharedDate.Add(time.Hour))
 
-	items, total, err := st.ListIndexedMessagesByAccounts(ctx, []string{"acct-a", "acct-b"}, nil, "", "", 10, 0)
+	items, total, err := st.ListIndexedMessagesByAccounts(ctx, []string{"acct-a", "acct-b"}, nil, models.IndexedMessageFilter{}, "", 10, 0)
 	if err != nil {
 		t.Fatalf("ListIndexedMessagesByAccounts: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestListIndexedMessagesByAccountsMergesAndFiltersPerAccount(t *testing.T) {
 	filtered, filteredTotal, err := st.ListIndexedMessagesByAccounts(ctx, []string{"acct-a", "acct-b"}, map[string][]string{
 		"acct-a": {"Projects/Alpha"},
 		"acct-b": {"Projects/Alpha"},
-	}, "", "", 10, 0)
+	}, models.IndexedMessageFilter{}, "", 10, 0)
 	if err != nil {
 		t.Fatalf("ListIndexedMessagesByAccounts filtered: %v", err)
 	}
@@ -371,7 +371,9 @@ func TestSearchIndexedMessagesByAccountsMergesAcrossAccounts(t *testing.T) {
 		}
 	}
 
-	items, total, err := st.SearchIndexedMessagesByAccounts(ctx, []string{"acct-a", "acct-b"}, nil, "alpha", 10, 0)
+	items, total, err := st.SearchIndexedMessagesByAccounts(ctx, []string{"acct-a", "acct-b"}, nil, models.IndexedMessageFilter{
+		Query: "alpha",
+	}, 10, 0)
 	if err != nil {
 		t.Fatalf("SearchIndexedMessagesByAccounts: %v", err)
 	}
@@ -380,6 +382,175 @@ func TestSearchIndexedMessagesByAccountsMergesAcrossAccounts(t *testing.T) {
 	}
 	if items[0].AccountID != "acct-b" || items[1].AccountID != "acct-a" {
 		t.Fatalf("expected search results sorted newest first across accounts, got %+v", items)
+	}
+}
+
+func TestListIndexedMessagesByAccountsAppliesAdvancedFilters(t *testing.T) {
+	st := newV2ScopedStore(t)
+	ctx := context.Background()
+	user, err := st.CreateUser(ctx, "filters@example.com", "hash", "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	createMailAccountForTest(t, st, user.ID, "acct-a", "a-login")
+	createMailAccountForTest(t, st, user.ID, "acct-b", "b-login")
+
+	base := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	for _, item := range []models.IndexedMessage{
+		{
+			ID:             "match-a",
+			AccountID:      "acct-a",
+			Mailbox:        "INBOX",
+			UID:            1,
+			ThreadID:       "thread-match-a",
+			FromValue:      "Alice Example <alice@example.com>",
+			ToValue:        "team@example.com",
+			Subject:        "Project plan",
+			Snippet:        "project preview",
+			BodyText:       "project preview",
+			Seen:           false,
+			Flagged:        true,
+			HasAttachments: true,
+			DateHeader:     base,
+			InternalDate:   base,
+		},
+		{
+			ID:           "seen-a",
+			AccountID:    "acct-a",
+			Mailbox:      "INBOX",
+			UID:          2,
+			ThreadID:     "thread-seen-a",
+			FromValue:    "Alice Example <alice@example.com>",
+			ToValue:      "team@example.com",
+			Subject:      "Project plan",
+			Snippet:      "project preview",
+			BodyText:     "project preview",
+			Seen:         true,
+			Flagged:      true,
+			DateHeader:   base,
+			InternalDate: base,
+		},
+		{
+			ID:           "other-account",
+			AccountID:    "acct-b",
+			Mailbox:      "INBOX",
+			UID:          1,
+			ThreadID:     "thread-other-account",
+			FromValue:    "Alice Example <alice@example.com>",
+			ToValue:      "team@example.com",
+			Subject:      "Project plan",
+			Snippet:      "project preview",
+			BodyText:     "project preview",
+			Seen:         false,
+			Flagged:      true,
+			DateHeader:   base,
+			InternalDate: base,
+		},
+		{
+			ID:           "old-a",
+			AccountID:    "acct-a",
+			Mailbox:      "INBOX",
+			UID:          3,
+			ThreadID:     "thread-old-a",
+			FromValue:    "Alice Example <alice@example.com>",
+			ToValue:      "team@example.com",
+			Subject:      "Project plan",
+			Snippet:      "project preview",
+			BodyText:     "project preview",
+			Seen:         false,
+			Flagged:      true,
+			DateHeader:   base.AddDate(0, 0, -2),
+			InternalDate: base.AddDate(0, 0, -2),
+		},
+	} {
+		if _, err := st.UpsertIndexedMessage(ctx, item); err != nil {
+			t.Fatalf("upsert indexed message %s: %v", item.ID, err)
+		}
+	}
+
+	items, total, err := st.ListIndexedMessagesByAccounts(ctx, []string{"acct-a"}, nil, models.IndexedMessageFilter{
+		From:           "alice@example.com",
+		To:             "team@example.com",
+		Subject:        "project",
+		Unread:         true,
+		Flagged:        true,
+		HasAttachments: true,
+		DateFrom:       base.Add(-time.Hour),
+		HasDateFrom:    true,
+		DateTo:         base.Add(time.Hour),
+		HasDateTo:      true,
+	}, "", 10, 0)
+	if err != nil {
+		t.Fatalf("ListIndexedMessagesByAccounts filtered: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("expected one filtered result, got total=%d len=%d", total, len(items))
+	}
+	if mail.UnscopeIndexedMessageID(items[0].ID) != "match-a" {
+		t.Fatalf("expected match-a, got %+v", items[0])
+	}
+}
+
+func TestSearchIndexedMessagesByAccountsAppliesAddressAndSubjectFilters(t *testing.T) {
+	st := newV2ScopedStore(t)
+	ctx := context.Background()
+	user, err := st.CreateUser(ctx, "search-filters@example.com", "hash", "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	createMailAccountForTest(t, st, user.ID, "acct-a", "a-login")
+	createMailAccountForTest(t, st, user.ID, "acct-b", "b-login")
+
+	for _, item := range []models.IndexedMessage{
+		{
+			ID:           "alpha-a",
+			AccountID:    "acct-a",
+			Mailbox:      "INBOX",
+			UID:          1,
+			ThreadID:     "thread-a",
+			FromValue:    "Alpha Team <alpha@example.com>",
+			ToValue:      "ops@example.com",
+			CCValue:      "board@example.com",
+			Subject:      "Alpha launch memo",
+			Snippet:      "alpha rollout",
+			BodyText:     "alpha rollout",
+			DateHeader:   time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC),
+			InternalDate: time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC),
+		},
+		{
+			ID:           "alpha-b",
+			AccountID:    "acct-b",
+			Mailbox:      "INBOX",
+			UID:          1,
+			ThreadID:     "thread-b",
+			FromValue:    "Beta Team <beta@example.com>",
+			ToValue:      "ops@example.com",
+			Subject:      "Alpha follow-up",
+			Snippet:      "alpha follow-up",
+			BodyText:     "alpha follow-up",
+			DateHeader:   time.Date(2026, 3, 10, 11, 0, 0, 0, time.UTC),
+			InternalDate: time.Date(2026, 3, 10, 11, 0, 0, 0, time.UTC),
+		},
+	} {
+		if _, err := st.UpsertIndexedMessage(ctx, item); err != nil {
+			t.Fatalf("upsert indexed message %s: %v", item.ID, err)
+		}
+	}
+
+	items, total, err := st.SearchIndexedMessagesByAccounts(ctx, []string{"acct-a", "acct-b"}, nil, models.IndexedMessageFilter{
+		Query:   "alpha",
+		From:    "alpha@example.com",
+		To:      "board@example.com",
+		Subject: "launch",
+	}, 10, 0)
+	if err != nil {
+		t.Fatalf("SearchIndexedMessagesByAccounts filtered: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("expected one filtered search result, got total=%d len=%d", total, len(items))
+	}
+	if items[0].AccountID != "acct-a" || mail.UnscopeIndexedMessageID(items[0].ID) != "alpha-a" {
+		t.Fatalf("expected alpha-a from account A, got %+v", items[0])
 	}
 }
 

@@ -635,8 +635,48 @@
             </div>
           </div>
           <div class="mail-commandbar-search">
-            <input id="search-input" type="text" placeholder="Search subject, body, sender">
-            <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
+            <div class="mail-filter-basic">
+              <input id="search-input" type="text" placeholder="Search subject, body, sender">
+              <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
+            </div>
+            <div id="mail-filter-advanced" class="mail-filter-advanced hidden">
+              <div class="mail-filter-grid">
+                <label class="mail-filter-field">
+                  <span>From</span>
+                  <input id="mail-filter-from" type="text" placeholder="alice@example.com">
+                </label>
+                <label class="mail-filter-field">
+                  <span>To</span>
+                  <input id="mail-filter-to" type="text" placeholder="bob@example.com">
+                </label>
+                <label class="mail-filter-field">
+                  <span>Subject</span>
+                  <input id="mail-filter-subject" type="text" placeholder="Project update">
+                </label>
+                <label class="mail-filter-field">
+                  <span>Date From</span>
+                  <input id="mail-filter-date-from" type="date">
+                </label>
+                <label class="mail-filter-field">
+                  <span>Date To</span>
+                  <input id="mail-filter-date-to" type="date">
+                </label>
+              </div>
+              <div class="mail-filter-toggle-row" role="group" aria-label="Indexed mail filters">
+                <button id="btn-mail-filter-unread" class="chip chip-btn" type="button" aria-pressed="false">Unread</button>
+                <button id="btn-mail-filter-flagged" class="chip chip-btn" type="button" aria-pressed="false">Flagged</button>
+                <button id="btn-mail-filter-attachments" class="chip chip-btn" type="button" aria-pressed="false">Attachments</button>
+              </div>
+              <div id="mail-filter-account-row" class="mail-filter-chip-row hidden">
+                <span class="mail-filter-row-label">Accounts</span>
+                <div id="mail-filter-account-chips" class="mail-filter-chip-list"></div>
+              </div>
+            </div>
+            <div id="mail-filter-active-row" class="mail-filter-active-row hidden">
+              <div id="mail-filter-active-chips" class="mail-filter-chip-list"></div>
+              <button id="btn-mail-clear-filters" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear filters</button>
+            </div>
+            <p id="mail-filter-live-hint" class="hint mail-filter-live-hint hidden">Advanced filters require indexed mail.</p>
           </div>
           <div class="mail-commandbar-meta">
             <label id="mail-account-switcher-wrap" class="mail-account-switcher hidden">
@@ -696,6 +736,15 @@
               <span class="reader-view-label">View:</span>
               <button id="btn-reader-view-html" class="cmd-btn cmd-btn--dense" type="button">HTML</button>
               <button id="btn-reader-view-plain" class="cmd-btn cmd-btn--dense" type="button">Plain</button>
+              <details id="reader-inspect-menu" class="row-menu reader-inspect-menu">
+                <summary id="reader-inspect-summary">Inspect</summary>
+                <div class="row-menu-body reader-inspect-menu-body">
+                  <button id="btn-reader-view-source" class="reader-inspect-action" type="button">View Source</button>
+                  <button id="btn-reader-view-headers" class="reader-inspect-action" type="button">View Headers</button>
+                  <button id="btn-reader-print" class="reader-inspect-action" type="button">Print</button>
+                  <button id="btn-reader-download-eml" class="reader-inspect-action" type="button">Download .eml</button>
+                </div>
+              </details>
             </div>
             <div class="reader-body-host">
               <div id="message-body-html-wrap" class="message-body-html-wrap hidden">
@@ -1059,6 +1108,7 @@
         <h3 id="ui-modal-title">Action</h3>
       </header>
       <p id="ui-modal-body" class="hint"></p>
+      <pre id="ui-modal-document" class="ui-modal-document hidden"></pre>
       <label id="ui-modal-input-wrap" class="ui-modal-input-wrap hidden">
         <span id="ui-modal-input-label">Value</span>
         <input id="ui-modal-input" type="text" autocomplete="off" list="ui-modal-datalist">

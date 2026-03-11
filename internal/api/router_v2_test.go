@@ -536,6 +536,47 @@ func TestV2PreferencesFlow(t *testing.T) {
 	}
 }
 
+func TestV2SavedSearchRoundTripPreservesAdvancedFiltersJSON(t *testing.T) {
+	router := newV2Router(t)
+	sess, csrf := loginV2(t, router)
+	filtersJSON := `{"account_scope":"all","view_kind":"mailbox","mailbox":"","query":"alpha","filters":{"from":"alice@example.com","to":"team@example.com","subject":"launch","date_from":"2026-03-10","date_to":"2026-03-11","unread":true,"flagged":true,"has_attachments":true,"waiting":false,"account_ids":["acct-a","acct-b"]}}`
+
+	create := doV2AuthedJSON(t, router, http.MethodPost, "/api/v2/saved-searches", map[string]any{
+		"account_id":   "",
+		"name":         "Alpha view",
+		"filters_json": filtersJSON,
+		"pinned":       true,
+	}, sess, csrf)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", create.Code, create.Body.String())
+	}
+
+	var saved models.SavedSearch
+	if err := json.Unmarshal(create.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode create saved search: %v body=%s", err, create.Body.String())
+	}
+	if saved.FiltersJSON != filtersJSON {
+		t.Fatalf("expected filters_json to roundtrip, got %s", saved.FiltersJSON)
+	}
+
+	list := doV2AuthedJSON(t, router, http.MethodGet, "/api/v2/saved-searches", nil, sess, csrf)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", list.Code, list.Body.String())
+	}
+	var payload struct {
+		Items []models.SavedSearch `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list saved searches: %v body=%s", err, list.Body.String())
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("expected one saved search, got %d", len(payload.Items))
+	}
+	if payload.Items[0].FiltersJSON != filtersJSON {
+		t.Fatalf("expected saved filters_json to persist, got %s", payload.Items[0].FiltersJSON)
+	}
+}
+
 func TestV2AccountsCreateAndList(t *testing.T) {
 	router := newV2Router(t)
 	sess, csrf := loginV2(t, router)

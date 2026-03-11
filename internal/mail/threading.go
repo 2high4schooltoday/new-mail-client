@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 
 	gomail "github.com/emersion/go-message/mail"
 )
@@ -27,6 +28,7 @@ var (
 	previewURLPattern        = regexp.MustCompile(`https?://[^\s<>"']+`)
 	previewBase64Token       = regexp.MustCompile(`(?i)^[a-z0-9+/=_-]{24,}$`)
 	previewHexToken          = regexp.MustCompile(`(?i)^[a-f0-9]{24,}$`)
+	previewResidualNoise     = regexp.MustCompile(`(?i)\b(?:border-collapse|font-family|font-size|line-height|cellpadding|cellspacing|mso-|mime-version|content-transfer-encoding|content-type|return-path|dkim-signature|authentication-results|multipart/|text/html|charset=|quoted-printable)\b`)
 	messageIDTokenPattern    = regexp.MustCompile(`<[^>]+>|[^<>,\\s]+@[^<>,\\s]+`)
 )
 
@@ -154,6 +156,30 @@ func BuildPreviewFromBodySample(sample string, max int) string {
 	return strings.TrimSpace(string(runes[:max]))
 }
 
+func normalizePreviewCandidate(sample string, max int) string {
+	candidate := BuildPreviewFromBodySample(sample, max)
+	if !previewAppearsUseful(candidate) {
+		return ""
+	}
+	return candidate
+}
+
+func previewAppearsUseful(sample string) bool {
+	trimmed := strings.TrimSpace(sample)
+	if trimmed == "" {
+		return false
+	}
+	if previewResidualNoise.MatchString(trimmed) {
+		return false
+	}
+	for _, r := range trimmed {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func filterPreviewNoiseTokens(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
@@ -231,6 +257,28 @@ func BuildPreviewFromMIMERawSample(sample []byte, max int) string {
 		bodySample = sample[idx+2:]
 	}
 	return BuildPreviewFromBodySample(string(bodySample), max)
+}
+
+// BestAvailablePreview normalizes a preview candidate and falls back through
+// body text, sanitized html, and raw RFC822 when earlier candidates are noisy
+// or low-signal.
+func BestAvailablePreview(snippet, bodyText, bodyHTML, rawSource string, max int) string {
+	if max <= 0 {
+		max = DefaultPreviewMaxChars
+	}
+	for _, candidate := range []string{snippet, bodyText, bodyHTML} {
+		if preview := normalizePreviewCandidate(candidate, max); preview != "" {
+			return preview
+		}
+	}
+	if strings.TrimSpace(rawSource) == "" {
+		return ""
+	}
+	preview := BuildPreviewFromMIMERawSample([]byte(rawSource), max)
+	if !previewAppearsUseful(preview) {
+		return ""
+	}
+	return preview
 }
 
 func extractPreviewFromMIMEParts(raw []byte) (string, string) {

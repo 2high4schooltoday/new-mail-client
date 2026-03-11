@@ -1064,9 +1064,101 @@ a:focus-visible {
 
 .mail-commandbar-search {
   display: grid;
-  grid-template-columns: minmax(180px, 280px) auto;
+  grid-template-columns: minmax(280px, 420px) minmax(280px, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+}
+
+.mail-filter-basic {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
+}
+
+.mail-filter-advanced {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.mail-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.mail-filter-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.74rem;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.mail-filter-field input {
+  min-width: 0;
+}
+
+.mail-filter-toggle-row,
+.mail-filter-chip-row,
+.mail-filter-active-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mail-filter-row-label {
+  color: var(--fg-muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.mail-filter-chip-list {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mail-filter-live-hint {
+  grid-column: 2;
+}
+
+.chip-btn {
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-1);
+  color: var(--fg-1);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chip-btn:hover,
+.chip-btn[aria-pressed="true"] {
+  border-color: var(--fg-0);
+  color: var(--fg-0);
+}
+
+.chip-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--bg-2) 72%, var(--sig-accent) 28%);
+}
+
+.mail-filter-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: var(--border-w) solid var(--line-1);
+  background: var(--bg-2);
+  color: var(--fg-0);
+  font: inherit;
+  cursor: pointer;
+}
+
+.mail-filter-chip-remove strong {
+  font-weight: 700;
 }
 
 .mail-commandbar-meta {
@@ -1698,6 +1790,7 @@ a:focus-visible {
 .reader-view-controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 0 var(--space-3) var(--space-2);
   border-bottom: var(--border-w) solid var(--line-2);
@@ -1713,6 +1806,44 @@ a:focus-visible {
   border-color: var(--line-0);
   color: var(--fg-0);
   background: color-mix(in srgb, var(--line-0) 10%, transparent);
+}
+
+.reader-inspect-menu {
+  margin-left: auto;
+}
+
+.reader-inspect-menu summary {
+  min-height: 28px;
+}
+
+.reader-inspect-menu.is-disabled summary {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.reader-inspect-menu-body {
+  min-width: 190px;
+}
+
+.reader-inspect-action {
+  width: 100%;
+  border: var(--border-w) solid transparent;
+  background: transparent;
+  color: var(--fg-0);
+  text-align: left;
+  padding: var(--space-2);
+  cursor: pointer;
+}
+
+.reader-inspect-action:hover:not(:disabled),
+.reader-inspect-action:focus-visible {
+  border-color: var(--line-1);
+  outline: none;
+}
+
+.reader-inspect-action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .reader-body-host {
@@ -2647,6 +2778,10 @@ a:focus-visible {
   gap: var(--space-3);
 }
 
+.ui-modal-card--document {
+  width: min(980px, 100%);
+}
+
 .ui-modal-head {
   border-bottom: var(--border-w) solid var(--line-1);
   padding-bottom: var(--space-2);
@@ -2655,6 +2790,20 @@ a:focus-visible {
 .ui-modal-input-wrap {
   display: grid;
   gap: var(--space-1);
+}
+
+.ui-modal-document {
+  margin: 0;
+  min-height: 320px;
+  max-height: min(70vh, 760px);
+  overflow: auto;
+  padding: var(--space-3);
+  border: var(--border-w) solid var(--line-1);
+  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .ui-modal-actions {
@@ -3258,7 +3407,15 @@ button.setting-list-item {
   }
 
   .mail-commandbar-search {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
+  }
+
+  .mail-filter-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .mail-filter-live-hint {
+    grid-column: auto;
   }
 
   .mail-commandbar-meta {
@@ -3409,7 +3566,11 @@ button.setting-list-item {
   }
 
   .mail-commandbar-search {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
+  }
+
+  .mail-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .mail-commandbar select {
