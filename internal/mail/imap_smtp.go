@@ -1124,16 +1124,14 @@ func parseMessage(raw []byte, messageID, mailbox string, uid uint32) (Message, e
 	if messageIDHeader, err := mr.Header.MessageID(); err == nil {
 		msg.MessageID = strings.TrimSpace(messageIDHeader)
 	}
-	if references, err := mr.Header.MsgIDList("References"); err == nil {
-		msg.References = append([]string{}, references...)
+	if rawReferences := mr.Header.Get("References"); strings.TrimSpace(rawReferences) != "" {
+		msg.References = ParseMessageIDList(rawReferences)
 	}
-	if replyRefs, err := mr.Header.MsgIDList("In-Reply-To"); err == nil && len(replyRefs) > 0 {
-		msg.InReplyTo = strings.TrimSpace(replyRefs[0])
-		for _, item := range replyRefs {
-			if strings.TrimSpace(item) == "" {
-				continue
-			}
-			msg.References = append(msg.References, item)
+	if rawInReplyTo := mr.Header.Get("In-Reply-To"); strings.TrimSpace(rawInReplyTo) != "" {
+		replyRefs := ParseMessageIDList(rawInReplyTo)
+		if len(replyRefs) > 0 {
+			msg.InReplyTo = strings.TrimSpace(replyRefs[0])
+			msg.References = NormalizeMessageIDHeaders(append(msg.References, replyRefs...))
 		}
 	}
 

@@ -225,6 +225,9 @@ func (w *MailWorkers) syncAccount(ctx context.Context, account models.MailAccoun
 	}
 
 	if fullRebuild {
+		if err := w.st.RepairIndexedThreadHeadersByAccount(ctx, account.ID); err != nil {
+			return syncAccountResult{}, err
+		}
 		if err := w.st.RebuildThreadIndex(ctx, account.ID); err != nil {
 			return syncAccountResult{}, err
 		}
@@ -289,6 +292,12 @@ func (w *MailWorkers) reindexAccount(ctx context.Context, account models.MailAcc
 			w.recordAccountSyncFailure(account.ID, now)
 			return err
 		}
+	}
+	if err := w.st.RepairIndexedThreadHeadersByAccount(ctx, account.ID); err != nil {
+		now := w.now().UTC()
+		_ = w.st.UpdateMailAccountSyncStatus(ctx, account.ID, now, err.Error())
+		w.recordAccountSyncFailure(account.ID, now)
+		return err
 	}
 	if err := w.st.RebuildThreadIndex(ctx, account.ID); err != nil {
 		now := w.now().UTC()
@@ -422,12 +431,14 @@ func (w *MailWorkers) syncMailbox(ctx context.Context, cli mailSyncClient, accou
 }
 
 func (w *MailWorkers) syncMailboxUIDs(ctx context.Context, cli mailSyncClient, account models.MailAccount, pass, mailbox string, uids []uint32, touchedThreadIDs map[string]struct{}) error {
-	for start := 0; start < len(uids); start += maxInt(mailSyncBatchSize, 1) {
+	orderedUIDs := append([]uint32(nil), uids...)
+	sort.Slice(orderedUIDs, func(i, j int) bool { return orderedUIDs[i] < orderedUIDs[j] })
+	for start := 0; start < len(orderedUIDs); start += maxInt(mailSyncBatchSize, 1) {
 		end := start + maxInt(mailSyncBatchSize, 1)
-		if end > len(uids) {
-			end = len(uids)
+		if end > len(orderedUIDs) {
+			end = len(orderedUIDs)
 		}
-		items, err := cli.FetchSyncMessagesByUIDs(ctx, account.Login, pass, mailbox, uids[start:end])
+		items, err := cli.FetchSyncMessagesByUIDs(ctx, account.Login, pass, mailbox, orderedUIDs[start:end])
 		if err != nil {
 			return err
 		}

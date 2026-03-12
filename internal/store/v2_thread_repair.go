@@ -11,7 +11,29 @@ import (
 	"despatch/internal/mail"
 )
 
-const settingIndexedThreadHeadersRepaired = "mail_index_thread_headers_v1"
+const settingIndexedThreadHeadersRepaired = "mail_index_thread_headers_v2"
+
+type repairThreadRow struct {
+	accountID         string
+	id                string
+	subject           string
+	fromValue         string
+	originalThreadID  string
+	threadID          string
+	originalMessageID string
+	messageIDHeader   string
+	originalInReplyTo string
+	inReplyToHeader   string
+	originalRefs      string
+	referencesHeader  string
+	references        []string
+}
+
+type accountRepairIndex struct {
+	messageRows map[string]*repairThreadRow
+	memo        map[string]string
+	resolving   map[string]bool
+}
 
 // EnsureIndexedThreadHeadersRepaired performs a one-time repair pass for
 // historical indexed rows whose stored thread ids predate header-based
@@ -52,28 +74,102 @@ func (s *Store) EnsureIndexedThreadHeadersRepaired(ctx context.Context) error {
 	}()
 
 	now := time.Now().UTC()
-	rows, err := conn.QueryContext(ctx,
-		`SELECT account_id,id,mailbox,uid,thread_id,message_id_header,in_reply_to_header,references_header,subject,from_value,raw_source
-		 FROM message_index
-		 ORDER BY account_id ASC, internal_date ASC, date_header ASC, created_at ASC, id ASC`,
-	)
+	accountIDs, err := repairIndexedThreadHeadersOnConn(ctx, conn, "", now)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	type rowUpdate struct {
-		accountID        string
-		id               string
-		threadID         string
-		messageIDHeader  string
-		inReplyToHeader  string
-		referencesHeader string
+	sort.Strings(accountIDs)
+	for _, accountID := range accountIDs {
+		if err := rebuildThreadIndexOnConn(ctx, conn, accountID, now); err != nil {
+			return err
+		}
 	}
 
-	headerToThread := map[string]map[string]string{}
-	updates := make([]rowUpdate, 0, 64)
-	touchedAccounts := map[string]struct{}{}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO settings(key,value,updated_at)
+		 VALUES(?,?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		settingIndexedThreadHeadersRepaired,
+		"done",
+		now,
+	); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// RepairIndexedThreadHeadersByAccount re-runs indexed thread/header repair for
+// one account. This is used after full rebuild/reindex paths where mailbox or
+// batch ordering may have temporarily indexed descendants before their parents.
+func (s *Store) RepairIndexedThreadHeadersByAccount(ctx context.Context, accountID string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil
+	}
+	if !s.tableExists(ctx, "message_index") {
+		return nil
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+	}()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	now := time.Now().UTC()
+	accountIDs, err := repairIndexedThreadHeadersOnConn(ctx, conn, accountID, now)
+	if err != nil {
+		return err
+	}
+	for _, repairedAccountID := range accountIDs {
+		if err := rebuildThreadIndexOnConn(ctx, conn, repairedAccountID, now); err != nil {
+			return err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func repairIndexedThreadHeadersOnConn(ctx context.Context, conn *sql.Conn, accountFilter string, now time.Time) ([]string, error) {
+	query := `SELECT account_id,id,mailbox,uid,thread_id,message_id_header,in_reply_to_header,references_header,subject,from_value,raw_source
+		 FROM message_index`
+	args := make([]any, 0, 1)
+	if strings.TrimSpace(accountFilter) != "" {
+		query += ` WHERE account_id=?`
+		args = append(args, strings.TrimSpace(accountFilter))
+	}
+	query += ` ORDER BY account_id ASC, internal_date ASC, date_header ASC, created_at ASC, id ASC`
+	rows, err := conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]repairThreadRow, 0, 64)
 
 	for rows.Next() {
 		var (
@@ -102,7 +198,7 @@ func (s *Store) EnsureIndexedThreadHeadersRepaired(ctx context.Context) error {
 			&fromValue,
 			&rawSource,
 		); err != nil {
-			return err
+			return nil, err
 		}
 
 		normalizedMessageID := mail.NormalizeMessageIDHeader(messageIDHeader)
@@ -123,40 +219,61 @@ func (s *Store) EnsureIndexedThreadHeadersRepaired(ctx context.Context) error {
 			}
 		}
 
-		accountHeaders := headerToThread[accountID]
-		if accountHeaders == nil {
-			accountHeaders = map[string]string{}
-			headerToThread[accountID] = accountHeaders
-		}
-		nextThreadID := resolveRepairedIndexedThreadID(accountID, normalizedMessageID, normalizedInReplyTo, normalizedReferences, subject, fromValue, accountHeaders)
-		if normalizedMessageID != "" {
-			accountHeaders[normalizedMessageID] = nextThreadID
-		}
-
-		currentThreadID := mail.NormalizeIndexedThreadID(accountID, threadID)
-		nextReferencesHeader := mail.FormatMessageIDList(normalizedReferences)
-		if currentThreadID == nextThreadID &&
-			mail.NormalizeMessageIDHeader(messageIDHeader) == normalizedMessageID &&
-			mail.NormalizeMessageIDHeader(inReplyToHeader) == normalizedInReplyTo &&
-			mail.FormatMessageIDList(mail.ParseMessageIDList(referencesHeader)) == nextReferencesHeader {
-			continue
-		}
-
-		updates = append(updates, rowUpdate{
-			accountID:        accountID,
-			id:               id,
-			threadID:         nextThreadID,
-			messageIDHeader:  normalizedMessageID,
-			inReplyToHeader:  normalizedInReplyTo,
-			referencesHeader: nextReferencesHeader,
+		items = append(items, repairThreadRow{
+			accountID:         accountID,
+			id:                id,
+			subject:           subject,
+			fromValue:         fromValue,
+			originalThreadID:  mail.NormalizeIndexedThreadID(accountID, threadID),
+			threadID:          mail.NormalizeIndexedThreadID(accountID, threadID),
+			originalMessageID: mail.NormalizeMessageIDHeader(messageIDHeader),
+			messageIDHeader:   normalizedMessageID,
+			originalInReplyTo: mail.NormalizeMessageIDHeader(inReplyToHeader),
+			inReplyToHeader:   normalizedInReplyTo,
+			originalRefs:      mail.FormatMessageIDList(mail.ParseMessageIDList(referencesHeader)),
+			referencesHeader:  mail.FormatMessageIDList(normalizedReferences),
+			references:        append([]string(nil), normalizedReferences...),
 		})
-		touchedAccounts[accountID] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
-	for _, item := range updates {
+	accountIndexes := map[string]*accountRepairIndex{}
+	for i := range items {
+		item := &items[i]
+		index := accountIndexes[item.accountID]
+		if index == nil {
+			index = &accountRepairIndex{
+				messageRows: map[string]*repairThreadRow{},
+				memo:        map[string]string{},
+				resolving:   map[string]bool{},
+			}
+			accountIndexes[item.accountID] = index
+		}
+		if key := strings.TrimSpace(item.messageIDHeader); key != "" {
+			if existing := index.messageRows[key]; shouldReplaceRepairMessageRow(existing, item) {
+				index.messageRows[key] = item
+			}
+		}
+	}
+	for i := range items {
+		item := &items[i]
+		index := accountIndexes[item.accountID]
+		if index == nil {
+			continue
+		}
+		item.threadID = resolveRepairedIndexedThreadID(index, item)
+	}
+
+	touchedAccounts := map[string]struct{}{}
+	for _, item := range items {
+		if item.originalThreadID == item.threadID &&
+			item.originalMessageID == item.messageIDHeader &&
+			item.originalInReplyTo == item.inReplyToHeader &&
+			item.originalRefs == item.referencesHeader {
+			continue
+		}
 		if _, err := conn.ExecContext(ctx,
 			`UPDATE message_index
 			 SET thread_id=?, message_id_header=?, in_reply_to_header=?, references_header=?, updated_at=?
@@ -169,50 +286,76 @@ func (s *Store) EnsureIndexedThreadHeadersRepaired(ctx context.Context) error {
 			item.accountID,
 			item.id,
 		); err != nil {
-			return err
+			return nil, err
 		}
+		touchedAccounts[item.accountID] = struct{}{}
 	}
 
 	accountIDs := make([]string, 0, len(touchedAccounts))
 	for accountID := range touchedAccounts {
 		accountIDs = append(accountIDs, accountID)
 	}
-	sort.Strings(accountIDs)
-	for _, accountID := range accountIDs {
-		if err := rebuildThreadIndexOnConn(ctx, conn, accountID, now); err != nil {
-			return err
-		}
-	}
-
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO settings(key,value,updated_at)
-		 VALUES(?,?,?)
-		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-		settingIndexedThreadHeadersRepaired,
-		"done",
-		now,
-	); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	return accountIDs, nil
 }
 
-func resolveRepairedIndexedThreadID(accountID, messageID, inReplyTo string, references []string, subject, from string, headerToThread map[string]string) string {
-	for _, item := range mail.NormalizeMessageIDHeaders(references) {
-		if threadID := strings.TrimSpace(headerToThread[item]); threadID != "" {
-			return threadID
+func shouldReplaceRepairMessageRow(existing, candidate *repairThreadRow) bool {
+	if existing == nil {
+		return true
+	}
+	existingScore := len(existing.references)
+	if strings.TrimSpace(existing.inReplyToHeader) != "" {
+		existingScore++
+	}
+	candidateScore := len(candidate.references)
+	if strings.TrimSpace(candidate.inReplyToHeader) != "" {
+		candidateScore++
+	}
+	if candidateScore != existingScore {
+		return candidateScore > existingScore
+	}
+	return strings.TrimSpace(candidate.id) < strings.TrimSpace(existing.id)
+}
+
+func resolveRepairedIndexedThreadID(index *accountRepairIndex, item *repairThreadRow) string {
+	if index == nil || item == nil {
+		return ""
+	}
+	if cached := strings.TrimSpace(index.memo[item.id]); cached != "" {
+		return cached
+	}
+	if index.resolving[item.id] {
+		return fallbackRepairedThreadID(item)
+	}
+
+	index.resolving[item.id] = true
+	defer delete(index.resolving, item.id)
+
+	nextThreadID := fallbackRepairedThreadID(item)
+	if len(item.references) > 0 {
+		rootRef := strings.TrimSpace(item.references[0])
+		if rootRef != "" {
+			if ancestor := index.messageRows[rootRef]; ancestor != nil && ancestor.id != item.id {
+				nextThreadID = resolveRepairedIndexedThreadID(index, ancestor)
+			} else if parentID := strings.TrimSpace(item.inReplyToHeader); parentID != "" {
+				if parent := index.messageRows[parentID]; parent != nil && parent.id != item.id {
+					nextThreadID = resolveRepairedIndexedThreadID(index, parent)
+				}
+			}
+		}
+	} else if parentID := strings.TrimSpace(item.inReplyToHeader); parentID != "" {
+		if parent := index.messageRows[parentID]; parent != nil && parent.id != item.id {
+			nextThreadID = resolveRepairedIndexedThreadID(index, parent)
 		}
 	}
-	if normalized := mail.NormalizeMessageIDHeader(inReplyTo); normalized != "" {
-		if threadID := strings.TrimSpace(headerToThread[normalized]); threadID != "" {
-			return threadID
-		}
+	index.memo[item.id] = nextThreadID
+	return nextThreadID
+}
+
+func fallbackRepairedThreadID(item *repairThreadRow) string {
+	if item == nil {
+		return ""
 	}
-	return mail.NormalizeIndexedThreadID(accountID, mail.DeriveIndexedThreadID(messageID, inReplyTo, references, subject, from))
+	return mail.NormalizeIndexedThreadID(item.accountID, mail.DeriveIndexedThreadID(item.messageIDHeader, item.inReplyToHeader, item.references, item.subject, item.fromValue))
 }
 
 func rebuildThreadIndexOnConn(ctx context.Context, conn *sql.Conn, accountID string, now time.Time) error {

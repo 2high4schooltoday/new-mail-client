@@ -14,20 +14,23 @@
 <body>
   <div class="app-shell page-office" id="app-shell">
     <header class="topbar">
-      <div class="topbar-row">
-        <div class="brand">
-          <h1>Despatch</h1>
-          <p class="hint">Mail operations console</p>
+        <div class="topbar-row">
+          <div class="topbar-branding">
+            <div class="brand-mark" aria-hidden="true">Despatch</div>
+          <div class="workspace-copy">
+            <p class="workspace-kicker">Workspace</p>
+            <h1 id="workspace-title" class="workspace-title">Account Access</h1>
+          </div>
         </div>
         <nav class="tabs" aria-label="Primary">
           <button id="tab-setup" class="tab" type="button">Setup</button>
           <button id="tab-auth" class="tab active" type="button">Auth</button>
           <button id="tab-mail" class="tab" type="button">Mail</button>
           <button id="tab-contacts" class="tab" type="button">Contacts</button>
-          <button id="tab-settings" class="tab" type="button">Settings</button>
-          <button id="tab-admin" class="tab" type="button">Admin</button>
         </nav>
         <div class="topbar-tools">
+          <button id="tab-settings" class="tab topbar-utility" type="button">Settings</button>
+          <button id="tab-admin" class="tab topbar-utility" type="button">Admin</button>
           <button id="btn-theme" class="cmd-btn cmd-btn--dense theme-toggle" type="button" aria-label="Toggle theme">Theme: Machine</button>
           <button id="btn-logout" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Sign Out</button>
         </div>
@@ -35,7 +38,7 @@
     </header>
 
     <main>
-      <section id="status-line" class="status-line" aria-live="polite">Ready</section>
+      <div id="status-line" class="toast-host" aria-live="polite"></div>
 
       <section id="view-auth" class="auth-shell">
         <article class="oobe-window auth-window" role="region" aria-labelledby="auth-title">
@@ -164,14 +167,14 @@
             <section id="settings-section-mail" class="panel settings-section hidden">
               <header class="settings-page-head">
                 <h3>Mail</h3>
-                <p class="hint">Manage delivery accounts, visible senders, signatures, and mail defaults.</p>
+                <p class="hint">Manage delivery accounts, senders, signatures, and default mail routing.</p>
               </header>
               <p id="settings-mail-note" class="hint">Mail settings are loading.</p>
 
               <section class="setting-section">
                 <header class="setting-section-head">
                   <h4>Accounts</h4>
-                  <p class="hint">SMTP/IMAP accounts and their default routing.</p>
+                  <p class="hint">SMTP/IMAP accounts, sync health, and which account sends by default.</p>
                 </header>
                 <div class="mail-settings-columns">
                   <div class="mail-settings-column">
@@ -180,69 +183,73 @@
                     </div>
                     <div id="settings-mail-account-list" class="settings-list"></div>
                   </div>
-                  <form id="settings-mail-account-form" class="mail-settings-form" novalidate>
-                    <div class="mail-settings-form-grid">
-                      <label class="mail-settings-field">
-                        <span>Display Name</span>
-                        <input id="settings-mail-account-display-name" type="text" autocomplete="organization" placeholder="Work Mail">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>Login</span>
-                        <input id="settings-mail-account-login" type="email" autocomplete="email" placeholder="mailbox@example.com">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>Password</span>
-                        <input id="settings-mail-account-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>Default</span>
-                        <input id="settings-mail-account-default" type="checkbox">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>IMAP Host</span>
-                        <input id="settings-mail-account-imap-host" type="text" placeholder="imap.example.com">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>IMAP Port</span>
-                        <input id="settings-mail-account-imap-port" type="number" min="1" step="1" placeholder="993">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>IMAP TLS</span>
-                        <input id="settings-mail-account-imap-tls" type="checkbox" checked>
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>IMAP STARTTLS</span>
-                        <input id="settings-mail-account-imap-starttls" type="checkbox">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>SMTP Host</span>
-                        <input id="settings-mail-account-smtp-host" type="text" placeholder="smtp.example.com">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>SMTP Port</span>
-                        <input id="settings-mail-account-smtp-port" type="number" min="1" step="1" placeholder="587">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>SMTP TLS</span>
-                        <input id="settings-mail-account-smtp-tls" type="checkbox">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>SMTP STARTTLS</span>
-                        <input id="settings-mail-account-smtp-starttls" type="checkbox" checked>
-                      </label>
-                    </div>
-                    <div class="actions setting-actions">
-                      <button id="btn-settings-mail-account-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Account</button>
-                      <button id="btn-settings-mail-account-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Account</button>
-                    </div>
-                  </form>
+                  <div class="mail-settings-detail-shell">
+                    <article id="settings-mail-account-detail" class="settings-detail hidden"></article>
+                    <form id="settings-mail-account-form" class="mail-settings-form hidden" novalidate>
+                      <div class="mail-settings-form-grid">
+                        <label class="mail-settings-field">
+                          <span>Display Name</span>
+                          <input id="settings-mail-account-display-name" type="text" autocomplete="organization" placeholder="Work Mail">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>Login</span>
+                          <input id="settings-mail-account-login" type="email" autocomplete="email" placeholder="mailbox@example.com">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>Password</span>
+                          <input id="settings-mail-account-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>Default Account</span>
+                          <input id="settings-mail-account-default" type="checkbox">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>IMAP Host</span>
+                          <input id="settings-mail-account-imap-host" type="text" placeholder="imap.example.com">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>IMAP Port</span>
+                          <input id="settings-mail-account-imap-port" type="number" min="1" step="1" placeholder="993">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>IMAP TLS</span>
+                          <input id="settings-mail-account-imap-tls" type="checkbox" checked>
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>IMAP STARTTLS</span>
+                          <input id="settings-mail-account-imap-starttls" type="checkbox">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>SMTP Host</span>
+                          <input id="settings-mail-account-smtp-host" type="text" placeholder="smtp.example.com">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>SMTP Port</span>
+                          <input id="settings-mail-account-smtp-port" type="number" min="1" step="1" placeholder="587">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>SMTP TLS</span>
+                          <input id="settings-mail-account-smtp-tls" type="checkbox">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>SMTP STARTTLS</span>
+                          <input id="settings-mail-account-smtp-starttls" type="checkbox" checked>
+                        </label>
+                      </div>
+                      <div class="actions setting-actions">
+                        <button id="btn-settings-mail-account-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Account</button>
+                        <button id="btn-settings-mail-account-cancel" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Cancel</button>
+                        <button id="btn-settings-mail-account-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Account</button>
+                      </div>
+                    </form>
+                  </div>
                 </div>
               </section>
 
               <section class="setting-section">
                 <header class="setting-section-head">
                   <h4>Senders</h4>
-                  <p class="hint">Choose the sender name, visible email, Reply-To, and signature recipients see.</p>
+                  <p class="hint">Choose the sender name, email, Reply-To, and signature recipients see.</p>
                 </header>
                 <div class="mail-settings-columns">
                   <div class="mail-settings-column">
@@ -251,67 +258,51 @@
                     </div>
                     <div id="settings-mail-identity-list" class="settings-list"></div>
                   </div>
-                  <form id="settings-mail-identity-form" class="mail-settings-form" novalidate>
-                    <div class="mail-settings-form-grid">
-                      <label class="mail-settings-field">
-                        <span>Sends Via</span>
-                        <select id="settings-mail-identity-account" autocomplete="off"></select>
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>Sender Name</span>
-                        <input id="settings-mail-identity-display-name" type="text" autocomplete="name" placeholder="Full Name">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>Visible Email</span>
-                        <input id="settings-mail-identity-from-email" type="email" autocomplete="email" placeholder="alias@example.com">
-                      </label>
-                      <label class="mail-settings-field mail-settings-field--full">
-                        <span>Reply-To</span>
-                        <input id="settings-mail-identity-reply-to" type="email" autocomplete="email" placeholder="reply-to@example.com">
-                      </label>
-                      <label class="mail-settings-field">
-                        <span>Default Sender</span>
-                        <input id="settings-mail-identity-default" type="checkbox">
-                      </label>
-                    </div>
-                    <div class="mail-signature-card">
-                      <div class="mail-signature-head">
-                        <strong>Signature</strong>
-                        <span class="hint">Used for new mail, replies, and forwards when this sender is selected.</span>
+                  <div class="mail-settings-detail-shell">
+                    <article id="settings-mail-sender-detail" class="settings-detail hidden"></article>
+                    <form id="settings-mail-identity-form" class="mail-settings-form hidden" novalidate>
+                      <div class="mail-settings-form-grid">
+                        <label class="mail-settings-field">
+                          <span>Account</span>
+                          <select id="settings-mail-identity-account" autocomplete="off"></select>
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>Name</span>
+                          <input id="settings-mail-identity-display-name" type="text" autocomplete="name" placeholder="Full Name">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>Email</span>
+                          <input id="settings-mail-identity-from-email" type="email" autocomplete="email" placeholder="alias@example.com">
+                        </label>
+                        <label class="mail-settings-field mail-settings-field--full">
+                          <span>Reply-To</span>
+                          <input id="settings-mail-identity-reply-to" type="email" autocomplete="email" placeholder="reply-to@example.com">
+                        </label>
+                        <label class="mail-settings-field">
+                          <span>Default Sender</span>
+                          <input id="settings-mail-identity-default" type="checkbox">
+                        </label>
                       </div>
-                      <div id="settings-mail-identity-toolbar" class="mail-signature-toolbar" role="group" aria-label="Sender signature formatting">
-                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="bold">Bold</button>
-                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="italic">Italic</button>
-                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="createLink">Link</button>
-                        <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="removeFormat">Clear</button>
+                      <div class="mail-signature-card">
+                        <div class="mail-signature-head">
+                          <strong>Signature</strong>
+                          <span class="hint">Used for new mail, replies, and forwards when this sender is selected.</span>
+                        </div>
+                        <div id="settings-mail-identity-toolbar" class="mail-signature-toolbar" role="group" aria-label="Sender signature formatting">
+                          <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="bold">Bold</button>
+                          <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="italic">Italic</button>
+                          <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="createLink">Link</button>
+                          <button type="button" class="cmd-btn cmd-btn--dense" data-signature-command="removeFormat">Clear</button>
+                        </div>
+                        <div id="settings-mail-identity-signature" class="mail-signature-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write a signature for this sender"></div>
                       </div>
-                      <div id="settings-mail-identity-signature" class="mail-signature-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write a signature for this sender"></div>
-                    </div>
-                    <div class="actions setting-actions">
-                      <button id="btn-settings-mail-identity-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Sender</button>
-                      <button id="btn-settings-mail-identity-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Sender</button>
-                    </div>
-                  </form>
-                </div>
-              </section>
-
-              <section class="setting-section">
-                <header class="setting-section-head">
-                  <h4>Defaults</h4>
-                  <p class="hint">Choose which account sends by default and which sender recipients see first.</p>
-                </header>
-                <div class="mail-settings-form-grid">
-                  <label class="mail-settings-field">
-                    <span>Default Account</span>
-                    <select id="settings-mail-default-account" autocomplete="off"></select>
-                  </label>
-                  <label class="mail-settings-field">
-                    <span>Default Sender</span>
-                    <select id="settings-mail-default-sender" autocomplete="off"></select>
-                  </label>
-                </div>
-                <div class="actions setting-actions">
-                  <button id="btn-settings-mail-defaults-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Defaults</button>
+                      <div class="actions setting-actions">
+                        <button id="btn-settings-mail-identity-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Sender</button>
+                        <button id="btn-settings-mail-identity-cancel" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Cancel</button>
+                        <button id="btn-settings-mail-identity-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Sender</button>
+                      </div>
+                    </form>
+                  </div>
                 </div>
               </section>
 
@@ -508,7 +499,7 @@
                 <div class="oobe-feature-grid" aria-label="What setup covers">
                   <article class="oobe-feature-card">
                     <span class="oobe-feature-index">01</span>
-                    <h3>Mail identity</h3>
+                    <h3>Mail address</h3>
                     <p>Choose the domain, admin address, and recovery email used by the first account.</p>
                   </article>
                   <article class="oobe-feature-card">
@@ -607,7 +598,7 @@
                 <div class="oobe-stage-mark" aria-hidden="true">04</div>
                 <div class="oobe-step-copy">
                   <h2>Admin account</h2>
-                  <p>Create the first admin identity used to sign in, approve accounts, and recover access later if needed.</p>
+                  <p>Create the first admin address used to sign in, approve accounts, and recover access later if needed.</p>
                 </div>
                 <div class="oobe-field-stack">
                   <label>Mail domain
@@ -708,10 +699,11 @@
       </section>
 
       <section id="view-mail" class="mail-workspace hidden">
-        <article class="panel workspace-header">
+        <article class="panel workspace-header workspace-header--mail">
           <div>
+            <p class="workspace-kicker">Mail</p>
             <h2>Mailbox</h2>
-            <p class="hint">Keyboard: Tab pane, j/k move row, Enter open, Shift+Arrow range select, Cmd/Ctrl+click multi-select, / search, c compose, r reply, Shift+F forward, f flag, s read state, Delete trash. Reader: j/k thread.</p>
+            <p class="hint">Read, search, and act on messages with the current message kept visually dominant.</p>
           </div>
           <div class="actions">
             <button id="mail-mobile-back" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
@@ -719,22 +711,59 @@
         </article>
 
         <article class="panel mail-commandbar" aria-label="Mail commands">
-          <div class="mail-commandbar-actions">
-            <div class="mail-commandbar-group mail-commandbar-group--compose">
+          <div class="mail-toolbar-primary">
+            <div class="mail-toolbar-cluster mail-toolbar-cluster--actions" role="group" aria-label="Primary mail actions">
               <button id="btn-compose-open" class="cmd-btn cmd-btn--primary cmd-btn--dense" type="button">Compose</button>
-            </div>
-            <div class="mail-commandbar-group" role="group" aria-label="Reply actions">
               <button id="btn-reply" class="cmd-btn cmd-btn--dense" type="button">Reply</button>
               <button id="btn-forward" class="cmd-btn cmd-btn--dense" type="button">Forward</button>
+            </div>
+            <div class="mail-toolbar-cluster mail-toolbar-cluster--search">
+              <div class="mail-filter-basic">
+                <input id="search-input" type="text" placeholder="Search subject, body, sender">
+                <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
+              </div>
+            </div>
+            <div class="mail-toolbar-cluster mail-toolbar-cluster--context">
+              <label id="mail-account-switcher-wrap" class="mail-account-switcher hidden">
+                <span class="mail-account-switcher-label">Scope</span>
+                <select id="mail-account-switcher" aria-label="Select indexed mail account scope"></select>
+              </label>
+              <div id="mail-health-panel" class="mail-health-panel hidden" aria-label="Mail account health">
+                <button id="btn-mail-health-toggle" class="mail-health-toggle" type="button" aria-expanded="false" aria-controls="mail-health-body">
+                  <span class="mail-health-toggle-copy">
+                    <strong id="mail-index-status" class="mail-index-status">Live mailbox</strong>
+                    <span id="mail-health-toggle-summary" class="mail-health-toggle-summary">No accounts configured.</span>
+                  </span>
+                  <span id="mail-health-toggle-caret" class="mail-health-toggle-caret" aria-hidden="true">+</span>
+                </button>
+                <div id="mail-health-body" class="mail-health-body hidden">
+                  <div id="mail-health-summary-strip" class="mail-health-summary-strip hidden"></div>
+                  <div id="mail-health-list" class="mail-health-list"></div>
+                </div>
+              </div>
+              <details id="mail-view-menu" class="row-menu mail-view-menu">
+                <summary class="cmd-btn cmd-btn--dense cmd-btn--ghost">More</summary>
+                <div class="row-menu-body mail-view-menu-body">
+                  <button id="btn-mail-filters" class="menu-action-btn" type="button">Filters</button>
+                  <button id="btn-mail-shortcuts" class="menu-action-btn" type="button">Shortcuts</button>
+                  <button id="btn-mail-save-search" class="menu-action-btn" type="button">Save View</button>
+                  <button id="btn-mail-delete-search" class="menu-action-btn hidden" type="button">Delete View</button>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div id="mail-selection-bar" class="mail-selection-bar hidden" aria-label="Selected message actions">
+            <div id="mail-selection-tools" class="mail-commandbar-group mail-commandbar-group--selection" role="status" aria-live="polite">
+              <span id="mail-selection-count" class="mail-selection-count">0 selected</span>
             </div>
             <div class="mail-commandbar-group" role="group" aria-label="Message state actions">
               <button id="btn-flag" class="cmd-btn cmd-btn--dense" type="button">Flag</button>
               <button id="btn-mark-seen" class="cmd-btn cmd-btn--dense" type="button">Mark Read</button>
-            </div>
-            <div class="mail-commandbar-group" role="group" aria-label="Mailbox actions">
               <button id="btn-archive" class="cmd-btn cmd-btn--dense" type="button">Archive</button>
               <button id="btn-spam" class="cmd-btn cmd-btn--dense" type="button">Spam</button>
               <button id="btn-not-spam" class="cmd-btn cmd-btn--dense" type="button">Not Spam</button>
+            </div>
+            <div class="mail-commandbar-group" role="group" aria-label="Mailbox actions">
               <select id="mail-move-target" aria-label="Move selected messages to mailbox">
                 <option value="">Move to…</option>
               </select>
@@ -742,90 +771,48 @@
             </div>
             <div class="mail-commandbar-group mail-commandbar-group--danger" role="group" aria-label="Destructive actions">
               <button id="btn-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Move To Trash</button>
-            </div>
-            <div id="mail-selection-tools" class="mail-commandbar-group mail-commandbar-group--selection hidden" role="status" aria-live="polite">
-              <span id="mail-selection-count" class="mail-selection-count">0 selected</span>
               <button id="btn-mail-clear" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear Selection</button>
             </div>
           </div>
-          <div class="mail-commandbar-search">
-            <div class="mail-filter-basic">
-              <input id="search-input" type="text" placeholder="Search subject, body, sender">
-              <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
+          <div id="mail-filter-advanced" class="mail-filter-panel hidden">
+            <div class="mail-filter-grid">
+              <label class="mail-filter-field">
+                <span>From</span>
+                <input id="mail-filter-from" type="text" placeholder="alice@example.com">
+              </label>
+              <label class="mail-filter-field">
+                <span>To</span>
+                <input id="mail-filter-to" type="text" placeholder="bob@example.com">
+              </label>
+              <label class="mail-filter-field">
+                <span>Subject</span>
+                <input id="mail-filter-subject" type="text" placeholder="Project update">
+              </label>
+              <label class="mail-filter-field">
+                <span>Date From</span>
+                <input id="mail-filter-date-from" type="date">
+              </label>
+              <label class="mail-filter-field">
+                <span>Date To</span>
+                <input id="mail-filter-date-to" type="date">
+              </label>
             </div>
-            <div id="mail-filter-advanced" class="mail-filter-advanced hidden">
-              <div class="mail-filter-grid">
-                <label class="mail-filter-field">
-                  <span>From</span>
-                  <input id="mail-filter-from" type="text" placeholder="alice@example.com">
-                </label>
-                <label class="mail-filter-field">
-                  <span>To</span>
-                  <input id="mail-filter-to" type="text" placeholder="bob@example.com">
-                </label>
-                <label class="mail-filter-field">
-                  <span>Subject</span>
-                  <input id="mail-filter-subject" type="text" placeholder="Project update">
-                </label>
-                <label class="mail-filter-field">
-                  <span>Date From</span>
-                  <input id="mail-filter-date-from" type="date">
-                </label>
-                <label class="mail-filter-field">
-                  <span>Date To</span>
-                  <input id="mail-filter-date-to" type="date">
-                </label>
-              </div>
-              <div class="mail-filter-toggle-row" role="group" aria-label="Indexed mail filters">
-                <button id="btn-mail-filter-unread" class="chip chip-btn" type="button" aria-pressed="false">Unread</button>
-                <button id="btn-mail-filter-flagged" class="chip chip-btn" type="button" aria-pressed="false">Flagged</button>
-                <button id="btn-mail-filter-attachments" class="chip chip-btn" type="button" aria-pressed="false">Attachments</button>
-              </div>
-              <div id="mail-filter-account-row" class="mail-filter-chip-row hidden">
-                <span class="mail-filter-row-label">Accounts</span>
-                <div id="mail-filter-account-chips" class="mail-filter-chip-list"></div>
-              </div>
+            <div class="mail-filter-toggle-row" role="group" aria-label="Indexed mail filters">
+              <button id="btn-mail-filter-unread" class="chip chip-btn" type="button" aria-pressed="false">Unread</button>
+              <button id="btn-mail-filter-flagged" class="chip chip-btn" type="button" aria-pressed="false">Flagged</button>
+              <button id="btn-mail-filter-attachments" class="chip chip-btn" type="button" aria-pressed="false">Attachments</button>
             </div>
-            <div id="mail-filter-active-row" class="mail-filter-active-row hidden">
-              <div id="mail-filter-active-chips" class="mail-filter-chip-list"></div>
-              <button id="btn-mail-clear-filters" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear filters</button>
+            <div id="mail-filter-account-row" class="mail-filter-chip-row hidden">
+              <span class="mail-filter-row-label">Accounts</span>
+              <div id="mail-filter-account-chips" class="mail-filter-chip-list"></div>
             </div>
             <p id="mail-filter-live-hint" class="hint mail-filter-live-hint hidden">Advanced filters require indexed mail.</p>
           </div>
-          <div class="mail-commandbar-meta">
-            <label id="mail-account-switcher-wrap" class="mail-account-switcher hidden">
-              <span class="mail-account-switcher-label">Mailbox</span>
-              <select id="mail-account-switcher" aria-label="Select indexed mail account scope"></select>
-            </label>
-            <span id="mail-index-status" class="mail-index-status">Live mailbox</span>
-            <button id="btn-mail-save-search" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Save View</button>
-            <button id="btn-mail-delete-search" class="cmd-btn cmd-btn--dense cmd-btn--ghost hidden" type="button">Delete View</button>
+          <div id="mail-filter-active-row" class="mail-filter-active-row hidden">
+            <div id="mail-filter-active-chips" class="mail-filter-chip-list"></div>
+            <button id="btn-mail-clear-filters" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Clear filters</button>
           </div>
         </article>
-        <section id="mail-health-panel" class="panel mail-health-panel hidden" aria-label="Mail account health">
-          <button id="btn-mail-health-toggle" class="mail-health-toggle" type="button" aria-expanded="false" aria-controls="mail-health-body">
-            <span class="mail-health-toggle-copy">
-              <strong>Account Health</strong>
-              <span id="mail-health-toggle-summary" class="mail-health-toggle-summary">No accounts configured.</span>
-            </span>
-            <span id="mail-health-toggle-caret" class="mail-health-toggle-caret" aria-hidden="true">+</span>
-          </button>
-          <div id="mail-health-body" class="mail-health-body hidden">
-            <div id="mail-health-summary-strip" class="mail-health-summary-strip hidden"></div>
-            <div id="mail-health-list" class="mail-health-list"></div>
-          </div>
-        </section>
-        <div id="mail-junk-suggestion" class="panel mail-junk-suggestion hidden" aria-live="polite">
-          <div class="mail-junk-suggestion-copy">
-            <strong id="mail-junk-suggestion-title">Rule suggestion</strong>
-            <p id="mail-junk-suggestion-text" class="hint">Create a follow-up rule from this action.</p>
-          </div>
-          <div class="mail-junk-suggestion-actions">
-            <button id="btn-mail-junk-rule-primary" class="cmd-btn cmd-btn--dense" type="button">Block Sender</button>
-            <button id="btn-mail-junk-rule-secondary" class="cmd-btn cmd-btn--dense" type="button">Block Domain</button>
-            <button id="btn-mail-junk-activate-managed" class="cmd-btn cmd-btn--dense cmd-btn--primary hidden" type="button">Activate Despatch Rules</button>
-          </div>
-        </div>
 
         <div class="mail-layout">
           <aside id="mail-pane-mailboxes" class="panel mail-pane mail-pane--mailboxes" tabindex="-1">
@@ -841,6 +828,17 @@
           <section id="mail-pane-messages" class="panel mail-pane mail-pane--messages" tabindex="-1">
             <div class="pane-head">
               <button id="mail-back-to-mailboxes" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
+            </div>
+            <div id="mail-junk-suggestion" class="mail-junk-suggestion hidden" aria-live="polite">
+              <div class="mail-junk-suggestion-copy">
+                <strong id="mail-junk-suggestion-title">Rule suggestion</strong>
+                <p id="mail-junk-suggestion-text" class="hint">Create a follow-up rule from this action.</p>
+              </div>
+              <div class="mail-junk-suggestion-actions">
+                <button id="btn-mail-junk-rule-primary" class="cmd-btn cmd-btn--dense" type="button">Block Sender</button>
+                <button id="btn-mail-junk-rule-secondary" class="cmd-btn cmd-btn--dense" type="button">Block Domain</button>
+                <button id="btn-mail-junk-activate-managed" class="cmd-btn cmd-btn--dense cmd-btn--primary hidden" type="button">Activate Despatch Rules</button>
+              </div>
             </div>
             <ul id="messages" class="message-list" role="listbox" aria-label="Messages" tabindex="0"></ul>
           </section>
@@ -874,6 +872,14 @@
               <span class="reader-view-label">View:</span>
               <button id="btn-reader-view-html" class="cmd-btn cmd-btn--dense" type="button">HTML</button>
               <button id="btn-reader-view-plain" class="cmd-btn cmd-btn--dense" type="button">Plain</button>
+              <div id="reader-action-controls" class="reader-action-controls" role="group" aria-label="Current message actions">
+                <button id="btn-reader-flag" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Flag</button>
+                <button id="btn-reader-mark-seen" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Mark Read</button>
+                <button id="btn-reader-archive" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Archive</button>
+                <button id="btn-reader-spam" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Spam</button>
+                <button id="btn-reader-not-spam" class="cmd-btn cmd-btn--dense cmd-btn--ghost hidden" type="button">Not Spam</button>
+                <button id="btn-reader-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Trash</button>
+              </div>
               <details id="reader-inspect-menu" class="row-menu reader-inspect-menu">
                 <summary id="reader-inspect-summary" class="cmd-btn cmd-btn--dense cmd-btn--ghost reader-inspect-summary">Inspect</summary>
                 <div class="row-menu-body reader-inspect-menu-body">
@@ -924,54 +930,58 @@
                   </div>
                   <div id="contacts-people-list" class="settings-list"></div>
                 </div>
-                <form id="contact-form" class="contacts-form" novalidate>
-                  <div class="contacts-form-grid">
-                    <label class="mail-settings-field contacts-field contacts-field--full">
-                      <span>Display Name</span>
-                      <input id="contact-name" type="text" autocomplete="name" placeholder="Full name">
-                    </label>
+                <div class="contacts-detail-shell">
+                  <article id="contact-detail" class="settings-detail hidden"></article>
+                  <form id="contact-form" class="contacts-form hidden" novalidate>
+                    <div class="contacts-form-grid">
+                      <label class="mail-settings-field contacts-field contacts-field--full">
+                        <span>Display Name</span>
+                        <input id="contact-name" type="text" autocomplete="name" placeholder="Full name">
+                      </label>
 
-                    <div class="contacts-field contacts-field--full">
-                      <div class="contacts-field-head">
-                        <span>Nicknames</span>
-                        <button id="btn-contact-add-nickname" class="cmd-btn cmd-btn--dense" type="button">Add Nickname</button>
+                      <div class="contacts-field contacts-field--full">
+                        <div class="contacts-field-head">
+                          <span>Nicknames</span>
+                          <button id="btn-contact-add-nickname" class="cmd-btn cmd-btn--dense" type="button">Add Nickname</button>
+                        </div>
+                        <div id="contact-nicknames-list" class="contacts-repeat-list"></div>
                       </div>
-                      <div id="contact-nicknames-list" class="contacts-repeat-list"></div>
-                    </div>
 
-                    <div class="contacts-field contacts-field--full">
-                      <div class="contacts-field-head">
-                        <span>Email Addresses</span>
-                        <button id="btn-contact-add-email" class="cmd-btn cmd-btn--dense" type="button">Add Email</button>
+                      <div class="contacts-field contacts-field--full">
+                        <div class="contacts-field-head">
+                          <span>Email Addresses</span>
+                          <button id="btn-contact-add-email" class="cmd-btn cmd-btn--dense" type="button">Add Email</button>
+                        </div>
+                        <div id="contact-emails-list" class="contacts-repeat-list"></div>
                       </div>
-                      <div id="contact-emails-list" class="contacts-repeat-list"></div>
+
+                      <div class="contacts-field contacts-field--full">
+                        <span>Groups</span>
+                        <div id="contact-groups-list" class="contacts-checklist"></div>
+                      </div>
+
+                      <label class="mail-settings-field contacts-field contacts-field--full">
+                        <span>Notes</span>
+                        <textarea id="contact-notes" rows="4" placeholder="Notes, context, or reminders"></textarea>
+                      </label>
+
+                      <label class="mail-settings-field contacts-field">
+                        <span>Preferred Account</span>
+                        <select id="contact-preferred-account" autocomplete="off"></select>
+                      </label>
+
+                      <label class="mail-settings-field contacts-field">
+                        <span>Preferred Sender</span>
+                        <select id="contact-preferred-sender" autocomplete="off"></select>
+                      </label>
                     </div>
-
-                    <div class="contacts-field contacts-field--full">
-                      <span>Groups</span>
-                      <div id="contact-groups-list" class="contacts-checklist"></div>
+                    <div class="actions setting-actions">
+                      <button id="btn-contact-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Contact</button>
+                      <button id="btn-contact-cancel" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Cancel</button>
+                      <button id="btn-contact-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Contact</button>
                     </div>
-
-                    <label class="mail-settings-field contacts-field contacts-field--full">
-                      <span>Notes</span>
-                      <textarea id="contact-notes" rows="4" placeholder="Notes, context, or reminders"></textarea>
-                    </label>
-
-                    <label class="mail-settings-field contacts-field">
-                      <span>Preferred Account</span>
-                      <select id="contact-preferred-account" autocomplete="off"></select>
-                    </label>
-
-                    <label class="mail-settings-field contacts-field">
-                      <span>Preferred Sender</span>
-                      <select id="contact-preferred-sender" autocomplete="off"></select>
-                    </label>
-                  </div>
-                  <div class="actions setting-actions">
-                    <button id="btn-contact-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Contact</button>
-                    <button id="btn-contact-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Contact</button>
-                  </div>
-                </form>
+                  </form>
+                </div>
               </div>
             </section>
 
@@ -988,28 +998,32 @@
                   </div>
                   <div id="contacts-groups-list" class="settings-list"></div>
                 </div>
-                <form id="contact-group-form" class="contacts-form" novalidate>
-                  <div class="contacts-form-grid">
-                    <label class="mail-settings-field contacts-field contacts-field--full">
-                      <span>Name</span>
-                      <input id="contact-group-name" type="text" autocomplete="off" placeholder="Press list">
-                    </label>
+                <div class="contacts-detail-shell">
+                  <article id="contact-group-detail" class="settings-detail hidden"></article>
+                  <form id="contact-group-form" class="contacts-form hidden" novalidate>
+                    <div class="contacts-form-grid">
+                      <label class="mail-settings-field contacts-field contacts-field--full">
+                        <span>Name</span>
+                        <input id="contact-group-name" type="text" autocomplete="off" placeholder="Press list">
+                      </label>
 
-                    <label class="mail-settings-field contacts-field contacts-field--full">
-                      <span>Description</span>
-                      <textarea id="contact-group-description" rows="4" placeholder="Who this group is for"></textarea>
-                    </label>
+                      <label class="mail-settings-field contacts-field contacts-field--full">
+                        <span>Description</span>
+                        <textarea id="contact-group-description" rows="4" placeholder="Who this group is for"></textarea>
+                      </label>
 
-                    <div class="contacts-field contacts-field--full">
-                      <span>Members</span>
-                      <div id="contact-group-members-list" class="contacts-checklist"></div>
+                      <div class="contacts-field contacts-field--full">
+                        <span>Members</span>
+                        <div id="contact-group-members-list" class="contacts-checklist"></div>
+                      </div>
                     </div>
-                  </div>
-                  <div class="actions setting-actions">
-                    <button id="btn-contact-group-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Group</button>
-                    <button id="btn-contact-group-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Group</button>
-                  </div>
-                </form>
+                    <div class="actions setting-actions">
+                      <button id="btn-contact-group-save" class="cmd-btn cmd-btn--dense cmd-btn--primary" type="button">Save Group</button>
+                      <button id="btn-contact-group-cancel" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Cancel</button>
+                      <button id="btn-contact-group-delete" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Delete Group</button>
+                    </div>
+                  </form>
+                </div>
               </div>
             </section>
           </div>

@@ -211,6 +211,151 @@ func TestMailWorkersDeltaSyncRefreshesOnlyTouchedThreads(t *testing.T) {
 	}
 }
 
+func TestMailWorkersFullSyncProcessesConversationBatchesOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	st, _, account := newMailWorkerTestEnv(t)
+
+	oldBatchSize := mailSyncBatchSize
+	mailSyncBatchSize = 1
+	t.Cleanup(func() {
+		mailSyncBatchSize = oldBatchSize
+	})
+
+	fake := &fakeMailSyncClient{
+		snapshots: []mail.MailboxSnapshot{{
+			Mailbox:     mail.Mailbox{Name: "INBOX"},
+			UIDValidity: 1,
+			UIDNext:     4,
+		}},
+		recentUIDs: map[string][]uint32{
+			"INBOX": {3, 2, 1},
+		},
+		messages: map[string]map[uint32]mail.SyncMessage{
+			"INBOX": {
+				1: syncMessageWithMessageID("INBOX", 1, "Topic", "alice@example.com", "Root body", "<root@example.com>", "", nil),
+				2: syncMessageWithMessageID("INBOX", 2, "Re: Topic", "bob@example.com", "Parent reply", "<reply-1@example.com>", "<root@example.com>", nil),
+				3: syncMessageWithMessageID("INBOX", 3, "Re: Topic", "carol@example.com", "Child reply", "<reply-2@example.com>", "<reply-1@example.com>", nil),
+			},
+		},
+	}
+	worker := newTestMailWorker(st, fake, time.Now)
+
+	result, err := worker.syncAccount(ctx, account)
+	if err != nil {
+		t.Fatalf("syncAccount: %v", err)
+	}
+	if !result.fullRebuild {
+		t.Fatalf("expected initial full sync to mark full rebuild")
+	}
+
+	root, err := st.GetIndexedMessageByID(ctx, account.ID, mail.EncodeMessageID("INBOX", 1))
+	if err != nil {
+		t.Fatalf("load root message: %v", err)
+	}
+	parent, err := st.GetIndexedMessageByID(ctx, account.ID, mail.EncodeMessageID("INBOX", 2))
+	if err != nil {
+		t.Fatalf("load parent reply: %v", err)
+	}
+	child, err := st.GetIndexedMessageByID(ctx, account.ID, mail.EncodeMessageID("INBOX", 3))
+	if err != nil {
+		t.Fatalf("load child reply: %v", err)
+	}
+	if root.ThreadID == "" || parent.ThreadID == "" || child.ThreadID == "" {
+		t.Fatalf("expected populated thread ids, got root=%q parent=%q child=%q", root.ThreadID, parent.ThreadID, child.ThreadID)
+	}
+	if root.ThreadID != parent.ThreadID || parent.ThreadID != child.ThreadID {
+		t.Fatalf("expected one conversation across batch boundaries, got root=%q parent=%q child=%q", root.ThreadID, parent.ThreadID, child.ThreadID)
+	}
+
+	threads, total, err := st.ListThreads(ctx, account.ID, "", "", 10, 0)
+	if err != nil {
+		t.Fatalf("list threads: %v", err)
+	}
+	if total != 1 || len(threads) != 1 || threads[0].MessageCount != 3 {
+		t.Fatalf("expected one merged thread after full sync, got total=%d threads=%+v", total, threads)
+	}
+}
+
+func TestMailWorkersFullSyncRepairsCrossMailboxReplyChains(t *testing.T) {
+	ctx := context.Background()
+	st, _, account := newMailWorkerTestEnv(t)
+
+	fake := &fakeMailSyncClient{
+		snapshots: []mail.MailboxSnapshot{
+			{
+				Mailbox:     mail.Mailbox{Name: "Sent Messages", Role: "sent"},
+				UIDValidity: 1,
+				UIDNext:     2,
+			},
+			{
+				Mailbox:     mail.Mailbox{Name: "Projects"},
+				UIDValidity: 1,
+				UIDNext:     2,
+			},
+		},
+		recentUIDs: map[string][]uint32{
+			"Sent Messages": {1},
+			"Projects":      {1},
+		},
+		messages: map[string]map[uint32]mail.SyncMessage{
+			"Sent Messages": {
+				1: syncMessageWithMessageID("Sent Messages", 1, "Re: Topic", "user@example.com", "Sent child", "<sent-child@example.com>", "<projects-parent@example.com>", nil),
+			},
+			"Projects": {
+				1: syncMessageWithMessageID("Projects", 1, "Re: Topic", "alice@example.com", "Project parent", "<projects-parent@example.com>", "<root@example.com>", nil),
+			},
+		},
+	}
+	worker := newTestMailWorker(st, fake, time.Now)
+
+	if _, err := worker.syncAccount(ctx, account); err != nil {
+		t.Fatalf("syncAccount: %v", err)
+	}
+
+	sentChild, err := st.GetIndexedMessageByID(ctx, account.ID, mail.EncodeMessageID("Sent Messages", 1))
+	if err != nil {
+		t.Fatalf("load sent child: %v", err)
+	}
+	projectParent, err := st.GetIndexedMessageByID(ctx, account.ID, mail.EncodeMessageID("Projects", 1))
+	if err != nil {
+		t.Fatalf("load project parent: %v", err)
+	}
+	if sentChild.ThreadID == "" || projectParent.ThreadID == "" {
+		t.Fatalf(
+			"expected repaired cross-mailbox thread ids, got child=%q parent=%q child_msgid=%q child_inreply=%q child_refs=%q parent_msgid=%q parent_inreply=%q parent_refs=%q",
+			sentChild.ThreadID,
+			projectParent.ThreadID,
+			sentChild.MessageIDHeader,
+			sentChild.InReplyToHeader,
+			sentChild.ReferencesHeader,
+			projectParent.MessageIDHeader,
+			projectParent.InReplyToHeader,
+			projectParent.ReferencesHeader,
+		)
+	}
+	if sentChild.ThreadID != projectParent.ThreadID {
+		t.Fatalf(
+			"expected cross-mailbox repair to merge reply chain, got child=%q parent=%q child_msgid=%q child_inreply=%q child_refs=%q parent_msgid=%q parent_inreply=%q parent_refs=%q",
+			sentChild.ThreadID,
+			projectParent.ThreadID,
+			sentChild.MessageIDHeader,
+			sentChild.InReplyToHeader,
+			sentChild.ReferencesHeader,
+			projectParent.MessageIDHeader,
+			projectParent.InReplyToHeader,
+			projectParent.ReferencesHeader,
+		)
+	}
+
+	threads, total, err := st.ListThreads(ctx, account.ID, "", "", 10, 0)
+	if err != nil {
+		t.Fatalf("list threads: %v", err)
+	}
+	if total != 1 || len(threads) != 1 || threads[0].MessageCount != 2 {
+		t.Fatalf("expected one repaired cross-mailbox thread, got total=%d threads=%+v", total, threads)
+	}
+}
+
 func TestMailWorkersRefreshAccountQuotaWritesCache(t *testing.T) {
 	ctx := context.Background()
 	st, _, account := newMailWorkerTestEnv(t)
@@ -607,6 +752,10 @@ func syncMessage(mailbox string, uid uint32, subject, from, body string) mail.Sy
 }
 
 func syncMessageWithHeaders(mailbox string, uid uint32, subject, from, body, inReplyTo string, references []string) mail.SyncMessage {
+	return syncMessageWithMessageID(mailbox, uid, subject, from, body, "", inReplyTo, references)
+}
+
+func syncMessageWithMessageID(mailbox string, uid uint32, subject, from, body, messageID, inReplyTo string, references []string) mail.SyncMessage {
 	replyHeader := ""
 	if strings.TrimSpace(inReplyTo) != "" {
 		replyHeader = fmt.Sprintf("In-Reply-To: %s\r\n", inReplyTo)
@@ -615,12 +764,15 @@ func syncMessageWithHeaders(mailbox string, uid uint32, subject, from, body, inR
 	if len(references) > 0 {
 		refsHeader = fmt.Sprintf("References: %s\r\n", strings.Join(references, " "))
 	}
+	headerMessageID := strings.TrimSpace(messageID)
+	if headerMessageID == "" {
+		headerMessageID = fmt.Sprintf("<%s-%d@example.com>", strings.ToLower(strings.ReplaceAll(subject, " ", "-")), uid)
+	}
 	raw := fmt.Sprintf(
-		"From: %s\r\nTo: user@example.com\r\nSubject: %s\r\nDate: Tue, 10 Mar 2026 12:00:00 +0000\r\nMessage-ID: <%s-%d@example.com>\r\n%s%s\r\n%s",
+		"From: %s\r\nTo: user@example.com\r\nSubject: %s\r\nDate: Tue, 10 Mar 2026 12:00:00 +0000\r\nMessage-ID: %s\r\n%s%s\r\n%s",
 		from,
 		subject,
-		strings.ToLower(strings.ReplaceAll(subject, " ", "-")),
-		uid,
+		headerMessageID,
 		replyHeader,
 		refsHeader,
 		body,

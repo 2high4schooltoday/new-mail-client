@@ -244,6 +244,80 @@ func TestEnsureIndexedThreadHeadersRepairedRebuildsHistoricalThreads(t *testing.
 	}
 }
 
+func TestRepairIndexedThreadHeadersByAccountRecoversFromCorruptedReferences(t *testing.T) {
+	st := newV2ScopedStore(t)
+	ctx := context.Background()
+	user, err := st.CreateUser(ctx, "thread-corruption@example.com", "hash", "user", models.UserActive)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	createMailAccountForTest(t, st, user.ID, "acct-thread-corruption", "thread-corruption-login")
+
+	now := time.Now().UTC()
+	parentThreadID := mail.NormalizeIndexedThreadID("acct-thread-corruption", mail.DeriveIndexedThreadID("<projects-parent@example.com>", "<root@example.com>", nil, "Re: Topic", "alice@example.com"))
+	childThreadID := mail.NormalizeIndexedThreadID("acct-thread-corruption", mail.DeriveIndexedThreadID("<sent-child@example.com>", "<projects-parent@example.com>", []string{"-parent@example.com"}, "Re: Topic", "user@example.com"))
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO thread_index(
+			id,account_id,mailbox,subject_norm,participants_json,message_count,unread_count,has_attachments,has_flagged,importance,latest_message_id,latest_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		parentThreadID, "acct-thread-corruption", "Projects", "topic", "[]", 1, 0, 0, 0, 0, "msg-parent", now, now,
+	); err != nil {
+		t.Fatalf("insert parent thread: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO thread_index(
+			id,account_id,mailbox,subject_norm,participants_json,message_count,unread_count,has_attachments,has_flagged,importance,latest_message_id,latest_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		childThreadID, "acct-thread-corruption", "Sent Messages", "topic", "[]", 1, 0, 0, 0, 0, "msg-child", now.Add(time.Minute), now.Add(time.Minute), now.Add(time.Minute),
+	); err != nil {
+		t.Fatalf("insert child thread: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO message_index(
+			id,account_id,mailbox,uid,thread_id,message_id_header,in_reply_to_header,references_header,
+			from_value,to_value,cc_value,bcc_value,subject,snippet,body_text,body_html_sanitized,raw_source,
+			seen,flagged,answered,draft,has_attachments,importance,dkim_status,spf_status,dmarc_status,phishing_score,
+			remote_images_blocked,remote_images_allowed,date_header,internal_date,created_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"msg-parent", "acct-thread-corruption", "Projects", 1, parentThreadID, "projects-parent@example.com", "root@example.com", "root@example.com",
+		"Alice <alice@example.com>", "user@example.com", "", "", "Re: Topic", "Parent body", "Parent body", "", "",
+		0, 0, 0, 0, 0, 0, "unknown", "unknown", "unknown", 0.0,
+		1, 0, now, now, now, now,
+	); err != nil {
+		t.Fatalf("insert parent message: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO message_index(
+			id,account_id,mailbox,uid,thread_id,message_id_header,in_reply_to_header,references_header,
+			from_value,to_value,cc_value,bcc_value,subject,snippet,body_text,body_html_sanitized,raw_source,
+			seen,flagged,answered,draft,has_attachments,importance,dkim_status,spf_status,dmarc_status,phishing_score,
+			remote_images_blocked,remote_images_allowed,date_header,internal_date,created_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"msg-child", "acct-thread-corruption", "Sent Messages", 1, childThreadID, "sent-child@example.com", "projects-parent@example.com", "-parent@example.com",
+		"User <user@example.com>", "alice@example.com", "", "", "Re: Topic", "Child body", "Child body", "", "",
+		0, 0, 0, 0, 0, 0, "unknown", "unknown", "unknown", 0.0,
+		1, 0, now.Add(time.Minute), now.Add(time.Minute), now.Add(time.Minute), now.Add(time.Minute),
+	); err != nil {
+		t.Fatalf("insert child message: %v", err)
+	}
+
+	if err := st.RepairIndexedThreadHeadersByAccount(ctx, "acct-thread-corruption"); err != nil {
+		t.Fatalf("RepairIndexedThreadHeadersByAccount: %v", err)
+	}
+
+	parent, err := st.GetIndexedMessageByID(ctx, "acct-thread-corruption", "msg-parent")
+	if err != nil {
+		t.Fatalf("load parent: %v", err)
+	}
+	child, err := st.GetIndexedMessageByID(ctx, "acct-thread-corruption", "msg-child")
+	if err != nil {
+		t.Fatalf("load child: %v", err)
+	}
+	if parent.ThreadID == "" || child.ThreadID == "" || parent.ThreadID != child.ThreadID {
+		t.Fatalf("expected repair to merge corrupted references back into one thread, got parent=%q child=%q", parent.ThreadID, child.ThreadID)
+	}
+}
+
 func TestUpsertIndexedMessageScopesIDsPerAccount(t *testing.T) {
 	st := newV2ScopedStore(t)
 	ctx := context.Background()

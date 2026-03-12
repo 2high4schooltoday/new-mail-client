@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 	"time"
 
@@ -55,5 +56,28 @@ func TestBuildMessageSummaryUsesMessageHeadersForLiveThreading(t *testing.T) {
 	}
 	if root.ThreadID != reply.ThreadID {
 		t.Fatalf("expected references-based live threading to keep conversation together, got root=%q reply=%q", root.ThreadID, reply.ThreadID)
+	}
+}
+
+func TestParseRawMessageSeedsReferencesFromInReplyToWithoutCorruption(t *testing.T) {
+	raw := []byte(
+		"From: Bob <bob@example.com>\r\n" +
+			"To: user@example.com\r\n" +
+			"Subject: Re: Topic\r\n" +
+			"Message-ID: <reply@example.com>\r\n" +
+			"In-Reply-To: <projects-parent@example.com>\r\n" +
+			"\r\nBody",
+	)
+
+	msg, err := ParseRawMessage(raw, "INBOX", 1)
+	if err != nil {
+		t.Fatalf("ParseRawMessage: %v", err)
+	}
+	if msg.InReplyTo != "projects-parent@example.com" {
+		t.Fatalf("expected in-reply-to to be normalized, got %q", msg.InReplyTo)
+	}
+	expectedRefs := []string{"projects-parent@example.com"}
+	if !reflect.DeepEqual(msg.References, expectedRefs) {
+		t.Fatalf("expected references to be seeded from in-reply-to without corruption, got %#v", msg.References)
 	}
 }
