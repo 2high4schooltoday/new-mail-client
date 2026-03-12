@@ -555,6 +555,7 @@ const el = {
   btnSettingsMailRuleDelete: document.getElementById("btn-settings-mail-rule-delete"),
   btnSettingsMailScriptNew: document.getElementById("btn-settings-mail-script-new"),
   settingsMailScriptList: document.getElementById("settings-mail-script-list"),
+  settingsMailScriptPanel: document.getElementById("settings-mail-script-panel"),
   settingsMailScriptName: document.getElementById("settings-mail-script-name"),
   settingsMailScriptNote: document.getElementById("settings-mail-script-note"),
   settingsMailScriptBody: document.getElementById("settings-mail-script-body"),
@@ -5757,7 +5758,7 @@ function renderListItem(opts = {}) {
     markerClass = "",
     title = "",
     meta = "",
-    actionText = "View",
+    actionText = "",
     onSelect = null,
     onAction = null,
     leadingNode = null,
@@ -5800,11 +5801,12 @@ function renderListItem(opts = {}) {
   const resolvedAction = typeof onAction === "function"
     ? onAction
     : (canSelect ? onSelect : null);
-  if (String(actionText || "").trim()) {
+  const resolvedActionText = String(actionText || "").trim();
+  if (resolvedActionText) {
     const action = document.createElement("button");
     action.type = "button";
     action.className = "setting-list-action";
-    action.textContent = String(actionText || "View");
+    action.textContent = resolvedActionText;
     if (typeof resolvedAction === "function") {
       action.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -5814,6 +5816,8 @@ function renderListItem(opts = {}) {
       action.disabled = true;
     }
     row.appendChild(action);
+  } else {
+    row.classList.add("setting-list-item--no-action");
   }
   if (canSelect) {
     row.addEventListener("click", (event) => {
@@ -6333,12 +6337,12 @@ function renderContactsPeopleList() {
   } else {
     for (const item of items) {
       const contactID = String(item.id || "");
-      const nicknames = Array.isArray(item.nicknames) ? item.nicknames.join(", ") : "";
-      const groups = (Array.isArray(item.group_ids || item.groupIDs) ? (item.group_ids || item.groupIDs) : [])
-        .map((groupID) => state.contacts.groups.find((entry) => String(entry.id || "") === String(groupID || ""))?.name || "")
-        .filter(Boolean)
-        .join(", ");
-      const meta = [contactPrimaryEmail(item), nicknames, groups].filter(Boolean).join(" • ");
+      const primaryEmail = contactPrimaryEmail(item);
+      const groupCount = (Array.isArray(item.group_ids || item.groupIDs) ? (item.group_ids || item.groupIDs) : []).length;
+      const meta = [
+        primaryEmail,
+        groupCount > 0 ? `${groupCount} group${groupCount === 1 ? "" : "s"}` : "",
+      ].filter(Boolean).join(" • ");
       const row = renderListItem({
         active: contactID === state.contacts.detailId,
         markerClass: "status-chip status-chip--info",
@@ -6689,6 +6693,7 @@ function renderTrustedDevices(items) {
       markerText: item.is_current ? "Current" : "Trusted",
       title: String(item.display_label || item.device_label || "Trusted device"),
       meta: [lastUsed, expires].join(" • "),
+      actionText: "View",
       onSelect: () => {
         state.settings.devices.detailId = itemID;
         state.ui.settingsNav.page = "list";
@@ -6899,6 +6904,7 @@ function renderSessions(items) {
       markerText: item.is_current ? "Current" : String(item.auth_method || "password"),
       title: String(item.device_label || item.ua_summary || "Session"),
       meta: `Last seen ${formatDateTimeOrNA(item.last_seen_at)} • Expires ${formatDateTimeOrNA(item.expires_at)}`,
+      actionText: "View",
       onSelect: () => {
         state.settings.sessions.detailId = sessionID;
         state.ui.settingsNav.page = "list";
@@ -7234,6 +7240,9 @@ function fillMailScriptEditor(script = null) {
   const managedName = String(state.settings.mail.managedScriptName || "").trim();
   const isManaged = !!name && name === managedName;
   const isCustom = !!name && !isManaged;
+  if (el.settingsMailScriptPanel) {
+    el.settingsMailScriptPanel.classList.toggle("is-empty", !name);
+  }
   if (el.settingsMailScriptName) el.settingsMailScriptName.textContent = name || "Script";
   if (el.settingsMailScriptNote) {
     if (!name) {
@@ -7278,7 +7287,6 @@ function renderMailScriptList() {
       markerText: isManaged ? "Despatch Rules" : item?.is_active ? "Active" : "Script",
       title: name || "Script",
       meta: isManaged ? "Managed preview" : String(item?.source || "script"),
-      actionText: "Open",
       onSelect: () => {
         state.settings.mail.selectedScriptName = name;
         fillMailScriptEditor(item);
@@ -7793,7 +7801,9 @@ function renderMailSettingsAccountList() {
       markerClass: item.is_default ? "status-chip status-chip--ok" : "status-chip status-chip--info",
       markerText: item.is_default ? "Default" : "Account",
       title: String(item.display_name || item.displayName || item.login || "Mail account"),
-      meta: [String(item.login || "").trim(), String(item.smtp_host || item.smtpHost || "").trim()].filter(Boolean).join(" | "),
+      meta: [String(item.login || "").trim(), String(item.last_error || "").trim() ? "Needs attention" : formatMailIndexFreshness(item.last_sync_at)]
+        .filter(Boolean)
+        .join(" • "),
       onSelect: () => {
         state.settings.mail.selectedAccountID = accountID;
         state.settings.mail.accountEditorOpen = false;
@@ -7823,9 +7833,8 @@ function renderMailSettingsSenderList() {
     const isBuiltIn = !!(item.is_primary || item.kind === "primary");
     const meta = [];
     if (String(item.from_email || "").trim()) meta.push(String(item.from_email || "").trim());
-    if (String(item.account_label || "").trim()) meta.push(`Sends through ${String(item.account_label || "").trim()}`);
-    if (isBuiltIn) meta.push("Built-in sender");
-    if (String(item.status || "").trim() && String(item.status || "").trim() !== "ok") meta.push(String(item.status || "").trim());
+    if (String(item.account_label || "").trim()) meta.push(String(item.account_label || "").trim());
+    if (String(item.status || "").trim() && String(item.status || "").trim() !== "ok") meta.push("Needs attention");
     const row = renderListItem({
       active: senderID === state.settings.mail.selectedSenderID,
       markerClass: item.is_default ? "status-chip status-chip--ok" : "status-chip status-chip--info",
@@ -8389,6 +8398,7 @@ function renderPasskeyCredentials(items) {
       markerText: "Passkey",
       title: String(item.name || "Passkey"),
       meta: `Created ${formatDateTimeOrNA(item.created_at)} • Last used ${formatDateTimeOrNA(item.last_used_at)}`,
+      actionText: "View",
       onSelect: () => {
         state.settings.passkeys.detailId = passkeyID;
         state.ui.settingsNav.page = "list";
@@ -10578,6 +10588,7 @@ function renderMailHealthPanel() {
   syncMailHealthExpandedDefault();
   const items = visibleMailHealthItems();
   el.mailHealthPanel.classList.remove("hidden");
+  el.mailHealthPanel.classList.toggle("is-open", !!state.mail.healthExpanded);
   const summary = state.mail.accountHealth?.summary || {};
   const summaryText = items.length === 0
     ? "No accounts configured."
@@ -14539,6 +14550,7 @@ async function loadAdminFeatureFlags() {
         markerText: item.enabled ? "ON" : "OFF",
         title: String(item.name || item.id || "Feature flag"),
         meta: `${String(item.category || "General")} • ${item.editable ? "Editable" : "Read-only"}`,
+        actionText: "View",
         onSelect: () => {
           state.admin.featureFlags.detailId = String(item.id || "");
           state.ui.adminNav.page = "list";
@@ -16807,6 +16819,19 @@ function bindUI() {
       }
     };
   }
+
+  document.addEventListener("click", (event) => {
+    if (!state.mail.healthExpanded || !el.mailHealthPanel) return;
+    if (event.target && el.mailHealthPanel.contains(event.target)) return;
+    persistMailHealthExpanded(false);
+    renderMailHealthPanel();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.mail.healthExpanded) return;
+    persistMailHealthExpanded(false);
+    renderMailHealthPanel();
+  });
 
   if (el.btnMailDeleteSearch) {
     el.btnMailDeleteSearch.onclick = async () => {

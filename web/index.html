@@ -17,11 +17,8 @@
         <div class="topbar-row">
           <div class="topbar-branding">
             <div class="brand-mark" aria-hidden="true">Despatch</div>
-          <div class="workspace-copy">
-            <p class="workspace-kicker">Workspace</p>
             <h1 id="workspace-title" class="workspace-title">Account Access</h1>
           </div>
-        </div>
         <nav class="tabs" aria-label="Primary">
           <button id="tab-setup" class="tab" type="button">Setup</button>
           <button id="tab-auth" class="tab active" type="button">Auth</button>
@@ -31,7 +28,7 @@
         <div class="topbar-tools">
           <button id="tab-settings" class="tab topbar-utility" type="button">Settings</button>
           <button id="tab-admin" class="tab topbar-utility" type="button">Admin</button>
-          <button id="btn-theme" class="cmd-btn cmd-btn--dense theme-toggle" type="button" aria-label="Toggle theme">Theme: Machine</button>
+          <button id="btn-theme" class="cmd-btn cmd-btn--dense cmd-btn--ghost theme-toggle" type="button" aria-label="Toggle theme">Theme: Machine</button>
           <button id="btn-logout" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Sign Out</button>
         </div>
       </div>
@@ -167,14 +164,14 @@
             <section id="settings-section-mail" class="panel settings-section hidden">
               <header class="settings-page-head">
                 <h3>Mail</h3>
-                <p class="hint">Manage delivery accounts, senders, signatures, and default mail routing.</p>
+                <p class="hint">Accounts, senders, rules, and junk handling.</p>
               </header>
               <p id="settings-mail-note" class="hint">Mail settings are loading.</p>
 
               <section class="setting-section">
                 <header class="setting-section-head">
                   <h4>Accounts</h4>
-                  <p class="hint">SMTP/IMAP accounts, sync health, and which account sends by default.</p>
+                  <p class="hint">Transport, sync state, and the default delivery account.</p>
                 </header>
                 <div class="mail-settings-columns">
                   <div class="mail-settings-column">
@@ -199,7 +196,7 @@
                           <span>Password</span>
                           <input id="settings-mail-account-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password">
                         </label>
-                        <label class="mail-settings-field">
+                        <label class="mail-settings-field mail-settings-field--toggle">
                           <span>Default Account</span>
                           <input id="settings-mail-account-default" type="checkbox">
                         </label>
@@ -211,11 +208,11 @@
                           <span>IMAP Port</span>
                           <input id="settings-mail-account-imap-port" type="number" min="1" step="1" placeholder="993">
                         </label>
-                        <label class="mail-settings-field">
+                        <label class="mail-settings-field mail-settings-field--toggle">
                           <span>IMAP TLS</span>
                           <input id="settings-mail-account-imap-tls" type="checkbox" checked>
                         </label>
-                        <label class="mail-settings-field">
+                        <label class="mail-settings-field mail-settings-field--toggle">
                           <span>IMAP STARTTLS</span>
                           <input id="settings-mail-account-imap-starttls" type="checkbox">
                         </label>
@@ -227,11 +224,11 @@
                           <span>SMTP Port</span>
                           <input id="settings-mail-account-smtp-port" type="number" min="1" step="1" placeholder="587">
                         </label>
-                        <label class="mail-settings-field">
+                        <label class="mail-settings-field mail-settings-field--toggle">
                           <span>SMTP TLS</span>
                           <input id="settings-mail-account-smtp-tls" type="checkbox">
                         </label>
-                        <label class="mail-settings-field">
+                        <label class="mail-settings-field mail-settings-field--toggle">
                           <span>SMTP STARTTLS</span>
                           <input id="settings-mail-account-smtp-starttls" type="checkbox" checked>
                         </label>
@@ -249,7 +246,7 @@
               <section class="setting-section">
                 <header class="setting-section-head">
                   <h4>Senders</h4>
-                  <p class="hint">Choose the sender name, email, Reply-To, and signature recipients see.</p>
+                  <p class="hint">Visible sender name, email, Reply-To, and signature.</p>
                 </header>
                 <div class="mail-settings-columns">
                   <div class="mail-settings-column">
@@ -278,7 +275,7 @@
                           <span>Reply-To</span>
                           <input id="settings-mail-identity-reply-to" type="email" autocomplete="email" placeholder="reply-to@example.com">
                         </label>
-                        <label class="mail-settings-field">
+                        <label class="mail-settings-field mail-settings-field--toggle">
                           <span>Default Sender</span>
                           <input id="settings-mail-identity-default" type="checkbox">
                         </label>
@@ -309,7 +306,7 @@
               <section class="setting-section">
                 <header class="setting-section-head">
                   <h4>Rules & Junk</h4>
-                  <p class="hint">Build inbox rules per account and manage the active Sieve script without raw syntax unless you want it.</p>
+                  <p class="hint">Inbox rules and the active Sieve script for the selected account.</p>
                 </header>
                 <div class="mail-settings-form-grid">
                   <label class="mail-settings-field">
@@ -338,13 +335,13 @@
                     </div>
                     <div id="settings-mail-rule-list" class="settings-list"></div>
                   </div>
-                  <form id="settings-mail-rule-form" class="mail-settings-form" novalidate>
-                    <div class="mail-settings-form-grid">
+                  <form id="settings-mail-rule-form" class="mail-settings-form mail-settings-form--rules" novalidate>
+                    <div class="mail-settings-form-grid mail-settings-form-grid--rules">
                       <label class="mail-settings-field">
                         <span>Rule Name</span>
                         <input id="settings-mail-rule-name" type="text" autocomplete="off" placeholder="Move invoices to Finance">
                       </label>
-                      <label class="mail-settings-field">
+                      <label class="mail-settings-field mail-settings-field--toggle">
                         <span>Enabled</span>
                         <input id="settings-mail-rule-enabled" type="checkbox" checked>
                       </label>
@@ -388,7 +385,7 @@
                         <span>Mailbox</span>
                         <select id="settings-mail-rule-move-mailbox" autocomplete="off"></select>
                       </label>
-                      <label class="mail-settings-field">
+                      <label class="mail-settings-field mail-settings-field--toggle">
                         <span>Mark Read</span>
                         <input id="settings-mail-rule-mark-read" type="checkbox">
                       </label>
@@ -396,7 +393,7 @@
                         <span>Redirect</span>
                         <input id="settings-mail-rule-redirect" type="email" autocomplete="off" placeholder="team@example.com">
                       </label>
-                      <label class="mail-settings-field">
+                      <label class="mail-settings-field mail-settings-field--toggle">
                         <span>Stop Processing</span>
                         <input id="settings-mail-rule-stop" type="checkbox" checked>
                       </label>
@@ -414,7 +411,7 @@
                     </div>
                     <div id="settings-mail-script-list" class="settings-list"></div>
                   </div>
-                  <div class="mail-settings-form">
+                  <div class="mail-settings-form mail-settings-form--scripts" id="settings-mail-script-panel">
                     <div class="mail-rules-status-copy">
                       <strong id="settings-mail-script-name">Script</strong>
                       <p id="settings-mail-script-note" class="hint">Choose a script to preview or edit it.</p>
@@ -703,7 +700,7 @@
           <div>
             <p class="workspace-kicker">Mail</p>
             <h2>Mailbox</h2>
-            <p class="hint">Read, search, and act on messages with the current message kept visually dominant.</p>
+            <p class="hint">Read and act on mail with the message list and reader kept in balance.</p>
           </div>
           <div class="actions">
             <button id="mail-mobile-back" class="cmd-btn cmd-btn--dense mail-nav-back" type="button">Back</button>
@@ -723,11 +720,15 @@
                 <button id="btn-search" class="cmd-btn cmd-btn--dense" type="button">Search</button>
               </div>
             </div>
-            <div class="mail-toolbar-cluster mail-toolbar-cluster--context">
+          </div>
+          <div class="mail-toolbar-secondary">
+            <div class="mail-toolbar-cluster mail-toolbar-cluster--scope">
               <label id="mail-account-switcher-wrap" class="mail-account-switcher hidden">
                 <span class="mail-account-switcher-label">Scope</span>
                 <select id="mail-account-switcher" aria-label="Select indexed mail account scope"></select>
               </label>
+            </div>
+            <div class="mail-toolbar-cluster mail-toolbar-cluster--context">
               <div id="mail-health-panel" class="mail-health-panel hidden" aria-label="Mail account health">
                 <button id="btn-mail-health-toggle" class="mail-health-toggle" type="button" aria-expanded="false" aria-controls="mail-health-body">
                   <span class="mail-health-toggle-copy">
@@ -868,18 +869,10 @@
                 <ul id="thread-list" class="thread-list" role="listbox" aria-label="Conversation messages"></ul>
               </div>
             </div>
-            <div class="reader-view-controls" role="group" aria-label="Reader view mode">
+            <div class="reader-view-controls" role="group" aria-label="Reader tools">
               <span class="reader-view-label">View:</span>
               <button id="btn-reader-view-html" class="cmd-btn cmd-btn--dense" type="button">HTML</button>
               <button id="btn-reader-view-plain" class="cmd-btn cmd-btn--dense" type="button">Plain</button>
-              <div id="reader-action-controls" class="reader-action-controls" role="group" aria-label="Current message actions">
-                <button id="btn-reader-flag" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Flag</button>
-                <button id="btn-reader-mark-seen" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Mark Read</button>
-                <button id="btn-reader-archive" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Archive</button>
-                <button id="btn-reader-spam" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Spam</button>
-                <button id="btn-reader-not-spam" class="cmd-btn cmd-btn--dense cmd-btn--ghost hidden" type="button">Not Spam</button>
-                <button id="btn-reader-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Trash</button>
-              </div>
               <details id="reader-inspect-menu" class="row-menu reader-inspect-menu">
                 <summary id="reader-inspect-summary" class="cmd-btn cmd-btn--dense cmd-btn--ghost reader-inspect-summary">Inspect</summary>
                 <div class="row-menu-body reader-inspect-menu-body">
@@ -889,6 +882,14 @@
                   <button id="btn-reader-download-eml" class="menu-action-btn reader-inspect-action" type="button">Download .eml</button>
                 </div>
               </details>
+              <div id="reader-action-controls" class="reader-action-controls" role="group" aria-label="Current message actions">
+                <button id="btn-reader-flag" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Flag</button>
+                <button id="btn-reader-mark-seen" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Mark Read</button>
+                <button id="btn-reader-archive" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Archive</button>
+                <button id="btn-reader-spam" class="cmd-btn cmd-btn--dense cmd-btn--ghost" type="button">Spam</button>
+                <button id="btn-reader-not-spam" class="cmd-btn cmd-btn--dense cmd-btn--ghost hidden" type="button">Not Spam</button>
+                <button id="btn-reader-trash" class="cmd-btn cmd-btn--dense cmd-btn--danger" type="button">Trash</button>
+              </div>
             </div>
             <div class="reader-body-host">
               <div id="message-body-html-wrap" class="message-body-html-wrap hidden">
@@ -905,7 +906,7 @@
         <div class="contacts-layout">
           <aside class="panel contacts-nav">
             <h2>Contacts</h2>
-            <p class="hint">Global address book shared across all mail accounts.</p>
+            <p class="hint">Shared address book for every mail account.</p>
             <button id="contacts-nav-people" class="settings-nav-btn is-active" type="button">People</button>
             <button id="contacts-nav-groups" class="settings-nav-btn" type="button">Groups</button>
           </aside>
@@ -916,7 +917,7 @@
             <section id="contacts-section-people" class="panel contacts-section">
               <header class="settings-page-head">
                 <h3>People</h3>
-                <p class="hint">Manage names, nicknames, email addresses, and compose defaults.</p>
+                <p class="hint">Names, addresses, and compose hints.</p>
               </header>
               <div class="contacts-workbench">
                 <div class="contacts-column">
@@ -988,7 +989,7 @@
             <section id="contacts-section-groups" class="panel contacts-section hidden">
               <header class="settings-page-head">
                 <h3>Groups</h3>
-                <p class="hint">Build reusable lists that expand into visible recipients during compose.</p>
+                <p class="hint">Reusable recipient lists for compose.</p>
               </header>
               <div class="contacts-workbench">
                 <div class="contacts-column">
