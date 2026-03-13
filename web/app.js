@@ -2352,8 +2352,9 @@ function composeHTMLLooksLikeDocument(rawHTML) {
 function composePreviewBaseStyle() {
   return [
     ":root{color-scheme:light;}",
-    "html,body{margin:0;padding:0;background:#ffffff;color:#000000;}",
-    "body{padding:14px;font:16px/1.55 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;word-break:break-word;overflow-wrap:anywhere;-webkit-text-size-adjust:100%;}",
+    "html,body{margin:0;padding:0;background:#ffffff;color:#000000;font:16px/1.55 \"IBM Plex Mono\";}",
+    "body{padding:14px;word-break:break-word;overflow-wrap:anywhere;-webkit-text-size-adjust:100%;}",
+    "body,body *{font-family:\"IBM Plex Mono\" !important;}",
     "img,svg,video,canvas{max-width:100%;height:auto;}",
     "blockquote{margin:0 0 0 10px;padding-left:12px;border-left:2px solid #d5d5d5;}",
     "pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}",
@@ -2366,8 +2367,9 @@ function composePreviewCSP() {
     "default-src 'none'",
     "img-src data: blob: https: http:",
     "media-src data: blob: https: http:",
-    "style-src 'unsafe-inline'",
-    "font-src data: https: http:",
+    "style-src 'unsafe-inline' https://fonts.googleapis.com",
+    "style-src-elem 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src data: https://fonts.gstatic.com https: http:",
     "script-src 'none'",
     "connect-src 'none'",
     "object-src 'none'",
@@ -2377,10 +2379,15 @@ function composePreviewCSP() {
   ].join("; ");
 }
 
+function ibmPlexMonoFontHeadMarkup() {
+  return '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">';
+}
+
 function buildComposeHTMLPreviewSrcdoc(rawHTML) {
   const source = String(rawHTML || "");
   const csp = composePreviewCSP();
   const previewStyle = composePreviewBaseStyle();
+  const fontHead = ibmPlexMonoFontHeadMarkup();
   if (composeHTMLLooksLikeDocument(source)) {
     try {
       const parsed = new DOMParser().parseFromString(source, "text/html");
@@ -2388,6 +2395,7 @@ function buildComposeHTMLPreviewSrcdoc(rawHTML) {
         parsed.documentElement.insertBefore(parsed.createElement("head"), parsed.body || parsed.documentElement.firstChild);
       }
       const head = parsed.head || parsed.createElement("head");
+      head.insertAdjacentHTML("afterbegin", fontHead);
       const metaCharset = parsed.createElement("meta");
       metaCharset.setAttribute("charset", "utf-8");
       head.prepend(metaCharset);
@@ -2407,7 +2415,7 @@ function buildComposeHTMLPreviewSrcdoc(rawHTML) {
       // fall back to fragment wrapper below
     }
   }
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${previewStyle}</style></head><body>${source}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"><meta http-equiv="Content-Security-Policy" content="${csp}">${fontHead}<style>${previewStyle}</style></head><body>${source}</body></html>`;
 }
 
 function renderComposeHTMLPreview(raw = composeHTMLSourceValue()) {
@@ -14433,13 +14441,14 @@ function buildReaderPrintDocument(message) {
   const metaHTML = metaRows
     .map(([label, value]) => `<p><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</p>`)
     .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(subject)}</title><style>
-html,body{margin:0;padding:0;background:#fff;color:#000;font:14px/1.45 Georgia,"Times New Roman",serif;}
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(subject)}</title>${ibmPlexMonoFontHeadMarkup()}<style>
+html,body{margin:0;padding:0;background:#fff;color:#000;font:14px/1.45 "IBM Plex Mono";}
+body,body *{font-family:"IBM Plex Mono" !important;}
 main{padding:24px;}
-h1{font:700 22px/1.2 Georgia,"Times New Roman",serif;margin:0 0 16px;}
+h1{font:700 22px/1.2 "IBM Plex Mono";margin:0 0 16px;}
 .meta{margin:0 0 20px;padding:0 0 16px;border-bottom:1px solid #d0d0d0;}
 .meta p{margin:0 0 6px;}
-pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;}
+pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font:13px/1.5 "IBM Plex Mono";}
 img,svg,video,canvas{max-width:100%;height:auto;}
 blockquote{margin:0 0 0 8px;padding-left:10px;border-left:2px solid #d0d0d0;}
 </style></head><body><main><h1>${escapeHtml(subject)}</h1><section class="meta">${metaHTML}</section><section>${bodyHTML}</section></main></body></html>`;
@@ -14605,8 +14614,9 @@ function buildReaderHTMLSrcdoc(rawHTML) {
     "default-src 'none'",
     "img-src 'self' data: blob:",
     "media-src 'self' data: blob:",
-    "style-src 'unsafe-inline'",
-    "font-src data:",
+    "style-src 'unsafe-inline' https://fonts.googleapis.com",
+    "style-src-elem 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src data: https://fonts.gstatic.com",
     "script-src 'none'",
     "connect-src 'none'",
     "object-src 'none'",
@@ -14616,13 +14626,13 @@ function buildReaderHTMLSrcdoc(rawHTML) {
   ].join("; ");
   const baseStyle = [
     ":root{color-scheme:light;}",
-    "html,body{margin:0;padding:0;background:#ffffff;color:#000000;}",
+    "html,body{margin:0;padding:0;background:#ffffff;color:#000000;font:16px/1.55 \"IBM Plex Mono\";}",
     "body{padding:12px;word-break:break-word;overflow-wrap:anywhere;-webkit-text-size-adjust:100%;}",
     "img,svg,video,canvas{max-width:100%;height:auto;}",
     "blockquote{margin:0 0 0 8px;padding-left:10px;}",
     "pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}",
   ].join("");
-  return `<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light\"><meta http-equiv=\"Content-Security-Policy\" content=\"${csp}\"><style>${baseStyle}</style></head><body>${bodyHTML}</body></html>`;
+  return `<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light\"><meta http-equiv=\"Content-Security-Policy\" content=\"${csp}\">${ibmPlexMonoFontHeadMarkup()}<style>${baseStyle}</style></head><body>${bodyHTML}</body></html>`;
 }
 
 function clearReaderHTMLSizingObservers() {

@@ -5,6 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 STYLE_FILE="web/styles.css"
+FONT_FILES=(
+  "web/styles.css"
+  "web/app.js"
+  "web/index.html"
+  "web/oobe-mockup.html"
+)
+FONT_VIOLATION_PATTERN='(^|[^[:alnum:]_])(Inter|Georgia|Helvetica|Arial|ui-sans-serif|ui-monospace|SFMono-Regular|Menlo|Monaco|Consolas|sans-serif|serif)([^[:alnum:]_]|$)|Times New Roman|Segoe UI|Liberation Mono|Courier New'
 
 if [[ ! -f "$STYLE_FILE" ]]; then
   echo "Missing $STYLE_FILE"
@@ -50,6 +57,19 @@ if grep -Ein "linear-gradient|radial-gradient|conic-gradient" "$STYLE_FILE" >/de
   grep -Ein "linear-gradient|radial-gradient|conic-gradient" "$STYLE_FILE" | sed 's/^/  /'
   failed=1
 fi
+
+for file in "${FONT_FILES[@]}"; do
+  if [[ ! -f "$file" ]]; then
+    echo "Missing $file"
+    failed=1
+    continue
+  fi
+  if grep -Ein "$FONT_VIOLATION_PATTERN" "$file" >/dev/null; then
+    echo "UI contract violation: only IBM Plex Mono may be declared in $file"
+    grep -Ein "$FONT_VIOLATION_PATTERN" "$file" | sed 's/^/  /'
+    failed=1
+  fi
+done
 
 if [[ "$failed" -ne 0 ]]; then
   exit 1

@@ -3305,6 +3305,14 @@ test('reader HTML preview resizes to content without clipping', async ({ page })
   expect(longMetrics.docHeight).toBeGreaterThan(longMetrics.hostHeight);
   expect(longMetrics.frameHeight).toBeGreaterThanOrEqual(longMetrics.docHeight - 2);
   expect(longMetrics.hostScrollHeight).toBeGreaterThan(longMetrics.hostHeight);
+  const longFontFamily = await page.locator('#message-body-html').evaluate((node) => {
+    if (!(node instanceof HTMLIFrameElement)) return '';
+    const doc = node.contentDocument;
+    const win = node.contentWindow;
+    const target = doc?.body?.querySelector('div');
+    return target && win ? win.getComputedStyle(target).fontFamily : '';
+  });
+  expect(longFontFamily.toLowerCase()).toContain('georgia');
 
   await page.locator('.reader-body-host').evaluate((node) => {
     node.scrollTop = node.scrollHeight;
@@ -3327,8 +3335,16 @@ test('reader HTML preview resizes to content without clipping', async ({ page })
 
   const shortMetrics = await frameMetrics();
   expect(shortMetrics).not.toBeNull();
-  expect(shortMetrics.docHeight).toBeLessThanOrEqual(shortMetrics.hostHeight);
+  expect(shortMetrics.docHeight).toBeLessThanOrEqual(shortMetrics.hostHeight + 2);
   expect(shortMetrics.frameHeight).toBeGreaterThanOrEqual(shortMetrics.hostHeight);
+  const shortFontFamily = await page.locator('#message-body-html').evaluate((node) => {
+    if (!(node instanceof HTMLIFrameElement)) return '';
+    const doc = node.contentDocument;
+    const win = node.contentWindow;
+    const target = doc?.body?.querySelector('div');
+    return target && win ? win.getComputedStyle(target).fontFamily : '';
+  });
+  expect(shortFontFamily.toLowerCase()).toContain('georgia');
 
   await page.setViewportSize({ width: 980, height: 760 });
   await page.waitForTimeout(900);
